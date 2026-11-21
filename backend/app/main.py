@@ -10,7 +10,7 @@
 
 import logging
 import os
-from typing import Literal, Optional
+from typing import List, Literal, Optional
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -18,6 +18,7 @@ from pydantic import BaseModel
 
 from . import engine
 from .contracts import Label, Timetable, Wish, dump
+from .nlp import assistant
 from .store import MAX_ROUND, store
 
 log = logging.getLogger("uvicorn.error")
@@ -64,6 +65,17 @@ class DecideIn(BaseModel):
     action: Literal["confirm", "edit", "keep"]
     reason: Optional[str] = None
     choice: Optional[Label] = None   # edit일 때 조교가 고른 안
+
+
+class AssistantIn(BaseModel):
+    text: str
+    history: List[dict] = []         # [{"role": "user"|"assistant", "text": "...", "section_id": 선택}]
+    method: Literal["keyword", "llm"] = "keyword"
+
+
+class ApplyIn(BaseModel):
+    proposal_id: str
+    reason: Optional[str] = None
 
 
 # ---------- 도우미 ----------
@@ -307,19 +319,52 @@ def post_finalize():
 @app.post("/reset")
 def post_reset():
     store.reset()
+    assistant.clear_proposals()
     return {"stage": store.stage}
 
 
-# ---------- 다음 단계에서 구현 ----------
+# ---------- AI 도우미 ----------
 
 @app.post("/assistant")
-def post_assistant():
-    raise HTTPException(status_code=501, detail="AI 도우미는 다음 단계에서 구현합니다.")
+def post_assistant(body: AssistantIn):
+    """조교 질문 → 의도·정보 → 배정 함수 호출 → 설명. move는 제안만 만들고 반영하지 않는다."""
+    try:
+        cmd = assistant.read_question(body.text, body.history, store, method=body.method)
+    except NotImplementedError:
+        raise HTTPException(status_code=501, detail="언어 모델(llm) 도우미는 다음 단계에서 구현합니다. method=keyword를 쓰세요.")
+    out = assistant.run_assistant(cmd, store)
+    return {"command": dump(cmd), "section_id": cmd.section_id, **out}
 
 
 @app.post("/assistant/apply")
-def post_assistant_apply():
-    raise HTTPException(status_code=501, detail="AI 도우미 적용은 다음 단계에서 구현합니다.")
+def post_assistant_apply(body: ApplyIn):
+    """도우미 제안(move)을 반영한다. 사유 필수. 수정 기록에 남긴다."""
+    if not (body.reason and body.reason.strip()):
+        raise HTTPException(status_code=422, detail="적용하려면 사유(reason)를 적어야 합니다.")
+    prop = assistant.get_proposal(body.proposal_id)
+    if prop is None:
+        raise HTTPException(status_code=404, detail=f"제안이 없습니다: {body.proposal_id}")
+    if store.stage == "FINAL":
+        raise _conflict("시간표가 확정(FINAL)되어 적용할 수 없습니다.")
+    if store.timetable is None:
+        raise _conflict("아직 초안이 없습니다.")
+    if assistant.timetable_key(store.timetable) != prop["base"]:
+        assistant.pop_proposal(body.proposal_id)
+        raise _conflict("제안을 만든 뒤 시간표가 바뀌었습니다. 도우미에게 다시 물어봐 주세요.")
+
+    sid, alt = prop["section_id"], prop["alternative"]
+    tt = _normalize(engine.reassign(store.timetable, sid, alt))
+    tt.status = store.timetable.status
+    store.set_timetable(tt)
+    rec = store.add_decision(sid, "assistant_move", body.reason.strip(), dump(alt))
+    item = store.get_coord(sid)
+    if item is not None and item["state"] not in ("RESOLVED",):
+        store.update_coord(sid, state="RESOLVED")   # 조교가 직접 옮겼으므로 이 분반 조율은 끝
+    assistant.pop_proposal(body.proposal_id)
+    return {"decision": rec, "summary": prop["summary"], "violations": len(engine.check_rules(tt))}
+
+
+# ---------- 다음 단계에서 구현 ----------
 
 
 @app.get("/export.xlsx")

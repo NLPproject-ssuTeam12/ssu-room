@@ -51,7 +51,9 @@ COLLECT ──POST /draft──▶ DRAFT ──POST /rounds/next──▶ ROUND 
 | `POST /rounds/next` | | ✓ (→1차) | ✓ (1·2차만) | |
 | `POST /finalize` | | ✓ | ✓ | |
 | `POST /reset` | ✓ | ✓ | ✓ | ✓ |
-| `POST /assistant` `/assistant/apply`, `GET /export.xlsx` | 501 (다음 단계) | | | |
+| `POST /assistant` | ✓ | ✓ | ✓ | ✓ |
+| `POST /assistant/apply` | | ✓ | ✓ | |
+| `GET /export.xlsx` | 501 (다음 단계) | | | |
 
 `GET /coord`는 COLLECT에서 빈 목록 `[]`이다.
 
@@ -113,6 +115,8 @@ fetch(`http://localhost:8000/coord/${encodeURIComponent(sectionId)}/message`, { 
 | `POST /coord/{id}/decide` | `reassign`, `check_rules` (문하윤) |
 | `POST /rounds/next` (2·3차) | `make_alternatives` (문하윤) |
 | `POST /finalize` | `check_rules` (문하윤) |
+| `POST /assistant` (what_if·move) | `what_if` (문하윤). 질문 해석은 키워드 기준선(진짜, 김대원) |
+| `POST /assistant/apply` | `reassign`, `check_rules` (문하윤) |
 
 진짜/가짜 확인: `GET /health` 의 `engine`. 값이 `"stub"`이면 가짜, `"real (모듈 이름)"`이면 진짜다.
 진짜 모듈이 있는데 불러오다 실패하면 가짜로 돌고 `load_warnings`에 `"parse_reply 함수: 진짜 모듈 불러오기 실패 → 가짜 사용 (이유)"`가 생긴다.
@@ -121,6 +125,7 @@ fetch(`http://localhost:8000/coord/${encodeURIComponent(sectionId)}/message`, { 
 - 조율 이유 문장 끝에 `(가짜 값)`이 붙는다.
 - 대안 A·B·C는 같은 강의실을 쓰는 다른 분반과의 겹침만 피한다. 교수·학년 겹침은 안 본다.
 - 답장 해석은 `method`와 상관없이 간단한 키워드로 읽는다.
+- 가짜 `what_if`는 옮기는 분반의 **첫 번째 수업만** 옮겨 보고 위반을 센다(강의실 겹침만). 그래서 미리 보기 위반 수와 실제 적용 뒤 위반 수가 다를 수 있다.
 
 ---
 
@@ -468,11 +473,173 @@ STUB: `parse_reply`·`match_conditions`(최재성).
 { "stage": "COLLECT" }
 ```
 
+### `POST /assistant`
+조교 질문을 읽고(의도·정보) 배정 함수를 불러 설명한다. 모든 단계.
+**시간표는 바꾸지 않는다.** 옮기기(move)는 제안만 만들고, `/assistant/apply`를 불러야 반영된다.
+질문 해석은 키워드 기준선(`backend/app/nlp/assistant.py`). 미리 보기·옮기기는 STUB `what_if`(문하윤).
+
+요청:
+```json
+{
+  "text": "확통 월수 10시 반으로 옮겨줘",
+  "history": [
+    { "role": "user", "text": "자료구조 언제야?" },
+    { "role": "assistant", "text": "자료구조 02분반 지금 배정: …", "section_id": "2150163202" }
+  ],
+  "method": "keyword"
+}
+```
+- `history`: 앞 대화. 빼도 된다. **응답의 `section_id`를 assistant 항목에 넣어 보내면** "그 강의", "아까 그거", "그거"를 그 분반으로 읽는다.
+- `method`: `keyword`(기본). `llm`은 다음 단계 → 501.
+
+응답 공통 모양:
+| 키 | 뜻 |
+|---|---|
+| `command` | 읽은 의도·정보. `intent`, `section_id`, `professor`, `day`, `days`, `start`, `room`, `building`, `ask_back` |
+| `section_id` | 이 질문의 분반 (없으면 `null`). history에 넣는다 |
+| `answer` | 화면에 보여 줄 문장 |
+| `changes` | 표로 보여 줄 줄 `[{section_id, name, before, after, note}]` |
+| `proposal_id` | move 제안 id. 있으면 [적용] 버튼을 보인다 |
+| `needs_apply` | `true`면 아직 반영 안 됨. [적용]을 눌러야 함 |
+
+의도(`command.intent`):
+| 값 | 이런 말 | 하는 일 |
+|---|---|---|
+| `explain` | 왜, 이유, 어째서, 밀렸어, 언제야, 어디서 | 지금 배정, 희망 칸과 맞는지, 조율 중이면 밀린 이유 |
+| `status` | 현황, 남은, 몇 개, 어디까지, 진행 | 단계·차수, 조율 중·답장 기다림·MANUAL 수 |
+| `what_if` | 옮기면, 바꾸면, 비우면, 못 쓰면, ~면 어때, 될까, `?`로 끝남 | `what_if` 미리 보기. 반영 안 함 |
+| `move` | 옮겨줘, 바꿔줘, 넣어줘 | 미리 보기 + 제안 저장 (`proposal_id`) |
+| `out_of_scope` | 그 밖 | `시간표 편성·조율 관련 질문만 도울 수 있어요.` |
+
+읽는 정보:
+- 분반: 과목명(띄어쓰기 달라도 됨, 앞부분 일부도 됨), 줄임말 몇 개(운체, 자구, 확통, 웹프, 컴네 …), 분반 번호(`02`, `2분반` = 과목 코드 끝 두 자리), `재수강`, 과목 코드 10자리, 교수 가명(`교수07`).
+- 요일: `월`, `월요일`, `월·수`, `월수`. 시각: `13:30`, `13시 반`, `1시 반`(1~7시는 오후), `오전/오후/저녁` → 가장 가까운 시작 칸. (`오후`만 쓰면 13:30, `저녁`은 18:00)
+- 강의실: `21303`, `정보과학관 21303`. 건물만(`정보관`, `문화관` …) 말하면 `building`.
+- 모자라면 `command.ask_back`에 되물을 말이 들어가고, `answer`도 그 문장이다. (예: 분반이 여러 개, 옮길 곳이 없음)
+
+**explain** — `디지털시스템입문 재수강 분반 왜 밀렸어?`
+```json
+{
+  "command": { "intent": "explain", "section_id": "2150164203-(공통-재수강)", "days": [], "start": null, "ask_back": null, "…": "…" },
+  "section_id": "2150164203-(공통-재수강)",
+  "answer": "디지털시스템입문 03분반 (공통-재수강) 지금 배정: 화 18:00~19:15 / 목 18:00~19:15 · 문화관 03407. 모두 교수 희망 칸 안이에요. 조율 중이에요 (메시지 보내기 전). 밀린 이유: 희망 칸 화-19:30의 문화관 03407을(를) '오픈소스기초설계' 분반이 쓰고 있음 (가짜 값)",
+  "proposal_id": null, "changes": [], "needs_apply": false
+}
+```
+MANUAL 분반이면 `…은(는) 조교 직접 배정 분반이에요(수업 모양이 주 2회·주 1회 연강이 아님). …`
+
+**status** — `지금 현황 알려줘`
+```json
+{
+  "command": { "intent": "status", "…": "…" },
+  "answer": "지금은 조율 1차 단계예요. 조율 중 분반 3개 (메시지 전 3, 답장 기다림 0, 처리안 확인 기다림 0), 반영 끝 0개. 조교 직접 배정(MANUAL) 12개.",
+  "changes": [
+    { "section_id": "2150164203-(공통-재수강)", "name": "디지털시스템입문 03분반 (공통-재수강)", "before": null, "after": null, "note": "OPEN" }
+  ],
+  "proposal_id": null, "needs_apply": false
+}
+```
+- status의 `changes`는 조율 중 분반 목록이다. `note` = 조율 `state`.
+
+**what_if** — `확통을 월·수 13:30으로 옮기면 어때?`
+```json
+{
+  "command": { "intent": "what_if", "section_id": "2150163102", "day": "월", "days": ["월", "수"], "start": "13:30", "…": "…" },
+  "section_id": "2150163102",
+  "answer": "확률및통계 02분반을(를) 월 13:30~14:45 / 수 13:30~14:45 · 정보과학관 21501(으)로 옮기면 같이 바뀌어야 하는 다른 분반 1개, 규칙 위반 1건이에요. (미리 보기만 했어요. 옮기려면 '옮겨줘'라고 말해 주세요.)",
+  "changes": [
+    { "section_id": "2150163102", "name": "확률및통계 02분반",
+      "before": "월 12:00~13:15 / 화 12:00~13:15 · 정보과학관 21501",
+      "after": "월 13:30~14:45 / 수 13:30~14:45 · 정보과학관 21501", "note": "옮김" },
+    { "section_id": "2150134101", "name": "운영체제 01분반",
+      "before": "월 13:30~16:15 · 정보과학관 21501", "after": "겹침 → 다시 배정 필요", "note": "영향 받음" }
+  ],
+  "proposal_id": null, "needs_apply": false
+}
+```
+- 분반 없이도 된다: `수요일 15시를 비우면?`(그 시간 비우기), `21303 못 쓰면 어떻게 돼?`(강의실 못 씀). `changes`에 영향 받는 분반이 `note: "영향 받음"`으로 나온다.
+
+**move** — `확통 월수 10시 반으로 옮겨줘`
+```json
+{
+  "command": { "intent": "move", "section_id": "2150163102", "days": ["월", "수"], "start": "10:30", "…": "…" },
+  "section_id": "2150163102",
+  "answer": "확률및통계 02분반을(를) 월 10:30~11:45 / 수 10:30~11:45 · 정보과학관 21501(으)로 옮기면 같이 바뀌어야 하는 다른 분반 0개, 규칙 위반 0건이에요. 아직 반영하지 않았어요. [적용]을 누르고 사유를 적으면 반영돼요.",
+  "proposal_id": "1f30c8a9a57a",
+  "changes": [
+    { "section_id": "2150163102", "name": "확률및통계 02분반",
+      "before": "월 12:00~13:15 / 화 12:00~13:15 · 정보과학관 21501",
+      "after": "월 10:30~11:45 / 수 10:30~11:45 · 정보과학관 21501", "note": "옮김" }
+  ],
+  "needs_apply": true
+}
+```
+- 제안을 만들지 않는 경우(`proposal_id: null`): MANUAL 분반, 초안 전, FINAL 뒤(`시간표가 이미 확정됐어요…`), 이미 그 자리, 되묻기.
+- 주 2회 분반에 요일을 하나만 말하면 어느 수업인지 되묻는다. 주 1회 연강 분반에 요일 두 개를 말하면 하나만 달라고 되묻는다.
+
+**out_of_scope** — `점심 뭐 먹지?`
+```json
+{ "command": { "intent": "out_of_scope", "…": "…" }, "answer": "시간표 편성·조율 관련 질문만 도울 수 있어요.",
+  "proposal_id": null, "changes": [], "needs_apply": false }
+```
+
+**되묻기** — `알고리즘 왜 밀렸어?`
+```json
+{
+  "command": { "intent": "explain", "section_id": null,
+               "ask_back": "알고리즘은(는) 분반이 5개예요. 몇 분반인가요? (04분반 (공통-재수강)(교수02, 2150163304), 01분반(교수27, 2150163301), 02분반(교수27, 2150163302), 03분반(교수02, 2150163303), 01분반(교수32, 2150131601))" },
+  "answer": "알고리즘은(는) 분반이 5개예요. 몇 분반인가요? (…)",
+  "proposal_id": null, "changes": [], "needs_apply": false
+}
+```
+- 같은 과목에 번호가 같은 분반이 있을 수 있다(알고리즘 01분반 2개). 그때는 교수 가명이나 과목 코드로 답하면 된다.
+
+에러:
+| 코드 | 언제 | detail |
+|---|---|---|
+| 501 | `method: "llm"` | `언어 모델(llm) 도우미는 다음 단계에서 구현합니다. method=keyword를 쓰세요.` |
+| 422 | `text` 없음 | Pydantic 목록 |
+
+### `POST /assistant/apply`
+도우미 move 제안을 반영한다. **조교가 [적용]을 누르고 사유를 적었을 때만.** DRAFT·ROUND.
+STUB: `reassign`·`check_rules`(문하윤).
+
+요청:
+```json
+{ "proposal_id": "1f30c8a9a57a", "reason": "교수님 전화 요청" }
+```
+
+응답 200:
+```json
+{
+  "decision": {
+    "section_id": "2150163102",
+    "round_no": 1,
+    "action": "assistant_move",
+    "reason": "교수님 전화 요청",
+    "applied": { "label": "A", "blocks": [ { "day": "월", "start": "10:30", "slots": 1 }, { "day": "수", "start": "10:30", "slots": 1 } ],
+                 "room": "정보과학관 21501" },
+    "at": "2026-11-21T17:53:31"
+  },
+  "summary": "확률및통계 02분반: 월 12:00~13:15 / 화 12:00~13:15 · 정보과학관 21501 → 월 10:30~11:45 / 수 10:30~11:45 · 정보과학관 21501",
+  "violations": 0
+}
+```
+- 수정 기록(조교 결정 기록)에 `action: "assistant_move"`와 사유가 남는다.
+- 그 분반이 조율 목록에 있었으면 조율 `state`가 `RESOLVED`가 된다(조교가 직접 옮김).
+- 제안은 한 번만 쓸 수 있다. `/reset` 하면 제안이 모두 사라진다.
+
+에러:
+| 코드 | 언제 | detail |
+|---|---|---|
+| 422 | 사유 없음·빈칸 | `적용하려면 사유(reason)를 적어야 합니다.` |
+| 404 | 없는 제안, 이미 쓴 제안 | `제안이 없습니다: 1f30c8a9a57a` |
+| 409 | FINAL | `시간표가 확정(FINAL)되어 적용할 수 없습니다.` |
+| 409 | 제안 뒤 시간표가 바뀜(다른 결정·적용) | `제안을 만든 뒤 시간표가 바뀌었습니다. 도우미에게 다시 물어봐 주세요.` |
+
 ### 다음 단계에서 구현 (지금은 501)
 | 엔드포인트 | 하는 일 | 지금 응답 |
 |---|---|---|
-| `POST /assistant` | AI 도우미 질문 → 설명 + 변경 표 | 501 `AI 도우미는 다음 단계에서 구현합니다.` |
-| `POST /assistant/apply` | 도우미 변경 적용 (조교 [적용]) | 501 `AI 도우미 적용은 다음 단계에서 구현합니다.` |
 | `GET /export.xlsx` | 엑셀 내보내기 | 501 `엑셀 내보내기는 다음 단계에서 구현합니다.` |
 
 ---
@@ -491,6 +658,9 @@ POST /coord/{id}/reply             (교수 답장)
 POST /coord/{id}/decide            (조교 [확인]/[수정]/[현재대로 유지])
 POST /rounds/next                  → 2차, 3차 (남은 분반만 다시)
 POST /finalize
+
+(언제든) POST /assistant           (조교 질문. move면 proposal_id가 옴)
+         POST /assistant/apply     ([적용] + 사유. FINAL 전까지)
 ```
 
 이 흐름은 `backend/tests/test_api.py`의 `test_full_flow`가 그대로 검사한다.
