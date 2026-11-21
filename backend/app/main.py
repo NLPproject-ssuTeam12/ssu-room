@@ -41,6 +41,14 @@ def _log_sources() -> None:
     log.info("engine 함수: 진짜 %d개, 가짜 %d개", len(real), len(src) - len(real))
     for name, s in src.items():
         log.info("  %-18s %s", name, s)
+    engine_warnings = engine.load_warnings()
+    if engine_warnings:
+        bar = "!" * 72
+        log.warning(bar)
+        log.warning("!! 진짜 모듈이 있는데 불러오지 못해 가짜 함수를 쓰고 있습니다 (%d개)", len(engine_warnings))
+        for w in engine_warnings:
+            log.warning("!! %s", w)
+        log.warning(bar)
     for w in store.load_warnings:
         log.warning("데이터 읽기: %s", w)
 
@@ -117,7 +125,7 @@ def health():
         "stage": store.stage,
         "round_no": store.round_no,
         "engine": engine.sources(),
-        "load_warnings": store.load_warnings,
+        "load_warnings": engine.load_warnings() + store.load_warnings,
     }
 
 
