@@ -257,7 +257,10 @@ class Store:
     def add_reply(self, sid: str, text: str, choice: Optional[str], method: str, parsed: ReplyParse,
                   proposal: Proposal, unavailable: List[str]) -> dict:
         rec = {"section_id": sid, "round_no": self.round_no, "text": text, "choice": choice, "method": method,
-               "parse": dump(parsed), "proposal": dump(proposal), "unavailable": unavailable, "at": _now()}
+               "parse": dump(parsed), "proposal": dump(proposal),
+               # 교수 요청(조교 확인용). 화면에 처리안과 함께 보여 줄 뿐, 배정·다음 차수 조건에는 쓰지 않는다
+               "note": getattr(parsed, "note", ""),
+               "unavailable": unavailable, "at": _now()}
         self.replies.append(rec)
         return rec
 

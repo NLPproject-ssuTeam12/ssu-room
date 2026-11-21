@@ -444,7 +444,7 @@ def test_reply_choice_none_then_confirm_next(client):
     inp = store.message_input(sid)
     assert inp.round == 2
     cond = prop["conditions"]
-    if cond["days"] or cond["window"] or cond["end_before"]:     # 가짜 parse_reply는 요일을 안 뽑을 수 있다
+    if cond["days"] or cond["slots"] or cond["end_before"]:     # 가짜 parse_reply는 요일을 안 뽑을 수 있다
         assert inp.prev_conditions is not None and inp.prev_conditions.days == cond["days"]
     assert store.get_coord(sid)["prev_conditions"] is not None
 
@@ -479,5 +479,55 @@ def test_conditions_shape_and_end_before(client):
     sid = _sent_section(client)
     r = client.post(f"/coord/{enc(sid)}/reply", json={"text": REPLY})
     k = r.json()["parse"]["conditions"]
-    assert set(k) == {"days", "window", "end_before"}
+    assert set(k) == {"days", "slots", "end_before"}
     assert {"day": 2, "time": "17:00"} in k["end_before"]      # 수요일 = 2
+
+
+def test_reply_note_shown_but_not_used(client, monkeypatch):
+    """답장 note(교수 요청)는 응답에 처리안과 함께 나가고, 다음 차수 조건에는 들어가지 않는다."""
+    from backend.app.contracts import Conditions, ReplyParse
+    from backend.app.main import store
+    sid = _sent_section(client)
+
+    # keyword 방식은 note를 비워 둔다 (언어 모델만 채움)
+    r = client.post(f"/coord/{enc(sid)}/reply", json={"text": REPLY, "method": "keyword"})
+    assert r.status_code == 200, r.text
+    assert r.json()["parse"]["note"] == "" and r.json()["note"] == ""
+
+    # 언어 모델이 note를 채운 경우 (실제 호출 대신 가짜 응답)
+    def fake_parse(text, choice=None, *, alternatives=None, message="", method="keyword"):
+        return ReplyParse(kind="거절", conditions=Conditions(days=[3], slots=["13:30", "15:00"]),
+                          note="실습용 PC가 있는 방", method="llm")
+
+    monkeypatch.setattr(engine, "parse_reply", fake_parse)
+    r = client.post(f"/coord/{enc(sid)}/reply", json={"text": "목요일 오후, 실습용 PC 있는 방이면 좋겠어요"})
+    assert r.status_code == 200, r.text
+    j = r.json()
+    assert j["note"] == "실습용 PC가 있는 방" and j["parse"]["note"] == "실습용 PC가 있는 방"
+    assert j["proposal"]["action"] == "next"
+    r = client.post(f"/coord/{enc(sid)}/decide", json={"action": "confirm"})
+    assert r.status_code == 200, r.text
+    applied = r.json()["decision"]["applied"]          # 다음 차수로 넘기는 것 = 조건만
+    assert applied == {"days": [3], "slots": ["13:30", "15:00"], "end_before": []}
+    assert "실습용" not in str(applied)
+    nxt = store.get_coord(sid)["next_conditions"]
+    assert nxt.slots == ["13:30", "15:00"] and nxt.days == [3]
+
+
+def test_conditions_slots_validation():
+    from backend.app.contracts import Conditions
+    assert Conditions(slots=["16:30", "13:30", "13:30"]).slots == ["13:30", "16:30"]   # 교시 순, 중복 없음
+    with pytest.raises(Exception):
+        Conditions(slots=["13:00"])
+    assert Conditions(slots=["13:30"]).is_empty() is False
+    assert Conditions().is_empty() is True
+
+
+def test_stub_fits_uses_slots():
+    from backend.app.contracts import Block, Conditions
+    from backend.app.stubs import _fits
+    pm = Conditions(slots=["13:30", "15:00", "16:30"])
+    assert _fits([Block(day="월", start="13:30", slots=1)], pm)[0] is True
+    assert _fits([Block(day="월", start="12:00", slots=1)], pm) == (False, "월 12:00~13:15가 가능한 교시 밖")
+    assert _fits([Block(day="수", start="15:00", slots=2)], pm)[0] is True          # 15:00·16:30 둘 다 있음
+    assert _fits([Block(day="수", start="16:30", slots=2)], pm)[0] is False         # 18:00 교시가 없음

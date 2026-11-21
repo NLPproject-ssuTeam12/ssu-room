@@ -106,6 +106,8 @@ class Timetable(BaseModel):
 # 요일은 숫자 0=월 … 4=금 (배정 쪽 Block은 "월" 글자). 바꾸려면 blocks_to_meetings / meetings_to_blocks.
 
 DAYN = "월화수목금"
+# 교시 시작 시각: 09:00부터 90분 간격 (75분 수업 + 15분 쉬는 시간). 배정 쪽 STARTS와 같다
+SLOTS = list(STARTS)
 Key = Literal["A", "B", "C"]
 Kind = Literal["수용", "조건부", "거절", "확인 필요"]
 
@@ -132,11 +134,18 @@ class EndBefore(BaseModel):
 class Conditions(BaseModel):
     """교수 답장에서 뽑은 조건. 다음 차수 대안을 만들 때 배정 엔진이 읽는다."""
     days: List[int] = []           # 둘 이상 = 그 요일 안에서만, 하나 = 그 요일을 포함
-    window: Optional[Tuple[str, str]] = None   # 가능한 시간대 ("13:30", "17:45")
+    slots: List[str] = []          # 되는 교시(시작 시각). 비면 제한 없음. 연강은 두 칸 모두 들어 있어야 맞음
     end_before: List[EndBefore] = []
 
+    @validator("slots", allow_reuse=True)
+    def _known_slots(cls, v):
+        bad = [s for s in v if s not in SLOTS]
+        if bad:
+            raise ValueError(f"교시 시작 시각이 아님: {bad}")
+        return sorted(set(v), key=SLOTS.index)
+
     def is_empty(self) -> bool:
-        return not self.days and self.window is None and not self.end_before
+        return not self.days and not self.slots and not self.end_before
 
 
 class ReplyParse(BaseModel):
@@ -144,6 +153,7 @@ class ReplyParse(BaseModel):
     kind: Kind
     picks: List[Key] = []          # 고른 안, 선호 순서
     conditions: Conditions = Conditions()
+    note: str = ""                 # 조교가 확인하거나 바꿔야 할 요청 (강의실 변경·장비·정원·교시 조정 희망). 배정 엔진은 읽지 않고 조교가 본다
     method: Literal["keyword", "llm"] = "keyword"
     fallback: bool = False         # 언어 모델이 실패해서 키워드 방식으로 대신 처리했으면 True
 

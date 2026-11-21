@@ -171,7 +171,8 @@ def _move_day(blocks: List[Block], step: int) -> List[Block]:
 
 def _fits(blocks: List[Block], cond: Optional[Conditions]) -> Tuple[bool, str]:
     """조건 읽는 법은 coord_models.Conditions 주석과 같다.
-    days: 둘 이상 = 그 요일 안에서만, 하나 = 그 요일을 포함. window: 가능한 시간대. end_before: 요일별 종료 시각."""
+    days: 둘 이상 = 그 요일 안에서만, 하나 = 그 요일을 포함.
+    slots: 되는 교시 시작 시각 (연강이면 두 교시 모두 들어 있어야 함). end_before: 요일별 종료 시각."""
     if cond is None:
         return True, ""
     days = [DAYS.index(b.day) for b in blocks]
@@ -184,9 +185,17 @@ def _fits(blocks: List[Block], cond: Optional[Conditions]) -> Tuple[bool, str]:
         for eb in cond.end_before:
             if DAYS.index(b.day) == eb.day and e > _to_min(eb.time):
                 return False, f"{_block_text(b)} 종료라 '{b.day} {eb.time} 전 종료'와 안 맞음"
-        if cond.window and not (_to_min(cond.window[0]) <= s and e <= _to_min(cond.window[1])):
-            return False, f"{_block_text(b)}가 가능한 시간대 밖"
+        if cond.slots and not all(st in cond.slots for st in _slot_starts(b)):
+            return False, f"{_block_text(b)}가 가능한 교시 밖"
     return True, ""
+
+
+def _slot_starts(b: Block) -> List[str]:
+    """블록이 차지하는 교시 시작 시각. 연강(2칸)이면 두 교시. 8교시 밖 시각이면 [b.start] (어느 slots에도 없음)."""
+    if b.start not in STARTS:
+        return [b.start]
+    i = STARTS.index(b.start)
+    return list(STARTS[i:i + b.slots]) if i + b.slots <= len(STARTS) else [b.start, "?"]
 
 
 def make_alternatives(section_id: str, conditions: Optional[Conditions] = None) -> List[Alternative]:

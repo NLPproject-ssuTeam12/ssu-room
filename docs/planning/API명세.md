@@ -127,7 +127,8 @@ fetch(`http://localhost:8000/coord/${encodeURIComponent(sectionId)}/message`, { 
 가짜 값에서 알아 둘 것:
 - 조율 이유 문장 끝에 `(가짜 값)`이 붙는다.
 - 대안 A·B·C는 같은 강의실을 쓰는 다른 분반과의 겹침만 피한다. 교수·학년 겹침은 안 본다.
-- 가짜 조율 함수는 `method`와 상관없이 틀 문장·간단한 키워드로 처리한다(답장에서 요일·시간대는 안 뽑고 종료 시각만).
+- 가짜 조율 함수는 `method`와 상관없이 틀 문장·간단한 키워드로 처리한다(답장에서 요일·교시는 안 뽑고 종료 시각만, `note`는 항상 `""`).
+- 가짜 `make_alternatives`는 지금 자리에서 한두 교시·요일을 옮겨 보는 것만 해서, 조건(`slots` 등)에 맞는 대안이 없으면 0개가 된다. 그러면 다음 차수 메시지는 409.
 - 가짜 `what_if`는 옮기는 분반의 **첫 번째 수업만** 옮겨 보고 위반을 센다(강의실 겹침만). 그래서 미리 보기 위반 수와 실제 적용 뒤 위반 수가 다를 수 있다.
 
 ---
@@ -401,31 +402,43 @@ fetch(`http://localhost:8000/coord/${encodeURIComponent(sectionId)}/message`, { 
   "parse": {
     "kind": "조건부",
     "picks": ["A", "C"],
-    "conditions": { "days": [], "window": null, "end_before": [ { "day": 2, "time": "17:00" } ] },
+    "conditions": { "days": [], "slots": [], "end_before": [ { "day": 2, "time": "17:00" } ] },
+    "note": "",
     "method": "keyword",
     "fallback": false
   },
   "proposal": {
     "action": "move",
     "key": "A",
-    "conditions": { "days": [], "window": null, "end_before": [ { "day": 2, "time": "17:00" } ] },
+    "conditions": { "days": [], "slots": [], "end_before": [ { "day": 2, "time": "17:00" } ] },
     "text": "A안(화·목 18:00~19:15 · 문화관 03105)으로 옮길까요?",
     "checks": [ { "key": "A", "ok": true, "why": "조건과 맞음" }, { "key": "C", "ok": true, "why": "조건과 맞음" } ]
   },
+  "note": "",
   "unavailable": [],
-  "at": "2026-11-21T22:56:33"
+  "at": "…"
 }
 ```
 - `parse.kind`: `수용` / `조건부` / `거절` / `확인 필요` (한글 그대로. `확인 필요`는 띄어 쓴다).
+- `parse.conditions.slots`: 되는 교시 시작 시각 목록(예: 오후 = `["13:30", "15:00", "16:30"]`, 늦은 오후 = `["16:30"]`). 빈 목록 = 제한 없음. 연강은 두 교시가 모두 들어 있어야 맞는다. 8교시 시작 시각 밖의 값은 들어오지 않는다.
+- `note`: 조교가 확인할 교수 요청(예: `"실습용 PC가 있는 방"`). `parse.note`와 같은 값을 맨 위에도 둔다 — **화면은 처리안과 함께 보여 준다.** 배정·다음 차수 조건에는 쓰지 않는다(조교가 직접 처리). 언어 모델(`llm`)만 채우고 `keyword`는 항상 `""`. 자세한 규칙은 API_조율.md.
 - `proposal.action`과 조교 버튼:
   - `move`: `key` 안으로 옮기자는 안. `[확인]`하면 옮긴다.
   - `next`: 맞는 안이 없음. `[확인]`하면 `conditions`를 기록해 다음 차수 대안에 쓴다(시간표는 안 바뀜).
   - `decide`: 확인 필요이거나 3차가 끝남. `[확인]` 안 됨. `[수정]` 또는 `[현재대로 유지]`.
 
-거절 예 (진짜 함수, `method: "llm"`, 글 "셋 다 어려워요. 목요일 오후면 됩니다"):
+거절 예 (진짜 함수, `method: "keyword"`, `choice: "none"`, 글 "셋 다 안 됩니다. 화요일 오후면 괜찮아요"):
 ```json
-{ "parse": { "kind": "거절", "picks": [], "conditions": { "days": [3], "window": ["13:30", "17:45"], "end_before": [] }, "method": "llm", "fallback": false },
-  "proposal": { "action": "next", "key": null, "conditions": { "…": "…" }, "text": "새 조건(목요일, 오후)으로 다음 차수 대안을 만들까요?", "checks": [] } }
+{ "parse": { "kind": "거절", "picks": [], "conditions": { "days": [1], "slots": ["13:30", "15:00", "16:30"], "end_before": [] }, "note": "", "method": "keyword", "fallback": false },
+  "proposal": { "action": "next", "key": null, "conditions": { "…": "…" }, "text": "새 조건(화요일, 오후)으로 다음 차수 대안을 만들까요?", "checks": [] },
+  "note": "" }
+```
+
+`note`가 있는 예 (언어 모델이 교수 요청을 뽑은 경우. 모양만 보이는 예):
+```json
+{ "parse": { "kind": "조건부", "picks": ["A"], "conditions": { "days": [], "slots": [], "end_before": [] }, "note": "실습용 PC가 있는 방", "method": "llm", "fallback": false },
+  "proposal": { "action": "move", "key": "A", "…": "…", "text": "A안(…)으로 옮길까요? 교수님 요청: 실습용 PC가 있는 방" },
+  "note": "실습용 PC가 있는 방" }
 ```
 
 ### `POST /coord/{id}/decide`
@@ -489,7 +502,7 @@ fetch(`http://localhost:8000/coord/${encodeURIComponent(sectionId)}/message`, { 
 ### `POST /rounds/next`
 다음 차수로. DRAFT → 1차, 1차 → 2차, 2차 → 3차. 요청 본문 없음.
 2·3차로 갈 때 남은 분반의 대안을 새로 만든다(`make_alternatives(section_id, conditions)`, 문하윤).
-`conditions`는 **조교가 [확인]한 조건(`next_conditions`)만** 쓴다. 확인하지 않은 답장 해석은 넣지 않는다(없으면 조건 없이).
+`conditions`는 **조교가 [확인]한 조건(`next_conditions`)만** 쓴다. 확인하지 않은 답장 해석은 넣지 않는다(없으면 조건 없이). 답장 `note`도 넣지 않는다.
 
 응답 200:
 ```json
@@ -497,11 +510,11 @@ fetch(`http://localhost:8000/coord/${encodeURIComponent(sectionId)}/message`, { 
 ```
 - `open`: 아직 반영 안 된 조율 분반.
 
-2차 메시지 예 (조건 "화요일, 화요일 17:00 전 종료"를 [확인]한 뒤, 진짜 `write_message`):
+2차 메시지 예 (조건 "화요일, 오후" = `{"days": [1], "slots": ["13:30", "15:00", "16:30"]}`를 [확인]한 뒤, 진짜 `write_message`):
 ```text
 2027-1학기 웹프로그래밍 03 (공통-재수강) 분반 시간표 2차 조율 안내드립니다.
 
-지난 회신에서 주신 조건(화요일, 화요일 17:00 전 종료)을 반영해 대안을 다시 드립니다.
+지난 회신에서 주신 조건(화요일, 오후)을 반영해 대안을 다시 드립니다.
 처음 희망하신 시간: 월 12:00, 월 13:30, 월·수 15:00
 
 A  화 13:30~16:15 연강 · 정보과학관 21101
