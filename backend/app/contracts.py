@@ -1,10 +1,15 @@
 # 임시 데이터 모양. 문하윤 schemas.py가 오면 그걸로 바꿀 것.
 # (구현 계획서 3절 요약을 옮긴 것. 이름이 달라지면 이 파일을 지우고 import만 바꾼다.)
 #
-# Pydantic 1.x / 2.x 둘 다에서 돌도록 validator, parse(), dump()만 쓴다.
+# 조율 모델은 coord_models.py와 같게 유지. 합쳐진 뒤에는 coord_models에서 import.
+#   (Meeting, Alternative, EndBefore, Conditions, ReplyParse, MessageInput, Message, PickCheck, Proposal
+#    — 최재성 backend/app/nlp/coord_models.py 기준. 필드 이름·타입·값을 바꾸지 않는다.)
+# 배정 쪽 모델(Room, Section, Block, Wish, Assignment, Timetable 등)은 이 파일이 기준이다.
+#
+# validator, parse(), dump()는 Pydantic 1.x 시절 모양을 그대로 둔다.
 
 import re
-from typing import Dict, List, Literal, Optional
+from typing import Dict, List, Literal, Optional, Tuple
 
 from pydantic import BaseModel, Field, validator
 
@@ -17,7 +22,6 @@ Day = Literal["월", "화", "수", "목", "금"]
 BlockDay = Literal["월", "화", "수", "목", "금", "토"]
 LabNeed = Literal["MUST", "PREFER", "NONE"]
 Shape = Literal["TWICE", "ONCE_LONG", "MANUAL"]
-Label = Literal["A", "B", "C"]
 
 _HHMM = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
 
@@ -95,55 +99,107 @@ class Timetable(BaseModel):
     assignments: List[Assignment] = []
 
 
+# ---------- 조율 (최재성 coord_models.py와 같은 모양) ----------
+# 조율 모델은 coord_models.py와 같게 유지. 합쳐진 뒤에는 coord_models에서 import.
+# (지금도 backend/app/nlp/coord_models.py가 있으면 아래 사본 대신 그쪽 클래스를 쓴다.
+#  진짜 coord 함수와 서버가 같은 클래스를 주고받아야 Pydantic 검사에서 안 걸린다.)
+# 요일은 숫자 0=월 … 4=금 (배정 쪽 Block은 "월" 글자). 바꾸려면 blocks_to_meetings / meetings_to_blocks.
+
+DAYN = "월화수목금"
+Key = Literal["A", "B", "C"]
+Kind = Literal["수용", "조건부", "거절", "확인 필요"]
+
+
+class Meeting(BaseModel):
+    """수업 한 번. 주 2회 수업은 2개, 주 1회 연강은 1개(두 칸 길이)."""
+    day: int = Field(ge=0, le=4)
+    start: str                     # "15:00"
+    end: str                       # "16:15"
+    room: str                      # "정보관 305"
+
+
 class Alternative(BaseModel):
-    label: Label
-    blocks: List[Block]
-    room: Optional[str] = None
+    """조율 메시지에 넣는 대안 하나 (배정 엔진의 make_alternatives가 만든다)."""
+    key: Key
+    meetings: List[Meeting]
 
 
-# ---------- 조율 ----------
-
-class TimeRange(BaseModel):
-    start: str
-    end: str
-
-    _hhmm = validator("start", "end", allow_reuse=True)(_check_hhmm)
+class EndBefore(BaseModel):
+    day: int = Field(ge=0, le=4)
+    time: str                      # "17:00" 전에 끝나야 함
 
 
 class Conditions(BaseModel):
-    days: List[Day] = []                     # 가능한 요일 (빈 목록 = 제한 없음)
-    time_ranges: List[TimeRange] = []        # 가능한 시간대 (빈 목록 = 제한 없음)
-    end_before: Dict[Day, str] = {}          # 요일별 종료 시각. {"수": "17:00"}
+    """교수 답장에서 뽑은 조건. 다음 차수 대안을 만들 때 배정 엔진이 읽는다."""
+    days: List[int] = []           # 둘 이상 = 그 요일 안에서만, 하나 = 그 요일을 포함
+    window: Optional[Tuple[str, str]] = None   # 가능한 시간대 ("13:30", "17:45")
+    end_before: List[EndBefore] = []
 
-    @validator("end_before")
-    def _end_before(cls, v):
-        for t in v.values():
-            _check_hhmm(t)
-        return v
+    def is_empty(self) -> bool:
+        return not self.days and self.window is None and not self.end_before
 
 
 class ReplyParse(BaseModel):
-    decision: Literal["수용", "조건부", "거절", "확인필요"]
-    chosen: List[Label] = []
+    """parse_reply 결과."""
+    kind: Kind
+    picks: List[Key] = []          # 고른 안, 선호 순서
     conditions: Conditions = Conditions()
+    method: Literal["keyword", "llm"] = "keyword"
+    fallback: bool = False         # 언어 모델이 실패해서 키워드 방식으로 대신 처리했으면 True
+
+
+class MessageInput(BaseModel):
+    """write_message·check_message에 넣는 값. 서버가 분반·희망·대안·차수·겹친 상대로 채운다."""
+    professor: str                 # 받는 교수
+    course: str                    # "객체지향프로그래밍 02"
+    term: str = "2027-1학기"
+    round: int = Field(ge=1, le=3)
+    wish: str                      # 본인 희망 그대로 ("월·수 15:00")
+    alternatives: List[Alternative]
+    blocker_prof: Optional[str] = None     # 겹친 상대 교수
+    blocker_course: Optional[str] = None   # 겹친 상대 강의 ("자료구조 01")
+    reveal: bool = True                    # 상대 교수 이름 알리기 (학과 설정)
+    prev_conditions: Optional[Conditions] = None   # 지난 차수 답장에서 받은 조건
+    hidden: List[str] = []         # 메시지에 나오면 안 되는 글 (상대 교수의 기타 요청 등)
+
+
+class Message(BaseModel):
+    """write_message 결과."""
+    text: str
+    method: Literal["keyword", "llm"] = "keyword"
+    fallback: bool = False
+    problems: List[str] = []       # 언어 모델 글이 검사에서 걸린 이유 (fallback일 때)
+
+
+class PickCheck(BaseModel):
+    key: str
+    ok: bool
+    why: str
 
 
 class Proposal(BaseModel):
-    """처리안. match_conditions가 만들고 조교가 [확인]해야 반영된다."""
-    action: Literal["MOVE", "KEEP", "ASK"]
-    alternative: Optional[Alternative] = None
-    summary: str
-    rejected: List[str] = []                 # 조건과 안 맞아 뺀 안과 이유
+    """match_conditions 결과 = 조교에게 보여 줄 처리안. 조교가 [확인]을 눌러야 실행된다."""
+    action: Literal["move", "next", "decide"]   # move = 고른 안으로 옮김, next = 조건 넣어 다음 차수, decide = 조교가 직접
+    key: Optional[Key] = None
+    conditions: Conditions = Conditions()
+    text: str
+    checks: List[PickCheck] = []
 
+
+try:   # 합쳐진 뒤: 진짜 모델을 쓴다 (위 사본과 같은 모양이어야 한다)
+    from .nlp.coord_models import (  # type: ignore  # noqa: F811
+        Alternative, Conditions, EndBefore, Meeting, Message, MessageInput, PickCheck, Proposal, ReplyParse,
+    )
+    COORD_MODELS = "real (nlp.coord_models)"
+except Exception:   # 없거나 불러오다 실패하면 사본 (실패 경고는 engine이 남긴다)
+    COORD_MODELS = "copy (contracts.py)"
+
+
+# ---------- 배정 결과 확인 ----------
 
 class Violation(BaseModel):
     rule: str                                # "강의실 겹침" 등
     section_ids: List[str]
-    detail: str
-
-
-class MessageIssue(BaseModel):
-    kind: Literal["금지 내용", "필수 내용 빠짐"]
     detail: str
 
 
@@ -186,3 +242,37 @@ def parse(cls, data):
 
 def dump(model) -> dict:
     return model.model_dump() if hasattr(model, "model_dump") else model.dict()
+
+
+# ---------- 배정 칸(Block) ↔ 조율 수업(Meeting) ----------
+
+def block_minutes(b: Block) -> Tuple[int, int]:
+    """칸 1개 = 75분, 칸 사이 쉬는 시간 15분. 2칸 = 165분."""
+    h, m = b.start.split(":")
+    s = int(h) * 60 + int(m)
+    return s, s + 75 * b.slots + 15 * (b.slots - 1)
+
+
+def blocks_to_meetings(blocks: List[Block], room: Optional[str]) -> List[Meeting]:
+    out = []
+    for b in blocks:
+        _, e = block_minutes(b)
+        out.append(Meeting(day=DAYS.index(b.day), start=b.start, end=f"{e // 60:02d}:{e % 60:02d}",
+                           room=room or "강의실 미정"))
+    return out
+
+
+def meetings_to_blocks(meetings) -> Tuple[List[Block], Optional[str]]:
+    """Meeting 목록 → (Block 목록, 강의실). 배정(Assignment)은 강의실이 하나라 첫 수업의 강의실을 쓴다."""
+    blocks = []
+    for m in meetings:
+        h0, m0 = map(int, m.start.split(":"))
+        h1, m1 = map(int, m.end.split(":"))
+        slots = 1 if (h1 * 60 + m1) - (h0 * 60 + m0) <= 75 else 2
+        blocks.append(Block(day=DAYS[m.day], start=m.start, slots=slots))
+    room = meetings[0].room if meetings else None
+    return blocks, (None if room == "강의실 미정" else room)
+
+
+def alternative(key: str, blocks: List[Block], room: Optional[str]):
+    return Alternative(key=key, meetings=blocks_to_meetings(blocks, room))

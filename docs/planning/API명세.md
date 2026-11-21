@@ -120,11 +120,14 @@ fetch(`http://localhost:8000/coord/${encodeURIComponent(sectionId)}/message`, { 
 
 진짜/가짜 확인: `GET /health` 의 `engine`. 값이 `"stub"`이면 가짜, `"real (모듈 이름)"`이면 진짜다.
 진짜 모듈이 있는데 불러오다 실패하면 가짜로 돌고 `load_warnings`에 `"parse_reply 함수: 진짜 모듈 불러오기 실패 → 가짜 사용 (이유)"`가 생긴다.
+조율 함수 4개는 진짜와 서버(stubs.py)의 인자 모양(이름·순서·키워드 전용·기본값)도 비교한다. 다르면 가짜로 돌고
+`load_warnings`에 `"parse_reply: 진짜 함수 모양이 서버와 다름 (차이) → 가짜 사용"`이 생긴다.
+2026-11-21에 `jaeseong/coord`의 coord.py를 임시로 합쳐 확인했을 때 4개 모두 `real (backend.app.nlp.coord)`였고 경고는 없었다.
 
 가짜 값에서 알아 둘 것:
 - 조율 이유 문장 끝에 `(가짜 값)`이 붙는다.
 - 대안 A·B·C는 같은 강의실을 쓰는 다른 분반과의 겹침만 피한다. 교수·학년 겹침은 안 본다.
-- 답장 해석은 `method`와 상관없이 간단한 키워드로 읽는다.
+- 가짜 조율 함수는 `method`와 상관없이 틀 문장·간단한 키워드로 처리한다(답장에서 요일·시간대는 안 뽑고 종료 시각만).
 - 가짜 `what_if`는 옮기는 분반의 **첫 번째 수업만** 옮겨 보고 위반을 센다(강의실 겹침만). 그래서 미리 보기 위반 수와 실제 적용 뒤 위반 수가 다를 수 있다.
 
 ---
@@ -296,6 +299,11 @@ fetch(`http://localhost:8000/coord/${encodeURIComponent(sectionId)}/message`, { 
 ### `GET /coord`
 조율 목록. 모든 단계(COLLECT는 `[]`).
 
+> **조율 데이터 모양(대안·답장 해석·처리안)과 조율 함수의 입력·출력 상세는 [API_조율.md](API_조율.md)(최재성)를 따른다.**
+> 이 문서는 서버 엔드포인트(경로·요청 본문·상태·에러)만 적는다. `Alternative`, `Meeting`, `Conditions`, `ReplyParse`, `Proposal`, `MessageInput`, `Message`의 칸 설명은 API_조율.md에서 본다.
+> (API_조율.md는 지금 `jaeseong/coord` 브랜치에 있다. main에 합쳐지면 이 링크가 열린다.)
+> 요일은 숫자 `0=월 … 4=금`. 시간표(`/timetable`)의 `blocks`는 요일 글자(`"월"`)라서 둘이 다르다.
+
 ```json
 [
   {
@@ -306,94 +314,128 @@ fetch(`http://localhost:8000/coord/${encodeURIComponent(sectionId)}/message`, { 
     "round_no": 1,
     "state": "OPEN",
     "alternatives": [
-      { "label": "A", "blocks": [ { "day": "화", "start": "18:00", "slots": 1 }, { "day": "목", "start": "18:00", "slots": 1 } ],
-        "room": "문화관 03105" },
-      { "label": "B", "blocks": [ "…" ], "room": "벤처중소기업센터 10311" },
-      { "label": "C", "blocks": [ "…" ], "room": "정보과학관 21101" }
+      { "key": "A", "meetings": [ { "day": 1, "start": "18:00", "end": "19:15", "room": "문화관 03105" },
+                                  { "day": 3, "start": "18:00", "end": "19:15", "room": "문화관 03105" } ] },
+      { "key": "B", "meetings": [ "…" ] },
+      { "key": "C", "meetings": [ "…" ] }
     ],
     "message": null,
     "proposal": null,
-    "last_parse": null
+    "last_parse": null,
+    "next_conditions": null,
+    "prev_conditions": null
   }
 ]
 ```
-- `state`: `OPEN`(메시지 전) → `SENT`(보냄) → `PROPOSED`(답장 해석, 처리안 있음) → `RESOLVED`(반영) 또는 `KEPT`(현재대로 유지).
+- `state`: `OPEN`(메시지 전) → `SENT`(보냄) → `PROPOSED`(답장 해석, 처리안 있음) → `RESOLVED`(반영) / `KEPT`(현재대로 유지) / `NEXT`(조건을 넣어 다음 차수로, 조교가 확인함).
 - `round_no`: DRAFT에서는 `null`.
-- `alternatives`: 0~3개. 없을 수도 있다.
-- `message`: 보낸 글. `proposal`: 처리안(아래 `reply` 참고). `last_parse`: 마지막 답장 해석.
-- 다음 차수로 가면 `RESOLVED`가 아닌 분반은 `OPEN`으로 돌아가고 대안을 새로 받는다(`KEPT` 포함).
+- `alternatives`: 대안 0~3개 (`Alternative`). 없을 수도 있다.
+- `message`: 보낸 글. `proposal`: 처리안(`Proposal`). `last_parse`: 마지막 답장 해석(`ReplyParse`).
+- `next_conditions`: 이번 차수에 조교가 [확인]한 조건. `prev_conditions`: 지난 차수에서 넘어온 조건(2차 메시지에 쓴다).
+- 다음 차수로 가면 `RESOLVED`가 아닌 분반은 `OPEN`으로 돌아가고 대안을 새로 받는다(`KEPT`·`NEXT` 포함).
 
 ### `POST /coord/{id}/message`
-조율 메시지를 쓰고 검사한다. 검사를 통과해야 "보냄" 처리. **ROUND에서만.** 요청 본문 없음.
-STUB: `write_message`·`check_message`(최재성).
+조율 메시지를 쓰고 검사한다. 검사를 통과해야 "보냄" 처리. **ROUND에서만.**
+함수: `write_message(MessageInput, method)` → `check_message(text, MessageInput)`.
 
-응답 200:
+요청 본문은 없어도 된다. 있으면 `{ "method": "keyword" | "llm" }` (기본 `keyword`).
+
+`MessageInput`은 서버가 채운다(`store.message_input`). 화면에서 받지 않는다.
+
+| 칸 | 서버가 넣는 값 |
+|---|---|
+| `professor` | 받는 교수 가명 (`교수42`) |
+| `course` | 과목 + 분반 번호 (+ 구분) `디지털시스템입문 03 (공통-재수강)` |
+| `round` | 지금 차수 |
+| `wish` | 희망(PREFER) 칸을 글로. 같은 시각끼리 묶음 `화·목 18:00, 화 19:30` |
+| `alternatives` | 조율 목록의 대안 |
+| `blocker_prof`, `blocker_course` | 희망 칸을 막은 상대 분반. 같은 강의실 → 같은 교수 순으로 찾은 **추정값** |
+| `reveal` | 상대 교수 이름 알리기. **기본 `false`** (환경변수 `COORD_REVEAL_BLOCKER=1`이면 켬). 꺼져 있으면 메시지에 상대 이름이 나오지 않고, `check_message`가 새지 않았는지 검사한다 |
+| `prev_conditions` | 2차부터, 지난 차수에 조교가 [확인]한 조건 |
+| `hidden` | 상대 교수의 기타 요청(`note`). 검사에만 쓴다 |
+| `term` | 기본 `2027-1학기` (환경변수 `COORD_TERM`으로 바꿈) |
+
+연차·임용일·우선순위는 `MessageInput`에 칸이 없고 넣지 않는다.
+
+응답 200 (진짜 `write_message`, keyword):
 ```json
 {
   "section_id": "2150164203-(공통-재수강)",
   "round_no": 1,
-  "text": "교수님, 안녕하세요. 학과사무실입니다.\n[1차 조율] 디지털시스템입문 (공통-재수강) 분반의 희망 시간이 다른 강의와 겹쳐 아래 대안을 드립니다.\n- 적어 주신 희망: 목-18:00, 화-18:00, 화-19:30\n- A안: 화 18:00~19:15 / 목 18:00~19:15 · 문화관 03105\n…\n회신 기한은 1주입니다.",
+  "text": "교수42 교수님, 안녕하세요. 학과사무실입니다.\n2027-1학기 디지털시스템입문 03 (공통-재수강) 분반 시간표 1차 조율 안내드립니다.\n\n희망하신 시간(화·목 18:00, 화 19:30)이 다른 강의와 겹칩니다.\n\nA  화·목 18:00~19:15 · 문화관 03105\nB  화·목 18:00~19:15 · 벤처중소기업센터 10311\nC  화·목 18:00~19:15 · 정보과학관 21101\n\n가능한 안을 골라 주시거나, 모두 어려우시면 가능한 시간을 적어 주세요. 회신 기한은 1주이며, 기한 전에 한 번 더 알려 드립니다.",
+  "method": "keyword",
+  "fallback": false,
+  "problems": [],
   "issues": [],
   "sent": true,
-  "at": "2026-11-21T17:36:19"
+  "at": "2026-11-21T22:56:31"
 }
 ```
-- `issues`: 검사에 걸린 것 `[{"kind": "금지 내용" | "필수 내용 빠짐", "detail": "…"}]`.
+- `method`·`fallback`·`problems`: `write_message` 결과(`Message`) 그대로. `llm`이 실패하면 `method: "keyword"`, `fallback: true`, `problems`에 이유(예: `호출 실패: ServerError: 503 UNAVAILABLE …`).
+- `issues`: `check_message` 결과(문장 목록). 빈 목록이어야 보낸다.
 - `sent: false`면 검사에 걸려 보내지 않은 것. 상태는 그대로 `OPEN`.
 - 다시 부르면 다시 쓴다(`SENT` 상태에서도 가능).
+- 에러 409: `대안이 없어 조율 메시지를 쓸 수 없습니다. [수정]이나 [현재대로 유지]로 정해 주세요.`
 
 ### `POST /coord/{id}/reply`
 교수 답장을 해석해 처리안을 만든다. **반영은 안 한다.** ROUND에서만, 메시지를 보낸 뒤.
-STUB: `parse_reply`·`match_conditions`(최재성).
+함수: `parse_reply(text, choice, alternatives=…, message=…, method=…)` → `match_conditions(parse, alternatives, round, unavailable)`.
 
 요청:
 ```json
-{ "text": "A나 C 다 괜찮아요. 수요일은 17시 전에 끝나야 해요", "method": "keyword" }
+{ "text": "A나 C 다 괜찮아요. 수요일은 17시 전에 끝나야 해요", "choice": null, "method": "keyword" }
 ```
-- `method`: `keyword`(기준선, 기본) 또는 `llm`(언어 모델).
+- `choice`: 교수가 화면 버튼으로 고른 안 `"A"`/`"B"`/`"C"`, 모두 어려움 `"none"`, 안 누름 `null`(기본). 버튼이 글보다 먼저다.
+- `text`와 `choice` 중 하나는 있어야 한다(둘 다 비면 422).
+- `alternatives`·`message`는 서버가 조율 목록의 대안과 보낸 글로 넣는다.
+- `unavailable`: 서버가 지금 시간표에 대안을 넣어 보고(`check_rules`) 이 분반이 낀 위반이 생기는 안의 키.
 
-응답 200:
+응답 200 (진짜 `parse_reply`·`match_conditions`, keyword):
 ```json
 {
   "section_id": "2150164203-(공통-재수강)",
   "round_no": 1,
   "text": "A나 C 다 괜찮아요. 수요일은 17시 전에 끝나야 해요",
+  "choice": null,
   "method": "keyword",
   "parse": {
-    "decision": "조건부",
-    "chosen": ["A", "C"],
-    "conditions": { "days": [], "time_ranges": [], "end_before": { "수": "17:00" } }
+    "kind": "조건부",
+    "picks": ["A", "C"],
+    "conditions": { "days": [], "window": null, "end_before": [ { "day": 2, "time": "17:00" } ] },
+    "method": "keyword",
+    "fallback": false
   },
   "proposal": {
-    "action": "MOVE",
-    "alternative": { "label": "A", "blocks": [ "…" ], "room": "문화관 03105" },
-    "summary": "A안으로 옮길까요?",
-    "rejected": []
+    "action": "move",
+    "key": "A",
+    "conditions": { "days": [], "window": null, "end_before": [ { "day": 2, "time": "17:00" } ] },
+    "text": "A안(화·목 18:00~19:15 · 문화관 03105)으로 옮길까요?",
+    "checks": [ { "key": "A", "ok": true, "why": "조건과 맞음" }, { "key": "C", "ok": true, "why": "조건과 맞음" } ]
   },
-  "at": "2026-11-21T17:36:19"
+  "unavailable": [],
+  "at": "2026-11-21T22:56:33"
 }
 ```
-- `parse.decision`: `수용` / `조건부` / `거절` / `확인필요`.
-- `conditions`: 가능한 요일 `days`, 가능한 시간대 `time_ranges: [{start, end}]`, 요일별 종료 시각 `end_before`.
-- `proposal.action`:
-  - `MOVE`: `alternative`로 옮기자는 안. `[확인]`을 누를 수 있다.
-  - `ASK`: 옮길 안이 없음(거절·확인필요·조건과 다 안 맞음). `[수정]` 또는 `[현재대로 유지]`만.
-  - `KEEP`: 지금 자리 유지 제안.
-- `rejected`: 조건과 안 맞아 뺀 안과 이유. 예: `"A안은 수 16:30~17:45 종료라 '수 17:00 전 종료'와 안 맞음"`.
+- `parse.kind`: `수용` / `조건부` / `거절` / `확인 필요` (한글 그대로. `확인 필요`는 띄어 쓴다).
+- `proposal.action`과 조교 버튼:
+  - `move`: `key` 안으로 옮기자는 안. `[확인]`하면 옮긴다.
+  - `next`: 맞는 안이 없음. `[확인]`하면 `conditions`를 기록해 다음 차수 대안에 쓴다(시간표는 안 바뀜).
+  - `decide`: 확인 필요이거나 3차가 끝남. `[확인]` 안 됨. `[수정]` 또는 `[현재대로 유지]`.
 
-거절 예:
+거절 예 (진짜 함수, `method: "llm"`, 글 "셋 다 어려워요. 목요일 오후면 됩니다"):
 ```json
-{ "parse": { "decision": "거절", "chosen": [], "conditions": { "…": "…" } },
-  "proposal": { "action": "ASK", "alternative": null, "summary": "거절: 다음 차수에 새 대안이 필요합니다.", "rejected": [] } }
+{ "parse": { "kind": "거절", "picks": [], "conditions": { "days": [3], "window": ["13:30", "17:45"], "end_before": [] }, "method": "llm", "fallback": false },
+  "proposal": { "action": "next", "key": null, "conditions": { "…": "…" }, "text": "새 조건(목요일, 오후)으로 다음 차수 대안을 만들까요?", "checks": [] } }
 ```
 
 ### `POST /coord/{id}/decide`
-조교 결정. **이것을 불러야만 시간표가 바뀐다.** ROUND에서만. STUB: `reassign`·`check_rules`(문하윤).
+조교 결정. **이것을 불러야만 시간표나 다음 차수 조건이 바뀐다.** ROUND에서만. 함수: `reassign`·`check_rules`(문하윤).
 
 요청 본문 `{action, reason, choice}`:
+
 | action | 화면 버튼 | 필요한 값 | 하는 일 |
 |---|---|---|---|
-| `confirm` | [확인] | 없음 | 처리안(`proposal.action == "MOVE"`)의 안으로 옮긴다 |
+| `confirm` | [확인] | 없음 | 처리안이 `move`면 `key` 안으로 옮긴다. `next`면 조건을 기록하고 상태 `NEXT` |
 | `edit` | [수정] | **`reason`(빈칸 안 됨)과 `choice`(`A`/`B`/`C`) 둘 다** | 조교가 고른 안으로 옮기고 사유를 남긴다 |
 | `keep` | [현재대로 유지] | `reason`은 선택 | 안 옮긴다. 분반은 `COORD`로 남아 다음 차수로 간다 |
 
@@ -401,7 +443,7 @@ STUB: `parse_reply`·`match_conditions`(최재성).
 { "action": "edit", "reason": "교수님과 전화로 B안 합의", "choice": "B" }
 ```
 
-응답 200 (confirm·edit):
+응답 200 (confirm `move`·edit):
 ```json
 {
   "decision": {
@@ -409,28 +451,32 @@ STUB: `parse_reply`·`match_conditions`(최재성).
     "round_no": 1,
     "action": "confirm",
     "reason": null,
-    "applied": { "label": "A", "blocks": [ "…" ], "room": "문화관 03105" },
-    "at": "2026-11-21T17:36:19"
+    "applied": { "key": "A", "meetings": [ { "day": 1, "start": "18:00", "end": "19:15", "room": "문화관 03105" },
+                                           { "day": 3, "start": "18:00", "end": "19:15", "room": "문화관 03105" } ] },
+    "at": "2026-11-21T22:56:35"
   },
   "coord": { "section_id": "2150164203-(공통-재수강)", "state": "RESOLVED", "…": "…" },
   "violations": 0
 }
 ```
-- 옮긴 분반은 시간표에서 `status: "DONE"`이 된다.
+- 옮긴 분반은 시간표에서 `status: "DONE"`이 되고 `blocks`·`room`이 `applied.meetings`로 바뀐다(강의실은 첫 수업의 것).
+- confirm `next` 응답은 `{decision, coord}`: `decision.action: "confirm_next"`, `applied`는 조건(`Conditions`), `coord.state: "NEXT"`.
 - keep 응답은 `violations` 없이 `{decision, coord}` (`applied: null`, `state: "KEPT"`).
 
 에러:
+
 | 코드 | 언제 | detail |
 |---|---|---|
 | 422 | edit인데 사유 없음 | `수정하려면 사유(reason)를 적어야 합니다.` |
 | 422 | edit인데 안 없음 | `수정하려면 고를 안(choice: A|B|C)을 적어야 합니다.` |
 | 422 | 그 안이 없음 | `B안이 없습니다.` |
 | 409 | confirm인데 답장 전 | `아직 처리안이 없습니다. 답장을 먼저 넣으세요.` |
-| 409 | confirm인데 처리안이 ASK | `처리안에 옮길 안이 없습니다. [수정]이나 [현재대로 유지]를 고르세요.` |
+| 409 | confirm인데 처리안이 decide | `조교가 직접 정해야 하는 처리안입니다 (action=decide). [수정]이나 [현재대로 유지]를 고르세요.` |
 | 409 | 이번 차수에 이미 결정 | `이번 차수(1차)에 이미 결정한 분반입니다.` |
 
 ### 조율 3개(`message`·`reply`·`decide`) 공통 에러
 검사 순서대로:
+
 | 코드 | 언제 | detail |
 |---|---|---|
 | 404 | 없는 분반 | `분반이 없습니다: 없는-분반` |
@@ -442,7 +488,8 @@ STUB: `parse_reply`·`match_conditions`(최재성).
 
 ### `POST /rounds/next`
 다음 차수로. DRAFT → 1차, 1차 → 2차, 2차 → 3차. 요청 본문 없음.
-2·3차로 갈 때 남은 분반의 대안을 새로 만든다(STUB: `make_alternatives`, 문하윤).
+2·3차로 갈 때 남은 분반의 대안을 새로 만든다(`make_alternatives(section_id, conditions)`, 문하윤).
+`conditions`는 **조교가 [확인]한 조건(`next_conditions`)만** 쓴다. 확인하지 않은 답장 해석은 넣지 않는다(없으면 조건 없이).
 
 응답 200:
 ```json
@@ -450,7 +497,19 @@ STUB: `parse_reply`·`match_conditions`(최재성).
 ```
 - `open`: 아직 반영 안 된 조율 분반.
 
+2차 메시지 예 (조건 "화요일, 화요일 17:00 전 종료"를 [확인]한 뒤, 진짜 `write_message`):
+```text
+2027-1학기 웹프로그래밍 03 (공통-재수강) 분반 시간표 2차 조율 안내드립니다.
+
+지난 회신에서 주신 조건(화요일, 화요일 17:00 전 종료)을 반영해 대안을 다시 드립니다.
+처음 희망하신 시간: 월 12:00, 월 13:30, 월·수 15:00
+
+A  화 13:30~16:15 연강 · 정보과학관 21101
+…
+```
+
 에러:
+
 | 코드 | 언제 | detail |
 |---|---|---|
 | 409 | 3차 다음 | `최대 3차까지입니다. 남은 분반은 조교가 정해 확정(POST /finalize)하세요.` |
@@ -617,8 +676,8 @@ STUB: `reassign`·`check_rules`(문하윤).
     "round_no": 1,
     "action": "assistant_move",
     "reason": "교수님 전화 요청",
-    "applied": { "label": "A", "blocks": [ { "day": "월", "start": "10:30", "slots": 1 }, { "day": "수", "start": "10:30", "slots": 1 } ],
-                 "room": "정보과학관 21501" },
+    "applied": { "key": "A", "meetings": [ { "day": 0, "start": "10:30", "end": "11:45", "room": "정보과학관 21501" },
+                                           { "day": 2, "start": "10:30", "end": "11:45", "room": "정보과학관 21501" } ] },
     "at": "2026-11-21T17:53:31"
   },
   "summary": "확률및통계 02분반: 월 12:00~13:15 / 화 12:00~13:15 · 정보과학관 21501 → 월 10:30~11:45 / 수 10:30~11:45 · 정보과학관 21501",

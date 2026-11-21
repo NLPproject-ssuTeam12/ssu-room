@@ -14,8 +14,8 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from .contracts import (
-    DAYS, STARTS, Alternative, Assignment, Proposal, ReplyParse, Room, Section, Timetable, Wish,
-    dump, parse, section_shape,
+    DAYS, STARTS, Alternative, Assignment, Block, Message, MessageInput, Proposal, ReplyParse, Room,
+    Section, Timetable, Wish, block_minutes, dump, parse, section_shape,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -34,6 +34,46 @@ def _now() -> str:
 def _grid_cell(key: str) -> bool:
     day, _, start = key.partition("-")
     return day in DAYS and start in STARTS
+
+
+def reveal_blocker() -> bool:
+    """학과 설정 '상대 교수 이름 알리기'. 기본은 알리지 않음 (CLAUDE.md: 상대 교수 이름을 쓰지 않는다).
+    켜려면 환경변수 COORD_REVEAL_BLOCKER=1."""
+    return os.environ.get("COORD_REVEAL_BLOCKER", "0") == "1"
+
+
+def course_text(sec: Section) -> str:
+    """조율 메시지의 과목·분반 이름. 예: '자료구조 02', '디지털시스템입문 03 (공통-재수강)'."""
+    div = (sec.division or "").strip()
+    if div and not div.startswith("("):
+        div = f"({div})"
+    return f"{sec.name} {sec.code[-2:]}" + (f" {div}" if div else "")
+
+
+def wish_text(wish: Optional[Wish]) -> str:
+    """희망(PREFER) 칸을 글로. 같은 시작 시각끼리 요일을 묶는다. 예: '월·수 15:00, 화 10:30'."""
+    cells = [k for k, v in (wish.cells if wish else {}).items() if v == "PREFER"]
+    if not cells:
+        return "희망 칸 없음"
+    by_start: Dict[str, List[str]] = {}
+    for k in cells:
+        day, _, start = k.partition("-")
+        by_start.setdefault(start, []).append(day)
+    parts = sorted(by_start.items(), key=lambda kv: (min(DAYS.index(d) for d in kv[1]), kv[0]))
+    return ", ".join(f"{'·'.join(sorted(ds, key=DAYS.index))} {st}" for st, ds in parts)
+
+
+def _cell_block(cell: str) -> Block:
+    day, _, start = cell.partition("-")
+    return Block(day=day, start=start, slots=1)
+
+
+def _overlap(a: Block, b: Block) -> bool:
+    if a.day != b.day:
+        return False
+    a0, a1 = block_minutes(a)
+    b0, b1 = block_minutes(b)
+    return a0 < b1 and b0 < a1
 
 
 def _load(name: str):
@@ -132,11 +172,13 @@ class Store:
             "section_id": sid,
             "reason": reason,
             "round_no": self.round_no or None,
-            "state": "OPEN",             # OPEN → SENT → PROPOSED → RESOLVED | KEPT
+            "state": "OPEN",             # OPEN → SENT → PROPOSED → RESOLVED | KEPT | NEXT
             "alternatives": alternatives,
             "message": None,
             "proposal": None,
             "last_parse": None,
+            "next_conditions": None,     # 조교가 [확인]한 조건 (처리안 next). 다음 차수 대안에 이것만 쓴다
+            "prev_conditions": None,     # 지난 차수에서 넘어온 (확인된) 조건. 조율 메시지에 쓴다
         }
 
     def get_coord(self, sid: str) -> Optional[dict]:
@@ -149,17 +191,73 @@ class Store:
         self.coord[sid].update(fields)
         return self.coord[sid]
 
+    # ---------- 조율 메시지 입력 ----------
+
+    def blocker(self, sid: str) -> Optional[str]:
+        """희망 칸을 막고 있는 다른 분반 id (추정). 같은 강의실 → 같은 교수 순으로 찾는다.
+        배정 엔진이 '누구와 겹쳤는지'를 알려 주게 되면 그 값으로 바꾼다."""
+        if self.timetable is None:
+            return None
+        me = next((a for a in self.timetable.assignments if a.section_id == sid), None)
+        sec, wish = self.sections.get(sid), self.wishes.get(sid)
+        if me is None or sec is None or wish is None:
+            return None
+        cells = [_cell_block(k) for k, v in sorted(wish.cells.items()) if v == "PREFER"]
+        others = [a for a in self.timetable.assignments if a.section_id != sid]
+
+        def same_prof(a: Assignment) -> bool:
+            o = self.sections.get(a.section_id)
+            return bool(o and sec.professor and o.professor == sec.professor)
+
+        for test in (lambda a: me.room is not None and a.room == me.room, same_prof):
+            for c in cells:
+                hit = next((a for a in others if test(a) and any(_overlap(b, c) for b in a.blocks)), None)
+                if hit is not None:
+                    return hit.section_id
+        return None
+
+    def message_input(self, sid: str) -> MessageInput:
+        """write_message·check_message에 넣을 값. 분반·희망·대안·차수·겹친 상대로 채운다.
+        - 상대 교수 이름은 학과 설정(reveal_blocker)이 꺼져 있으면 메시지에 쓰지 않는다.
+          그래도 blocker_prof는 넣는다: check_message가 이름이 새지 않았는지 검사하는 데 쓴다.
+        - 연차·임용일·우선순위는 MessageInput에 칸이 없고, 넣지 않는다.
+        - hidden: 상대 교수가 적은 기타 요청(Wish.note). 메시지에 나오면 안 되므로 검사에만 쓴다."""
+        sec = self.sections[sid]
+        item = self.coord[sid]
+        other_id = self.blocker(sid)
+        other = self.sections.get(other_id) if other_id else None
+        other_wish = self.wishes.get(other_id) if other_id else None
+        prev = item.get("prev_conditions") if self.round_no >= 2 else None   # 지난 차수에 조교가 확인한 조건
+        fields = dict(
+            professor=sec.professor or "담당",
+            course=course_text(sec),
+            round=max(1, min(self.round_no, MAX_ROUND)),
+            wish=wish_text(self.wishes.get(sid)),
+            alternatives=item["alternatives"],
+            blocker_prof=other.professor if other else None,
+            blocker_course=course_text(other) if other else None,
+            reveal=reveal_blocker(),
+            prev_conditions=prev if prev is not None and not prev.is_empty() else None,
+            hidden=[other_wish.note.strip()] if other_wish and other_wish.note.strip() else [],
+        )
+        if os.environ.get("COORD_TERM"):
+            fields["term"] = os.environ["COORD_TERM"]
+        return MessageInput(**fields)
+
     # ---------- 기록 ----------
 
-    def add_message(self, sid: str, text: str, issues: List[dict], sent: bool) -> dict:
-        rec = {"section_id": sid, "round_no": self.round_no, "text": text,
+    def add_message(self, sid: str, msg: Message, issues: List[str], sent: bool) -> dict:
+        """msg = write_message 결과, issues = check_message 결과 (빈 목록이면 보냄)."""
+        rec = {"section_id": sid, "round_no": self.round_no, "text": msg.text, "method": msg.method,
+               "fallback": msg.fallback, "problems": list(msg.problems),
                "issues": issues, "sent": sent, "at": _now()}
         self.messages.append(rec)
         return rec
 
-    def add_reply(self, sid: str, text: str, method: str, parsed: ReplyParse, proposal: Proposal) -> dict:
-        rec = {"section_id": sid, "round_no": self.round_no, "text": text, "method": method,
-               "parse": dump(parsed), "proposal": dump(proposal), "at": _now()}
+    def add_reply(self, sid: str, text: str, choice: Optional[str], method: str, parsed: ReplyParse,
+                  proposal: Proposal, unavailable: List[str]) -> dict:
+        rec = {"section_id": sid, "round_no": self.round_no, "text": text, "choice": choice, "method": method,
+               "parse": dump(parsed), "proposal": dump(proposal), "unavailable": unavailable, "at": _now()}
         self.replies.append(rec)
         return rec
 

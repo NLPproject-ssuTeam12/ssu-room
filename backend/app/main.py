@@ -17,7 +17,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from . import engine
-from .contracts import Label, Timetable, Wish, dump
+from .contracts import Alternative, Key, Timetable, Wish, dump, meetings_to_blocks, parse
 from .nlp import assistant
 from .store import MAX_ROUND, store
 
@@ -56,15 +56,20 @@ def _log_sources() -> None:
 
 # ---------- 요청 모양 ----------
 
+class MessageIn(BaseModel):
+    method: Literal["keyword", "llm"] = "keyword"
+
+
 class ReplyIn(BaseModel):
-    text: str
+    text: str = ""
+    choice: Optional[Literal["A", "B", "C", "none"]] = None   # 교수가 화면에서 누른 안. none = 모두 어려움
     method: Literal["keyword", "llm"] = "keyword"
 
 
 class DecideIn(BaseModel):
     action: Literal["confirm", "edit", "keep"]
     reason: Optional[str] = None
-    choice: Optional[Label] = None   # edit일 때 조교가 고른 안
+    choice: Optional[Key] = None   # edit일 때 조교가 고른 안
 
 
 class AssistantIn(BaseModel):
@@ -110,6 +115,29 @@ def _coord_out(item: dict) -> dict:
     out = dict(item)
     out["name"] = sec.name if sec else None
     out["professor"] = sec.professor if sec else None
+    return out
+
+
+def _with_alternative(tt: Timetable, sid: str, alt: Alternative) -> Timetable:
+    """그 분반만 대안 자리로 바꾼 사본 (다른 분반은 그대로). 반영하지 않는다."""
+    out = parse(Timetable, dump(tt))
+    blocks, room = meetings_to_blocks(alt.meetings)
+    for a in out.assignments:
+        if a.section_id == sid:
+            a.blocks, a.room = blocks, room
+    return out
+
+
+def _unavailable(sid: str, alternatives) -> list:
+    """그사이 다른 강의가 들어가서 못 쓰게 된 대안 키 (match_conditions의 unavailable).
+    현재 시간표에 그 안을 넣어 보고, 이 분반이 낀 규칙 위반이 생기면 못 쓰는 안으로 본다."""
+    if store.timetable is None:
+        return []
+    out = []
+    for alt in alternatives:
+        vs = engine.check_rules(_with_alternative(store.timetable, sid, alt))
+        if any(sid in v.section_ids for v in vs):
+            out.append(alt.key)
     return out
 
 
@@ -219,16 +247,18 @@ def get_coord():
 
 
 @app.post("/coord/{section_id}/message")
-def post_message(section_id: str):
+def post_message(section_id: str, body: Optional[MessageIn] = None):
     item = _coord_target(section_id)
-    sec = store.get_section(section_id)
-    text = engine.write_message(sec, store.get_wish(section_id), item["alternatives"],
-                                store.round_no, item["reason"])
-    issues = [dump(i) for i in engine.check_message(text)]
+    if not item["alternatives"]:
+        raise _conflict("대안이 없어 조율 메시지를 쓸 수 없습니다. [수정]이나 [현재대로 유지]로 정해 주세요.")
+    method = body.method if body else "keyword"
+    inp = store.message_input(section_id)
+    msg = engine.write_message(inp, method)
+    issues = list(engine.check_message(msg.text, inp))
     sent = not issues   # 검사에 걸리면 보내지 않는다
-    rec = store.add_message(section_id, text, issues, sent)
+    rec = store.add_message(section_id, msg, issues, sent)
     if sent:
-        store.update_coord(section_id, state="SENT", message=text)
+        store.update_coord(section_id, state="SENT", message=msg.text)
     return rec
 
 
@@ -237,9 +267,14 @@ def post_reply(section_id: str, body: ReplyIn):
     item = _coord_target(section_id)
     if item["state"] == "OPEN":
         raise _conflict("먼저 조율 메시지를 보내야 답장을 받을 수 있습니다.")
-    parsed = engine.parse_reply(body.text, method=body.method)
-    proposal = engine.match_conditions(parsed, item["alternatives"])
-    rec = store.add_reply(section_id, body.text, body.method, parsed, proposal)
+    if not body.text.strip() and body.choice is None:
+        raise HTTPException(status_code=422, detail="답장 글(text)이나 누른 안(choice)이 있어야 합니다.")
+    alts = item["alternatives"]
+    parsed = engine.parse_reply(body.text, body.choice, alternatives=alts,
+                                message=item["message"] or "", method=body.method)
+    unavailable = _unavailable(section_id, alts)
+    proposal = engine.match_conditions(parsed, alts, store.round_no, unavailable)
+    rec = store.add_reply(section_id, body.text, body.choice, body.method, parsed, proposal, unavailable)
     store.update_coord(section_id, state="PROPOSED", proposal=proposal, last_parse=parsed)
     return rec
 
@@ -258,16 +293,24 @@ def post_decide(section_id: str, body: DecideIn):
             raise HTTPException(status_code=422, detail="수정하려면 사유(reason)를 적어야 합니다.")
         if body.choice is None:
             raise HTTPException(status_code=422, detail="수정하려면 고를 안(choice: A|B|C)을 적어야 합니다.")
-        alt = next((a for a in item["alternatives"] if a.label == body.choice), None)
+        alt = next((a for a in item["alternatives"] if a.key == body.choice), None)
         if alt is None:
             raise HTTPException(status_code=422, detail=f"{body.choice}안이 없습니다.")
     else:  # confirm
         proposal = item["proposal"]
         if proposal is None:
             raise _conflict("아직 처리안이 없습니다. 답장을 먼저 넣으세요.")
-        if proposal.action != "MOVE" or proposal.alternative is None:
-            raise _conflict("처리안에 옮길 안이 없습니다. [수정]이나 [현재대로 유지]를 고르세요.")
-        alt = proposal.alternative
+        if proposal.action == "next":
+            # 조건을 넣어 다음 차수로. 시간표는 바꾸지 않고, 확인된 조건만 다음 차수 대안에 쓴다.
+            rec = store.add_decision(section_id, "confirm_next", body.reason, dump(proposal.conditions))
+            store.update_coord(section_id, state="NEXT", next_conditions=proposal.conditions)
+            return {"decision": rec, "coord": _coord_out(store.get_coord(section_id))}
+        if proposal.action != "move" or proposal.key is None:
+            raise _conflict(f"조교가 직접 정해야 하는 처리안입니다 (action={proposal.action}). "
+                            "[수정]이나 [현재대로 유지]를 고르세요.")
+        alt = next((a for a in item["alternatives"] if a.key == proposal.key), None)
+        if alt is None:
+            raise _conflict(f"처리안의 {proposal.key}안이 대안 목록에 없습니다.")
 
     tt = _normalize(engine.reassign(store.timetable, section_id, alt))
     tt.status = store.timetable.status
@@ -296,9 +339,10 @@ def post_next_round():
         for c in store.list_coord():
             if c["state"] == "RESOLVED":
                 continue
-            cond = c["last_parse"].conditions if c["last_parse"] is not None else None
+            # 조교가 [확인]한 조건(처리안 next)만 쓴다. 확인 안 한 답장 해석은 반영하지 않는다.
+            cond = c.get("next_conditions")
             store.update_coord(c["section_id"], round_no=store.round_no, state="OPEN",
-                               message=None, proposal=None,
+                               message=None, proposal=None, prev_conditions=cond, next_conditions=None,
                                alternatives=engine.make_alternatives(c["section_id"], cond))
     else:
         raise _conflict(f"다음 차수로 갈 수 없는 단계입니다: {store.stage}")

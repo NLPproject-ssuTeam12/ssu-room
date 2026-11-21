@@ -10,12 +10,15 @@ import os
 import re
 from functools import lru_cache
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Union
+from typing import List, Literal, Optional, Tuple, Union
 
 from .contracts import (
-    DAYS, STARTS, Alternative, Assignment, Block, Conditions, MessageIssue, Proposal,
-    ReplyParse, Room, Section, Timetable, Violation, WhatIfResult, Wish, dump, parse,
+    DAYN, DAYS, STARTS, Alternative, Assignment, Block, Conditions, EndBefore, Message, MessageInput,
+    PickCheck, Proposal, ReplyParse, Room, Section, Timetable, Violation, WhatIfResult, Wish,
+    alternative, dump, meetings_to_blocks, parse,
 )
+
+Method = Literal["keyword", "llm"]
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -162,20 +165,26 @@ def _shift(blocks: List[Block], step: int) -> Optional[List[Block]]:
 
 
 def _move_day(blocks: List[Block], step: int) -> List[Block]:
-    return [Block(day=DAYS[(DAYS.index(b.day) + step) % 5], start=b.start, slots=b.slots) for b in blocks]
+    moved = [Block(day=DAYS[(DAYS.index(b.day) + step) % 5], start=b.start, slots=b.slots) for b in blocks]
+    return sorted(moved, key=lambda b: DAYS.index(b.day))   # 요일 순 (월→금)
 
 
 def _fits(blocks: List[Block], cond: Optional[Conditions]) -> Tuple[bool, str]:
+    """조건 읽는 법은 coord_models.Conditions 주석과 같다.
+    days: 둘 이상 = 그 요일 안에서만, 하나 = 그 요일을 포함. window: 가능한 시간대. end_before: 요일별 종료 시각."""
     if cond is None:
         return True, ""
+    days = [DAYS.index(b.day) for b in blocks]
+    if cond.days:
+        ok = all(d in cond.days for d in days) if len(cond.days) >= 2 else cond.days[0] in days
+        if not ok:
+            return False, "가능한 요일이 아님"
     for b in blocks:
         s, e = _block_range(b)
-        if cond.days and b.day not in cond.days:
-            return False, f"{b.day}요일은 가능한 요일이 아님"
-        limit = cond.end_before.get(b.day)
-        if limit and e > _to_min(limit):
-            return False, f"{_block_text(b)} 종료라 '{b.day} {limit} 전 종료'와 안 맞음"
-        if cond.time_ranges and not any(_to_min(r.start) <= s and e <= _to_min(r.end) for r in cond.time_ranges):
+        for eb in cond.end_before:
+            if DAYS.index(b.day) == eb.day and e > _to_min(eb.time):
+                return False, f"{_block_text(b)} 종료라 '{b.day} {eb.time} 전 종료'와 안 맞음"
+        if cond.window and not (_to_min(cond.window[0]) <= s and e <= _to_min(cond.window[1])):
             return False, f"{_block_text(b)}가 가능한 시간대 밖"
     return True, ""
 
@@ -228,7 +237,7 @@ def make_alternatives(section_id: str, conditions: Optional[Conditions] = None) 
         if key in seen or not _fits(blocks, conditions)[0] or room_busy(blocks, room):
             continue
         seen.add(key)
-        out.append(Alternative(label="ABC"[len(out)], blocks=blocks, room=room))
+        out.append(alternative("ABC"[len(out)], blocks, room))
         if len(out) == 3:
             break
     return out
@@ -243,9 +252,10 @@ def reassign(timetable: Timetable, section_id: str, choice: Union[Alternative, C
         if not alts:
             return tt
         choice = alts[0]
+    blocks, room = meetings_to_blocks(choice.meetings)
     for a in tt.assignments:
         if a.section_id == section_id:
-            a.blocks, a.room, a.status, a.reason = list(choice.blocks), choice.room, "DONE", None
+            a.blocks, a.room, a.status, a.reason = blocks, room, "DONE", None
     return tt
 
 
@@ -281,77 +291,90 @@ def what_if(timetable: Timetable, change: dict) -> dict:
 
 
 # ---------- 조율 NLP (최재성) ----------
+# 시그니처(인자 이름·순서·키워드 전용·기본값)는 backend/app/nlp/coord.py와 똑같이 둔다.
+# engine.py가 inspect.signature로 비교해서 다르면 경고하고 가짜를 쓴다.
 
-def write_message(section: Section, wish: Optional[Wish], alternatives: List[Alternative], round_no: int,
-                  conflict: Optional[str] = None, method: str = "keyword") -> str:
+def _alt_text(a: Alternative) -> str:
+    when = " / ".join(f"{DAYN[m.day]} {m.start}~{m.end}" for m in a.meetings)
+    rooms = sorted({m.room for m in a.meetings})
+    return f"{when} · {' / '.join(rooms)}"
+
+
+def write_message(inp: MessageInput, method: Method = "keyword") -> Message:
     """STUB: 담당 최재성
-    밀린 분반, 겹친 사정, 본인 희망, 대안, 차수 → 교수에게 보낼 글.
-    가짜: 정해진 틀에 값만 채운다. 연차·상대 교수 이름은 넣지 않는다."""
-    prefer = sorted(c for c, v in (wish.cells if wish else {}).items() if v == "PREFER")
-    div = f" {section.division}" if section.division else ""
-    lines = [
-        "교수님, 안녕하세요. 학과사무실입니다.",
-        f"[{round_no}차 조율] {section.name}{div} 분반의 희망 시간이 다른 강의와 겹쳐 아래 대안을 드립니다.",
-        f"- 적어 주신 희망: {', '.join(prefer) if prefer else '(없음)'}",
-    ]
-    if conflict:
-        lines.append(f"- 겹친 사정: {conflict}")
-    for alt in alternatives:
-        lines.append(f"- {alt.label}안: {' / '.join(_block_text(b) for b in alt.blocks)} · {alt.room or '강의실 미정'}")
-    lines.append("괜찮은 안을 골라 주시거나, 안 되는 요일·시간을 알려 주세요. 회신 기한은 1주입니다.")
-    return "\n".join(lines)
+    MessageInput → 교수에게 보낼 글. 가짜: 정해진 틀에 값만 채운다 (method와 상관없이 틀).
+    상대 교수 이름은 reveal=True일 때만 쓴다. 연차·우선순위는 쓰지 않는다."""
+    other = (f"{inp.blocker_prof} 교수님의 {inp.blocker_course} 분반과"
+             if inp.reveal and inp.blocker_prof and inp.blocker_course else "다른 강의와")
+    lines = [f"{inp.professor} 교수님, 안녕하세요. 학과사무실입니다.",
+             f"{inp.term} {inp.course} 분반 시간표 {inp.round}차 조율 안내드립니다. (가짜 메시지)", "",
+             f"희망하신 시간({inp.wish})이 {other} 겹칩니다.", ""]
+    lines += [f"{a.key}  {_alt_text(a)}" for a in inp.alternatives]
+    lines += ["", "가능한 안을 골라 주시거나, 모두 어려우시면 가능한 시간을 적어 주세요. 회신 기한은 1주입니다."]
+    return Message(text="\n".join(lines), method="keyword")
 
 
-_FORBIDDEN = ("연차", "선임", "후임", "우선순위", "임용")
+_FORBIDDEN = ("연차", "임용", "우선순위", "경력")
 
 
-def check_message(text: str) -> List[MessageIssue]:
+def check_message(text: str, inp: MessageInput) -> List[str]:
     """STUB: 담당 최재성
-    작성한 글 → 문제 목록. 가짜: 금지 단어와 'A안' 유무만 본다."""
-    issues = [MessageIssue(kind="금지 내용", detail=f"'{w}' 이(가) 들어 있음") for w in _FORBIDDEN if w in text]
-    if "희망" not in text:
-        issues.append(MessageIssue(kind="필수 내용 빠짐", detail="본인 희망이 없음"))
-    if "A안" not in text:
-        issues.append(MessageIssue(kind="필수 내용 빠짐", detail="대안이 없음"))
-    return issues
+    글 + MessageInput → 걸린 문제 목록 (빈 목록 = 보내도 됨). 가짜: 금지 단어, 숨길 글, 과목·희망·대안만 본다."""
+    p = [f"연차·우선순위 이유를 썼음 ('{w}')" for w in _FORBIDDEN if w in text]
+    p += ["상대 교수의 사정(기타 요청)을 썼음" for h in inp.hidden if h.strip() and h.strip() in text]
+    if not inp.reveal and inp.blocker_prof and f"{inp.blocker_prof} 교수" in text:
+        p.append("상대 교수 이름을 썼음 (학과 설정: 알리지 않음)")
+    if inp.course not in text:
+        p.append("과목·분반 이름이 빠짐")
+    if inp.wish not in text:
+        p.append("본인 희망 시간이 빠지거나 바뀜")
+    if not inp.alternatives:
+        p.append("대안이 없음")
+    return p
 
 
-def parse_reply(text: str, method: str = "keyword") -> ReplyParse:
+def parse_reply(text: str, choice: Optional[str] = None, *, alternatives: Optional[List[Alternative]] = None,
+                message: str = "", method: Method = "keyword") -> ReplyParse:
     """STUB: 담당 최재성
-    교수 답장 → ReplyParse. 가짜: method와 상관없이 간단한 키워드로 읽는다.
-    애매하면 '확인필요'."""
-    t = text.strip()
-    if not t:
-        return ReplyParse(decision="확인필요")
-    chosen = sorted(set(re.findall(r"([ABC])\s*(?=안|나|도|,|이|랑|와|과|\s|$)", t)))
-    end_before: Dict[str, str] = {}
-    for day, hour in re.findall(r"(월|화|수|목|금)요일?은?\s*(\d{1,2})\s*시\s*(?:전|까지|이전)", t):
-        end_before[day] = f"{int(hour):02d}:00"
-    cond = Conditions(end_before=end_before)
-    if re.search(r"안\s*돼|안\s*됩|어렵|불가|힘들", t) and not chosen:
-        return ReplyParse(decision="거절", conditions=cond)
-    if chosen and end_before:
-        return ReplyParse(decision="조건부", chosen=chosen, conditions=cond)
-    if chosen:
-        return ReplyParse(decision="수용", chosen=chosen)
-    return ReplyParse(decision="확인필요", conditions=cond)
+    교수 답장 (+ 화면에서 누른 안 choice: 'A'/'B'/'C'/'none'/None) → ReplyParse.
+    가짜: method와 상관없이 간단한 키워드로 읽는다. 애매하면 '확인 필요'."""
+    t = (text or "").strip()
+    picks = list(dict.fromkeys(re.findall(r"(?<![A-Za-z])([ABC])(?![A-Za-z])", t)))
+    if choice and choice != "none":
+        picks = [choice] + [x for x in picks if x != choice]
+    if choice == "none":
+        picks = []
+    cond = Conditions(end_before=[
+        EndBefore(day=DAYN.index(d), time=f"{(int(h) + 12 if int(h) < 8 else int(h)):02d}:00")
+        for d, h in re.findall(r"([월화수목금])요?일?[은는]?\s*(\d{1,2})시\s*(?:전|이전|까지)", t)])
+    if picks:
+        return ReplyParse(kind="조건부" if not cond.is_empty() else "수용", picks=picks, conditions=cond)
+    if choice == "none" or re.search(r"안\s*[돼되]|어렵|불가|힘들", t):
+        return ReplyParse(kind="거절", conditions=cond)
+    return ReplyParse(kind="확인 필요", conditions=cond)
 
 
-def match_conditions(parse_result: ReplyParse, alternatives: List[Alternative]) -> Proposal:
+def match_conditions(parse: ReplyParse, alternatives: List[Alternative], round: int,
+                     unavailable: List[str] = ()) -> Proposal:
     """STUB: 담당 최재성
-    ReplyParse + 대안 → 처리안. 가짜: 고른 안을 순서대로 조건에 대 보고 처음 맞는 안을 고른다."""
-    if parse_result.decision == "거절":
-        return Proposal(action="ASK", summary="거절: 다음 차수에 새 대안이 필요합니다.")
-    if parse_result.decision == "확인필요":
-        return Proposal(action="ASK", summary="답장을 확실히 읽지 못했습니다. 조교가 직접 확인해 주세요.")
-    pool = [a for a in alternatives if not parse_result.chosen or a.label in parse_result.chosen]
-    rejected = []
-    for alt in pool:
-        ok, why = _fits(alt.blocks, parse_result.conditions)
+    ReplyParse + 대안 + 차수 (+ 못 쓰게 된 안) → 처리안. 가짜: 고른 안을 순서대로 조건에 대 보고 처음 맞는 안."""
+    if parse.kind == "확인 필요":
+        return Proposal(action="decide", text="답장을 확실히 읽지 못했습니다. [수정]으로 직접 정해 주세요.")
+    checks = []
+    for key in parse.picks:
+        a = next((x for x in alternatives if x.key == key), None)
+        if a is None:
+            checks.append(PickCheck(key=key, ok=False, why="없는 안"))
+            continue
+        ok, why = _fits(meetings_to_blocks(a.meetings)[0], parse.conditions)
+        if ok and key in unavailable:
+            ok, why = False, "그사이 다른 강의가 들어감"
+        checks.append(PickCheck(key=key, ok=ok, why=why or "조건과 맞음"))
         if ok:
-            head = f"{', '.join(rejected)} → " if rejected else ""
-            return Proposal(action="MOVE", alternative=alt, rejected=rejected,
-                            summary=f"{head}{alt.label}안으로 옮길까요?")
-        rejected.append(f"{alt.label}안은 {why}")
-    return Proposal(action="ASK", rejected=rejected,
-                    summary="고른 안이 모두 조건과 안 맞습니다. 조건으로 새 대안을 찾을까요?")
+            return Proposal(action="move", key=key, conditions=parse.conditions, checks=checks,
+                            text=f"{key}안({_alt_text(a)})으로 옮길까요?")
+    if round >= 3:
+        return Proposal(action="decide", conditions=parse.conditions, checks=checks,
+                        text="3차라 더 묻지 않습니다. [수정]이나 [현재대로 유지]로 정해 주세요.")
+    return Proposal(action="next", conditions=parse.conditions, checks=checks,
+                    text="맞는 안이 없습니다. 조건을 넣어 다음 차수 대안을 만들까요?")

@@ -16,7 +16,7 @@ import uuid
 from typing import Dict, List, Optional, Tuple
 
 from .. import engine
-from ..contracts import DAYS, STARTS, Alternative, AssistantCommand, Block, Day, dump
+from ..contracts import DAYS, STARTS, AssistantCommand, Block, Day, alternative, dump
 
 # ---------- 모양 ----------
 
@@ -517,7 +517,7 @@ def _what_if(cmd: AssistantQuery, store, as_move: bool) -> dict:
     _PROPOSALS[pid] = {
         "proposal_id": pid,
         "section_id": sec.id,
-        "alternative": Alternative(label="A", blocks=blocks, room=room),
+        "alternative": alternative("A", blocks, room),
         "base": timetable_key(tt),
         "summary": f"{title}: {_place_text(a.blocks, a.room)} → {_place_text(blocks, room)}",
         "violations": res["violations"],

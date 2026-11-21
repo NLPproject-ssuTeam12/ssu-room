@@ -111,10 +111,12 @@ def test_full_flow(client):
     r = client.post(f"/coord/{enc(sid)}/reply", json={"text": REPLY, "method": "keyword"})
     assert r.status_code == 200, r.text
     rep = r.json()
-    assert rep["parse"]["decision"] in ("수용", "조건부", "거절", "확인필요")
+    assert rep["parse"]["kind"] in ("수용", "조건부", "거절", "확인 필요")
+    assert set(rep["parse"]) >= {"kind", "picks", "conditions", "method", "fallback"}
     proposal = rep["proposal"]
+    assert proposal["action"] in ("move", "next", "decide")
 
-    if proposal["action"] == "MOVE":
+    if proposal["action"] == "move":
         r = client.post(f"/coord/{enc(sid)}/decide", json={"action": "confirm"})
     else:
         r = client.post(f"/coord/{enc(sid)}/decide",
@@ -126,7 +128,9 @@ def test_full_flow(client):
     tt = client.get("/timetable").json()
     a = next(x for x in tt["assignments"] if x["section_id"] == sid)
     assert a["status"] == "DONE"
-    assert a["blocks"] == applied["blocks"] and a["room"] == applied["room"]
+    days = "월화수목금"
+    assert [(b["day"], b["start"]) for b in a["blocks"]] == [(days[m["day"]], m["start"]) for m in applied["meetings"]]
+    assert a["room"] == applied["meetings"][0]["room"]
 
     # 지금 1차. 2차·3차로 가고, 그다음은 409
     for n in (2, 3):
@@ -302,7 +306,11 @@ def restore_engine():
 def test_engine_uses_real_function_when_present(client, restore_engine):
     fake = types.ModuleType(COORD_MOD)
     fake.__spec__ = importlib.machinery.ModuleSpec(COORD_MOD, None)
-    fake.parse_reply = lambda text, method="keyword": engine.stubs.parse_reply(text, method)
+
+    def parse_reply(text, choice=None, *, alternatives=None, message="", method="keyword"):
+        return engine.stubs.parse_reply(text, choice, alternatives=alternatives, message=message, method=method)
+
+    fake.parse_reply = parse_reply
     sys.modules[COORD_MOD] = fake
     importlib.reload(engine)
 
@@ -345,7 +353,131 @@ def test_engine_warns_when_real_module_is_broken(client, restore_engine):
     assert any("parse_reply 함수: 진짜 모듈 불러오기 실패" in w for w in h["load_warnings"])
 
 
-def test_engine_no_warning_when_module_missing():
-    # 지금 저장소에는 진짜 모듈이 없으므로 경고가 없어야 한다
+def test_engine_warns_when_signature_differs(client, restore_engine):
+    """진짜 함수의 인자 모양이 서버(stubs.py)와 다르면 가짜를 쓰고 경고한다."""
+    fake = types.ModuleType(COORD_MOD)
+    fake.__spec__ = importlib.machinery.ModuleSpec(COORD_MOD, None)
+    fake.parse_reply = lambda text, method="keyword": None            # 예전 모양 (choice 없음)
+    fake.match_conditions = lambda parse, alternatives, round, unavailable=(): None   # 같은 모양
+    sys.modules[COORD_MOD] = fake
+    importlib.reload(engine)
+
+    src = engine.sources()
+    assert src["parse_reply"] == "stub"
+    assert src["match_conditions"] == f"real ({COORD_MOD})"
+    w = [x for x in engine.load_warnings() if x.startswith("parse_reply: 진짜 함수 모양이 서버와 다름")]
+    assert len(w) == 1 and "choice" in w[0], engine.load_warnings()
+    assert not any(x.startswith("match_conditions") for x in engine.load_warnings())
+    h = client.get("/health").json()
+    assert any(x.startswith("parse_reply: 진짜 함수 모양이 서버와 다름") for x in h["load_warnings"])
+
+
+def test_engine_signature_diff_details():
+    def real(text, choice=None, *, message="", method="llm"):
+        pass
+
+    diff = engine.signature_diff(real, engine.stubs.parse_reply)
+    assert any("alternatives" in d for d in diff)          # 키워드 전용 인자 하나가 빠짐
+    assert engine.signature_diff(engine.stubs.parse_reply, engine.stubs.parse_reply) == []
+
+
+def test_engine_no_warning_for_current_coord():
+    # 진짜 coord.py가 없으면 경고가 없어야 하고, 있으면 모양이 서버와 같아서 경고가 없어야 한다
     importlib.reload(engine)
     assert engine.load_warnings() == []
+
+
+# ---------- 조율 함수 모양 (최재성 coord.py 기준) ----------
+
+def _sent_section(client) -> str:
+    sid = start_round(client)
+    r = client.post(f"/coord/{enc(sid)}/message")
+    assert r.status_code == 200 and r.json()["sent"], r.text
+    return sid
+
+
+def test_message_record_shape_and_no_blocker_name(client):
+    from backend.app.main import store
+    sid = start_round(client)
+    inp = store.message_input(sid)
+    assert inp.reveal is False                      # 기본: 상대 교수 이름 알리지 않음
+    assert inp.round == 1 and inp.alternatives
+    assert not ({"seniority", "hired", "priority"} & set(type(inp).model_fields))
+    r = client.post(f"/coord/{enc(sid)}/message", json={"method": "keyword"})
+    assert r.status_code == 200, r.text
+    rec = r.json()
+    assert set(rec) >= {"text", "method", "fallback", "problems", "issues", "sent"}
+    assert rec["issues"] == [] and rec["sent"] is True
+    if inp.blocker_prof:
+        assert f"{inp.blocker_prof} 교수" not in rec["text"]
+    for w in ("연차", "임용", "우선순위"):
+        assert w not in rec["text"]
+    assert inp.course in rec["text"] and inp.wish in rec["text"]
+
+
+def test_reply_choice_button(client):
+    sid = _sent_section(client)
+    r = client.post(f"/coord/{enc(sid)}/reply", json={"text": "", "choice": "B"})
+    assert r.status_code == 200, r.text
+    p = r.json()["parse"]
+    assert p["picks"][:1] == ["B"] and p["kind"] in ("수용", "조건부")
+    assert r.json()["choice"] == "B"
+
+
+def test_reply_choice_none_then_confirm_next(client):
+    from backend.app.main import store
+    sid = _sent_section(client)
+    r = client.post(f"/coord/{enc(sid)}/reply", json={"text": "목요일 오후면 됩니다", "choice": "none"})
+    assert r.status_code == 200, r.text
+    assert r.json()["parse"]["kind"] == "거절"
+    prop = r.json()["proposal"]
+    assert prop["action"] == "next"
+    # 다음 차수로 넘기는 처리안을 [확인] → 시간표는 그대로, 조건만 기록
+    before = client.get("/timetable").json()["assignments"]
+    r = client.post(f"/coord/{enc(sid)}/decide", json={"action": "confirm"})
+    assert r.status_code == 200, r.text
+    assert r.json()["decision"]["action"] == "confirm_next"
+    assert r.json()["coord"]["state"] == "NEXT"
+    assert client.get("/timetable").json()["assignments"] == before
+    # 2차: 확인된 조건이 메시지 입력의 prev_conditions로 들어간다
+    assert client.post("/rounds/next").json()["round_no"] == 2
+    inp = store.message_input(sid)
+    assert inp.round == 2
+    cond = prop["conditions"]
+    if cond["days"] or cond["window"] or cond["end_before"]:     # 가짜 parse_reply는 요일을 안 뽑을 수 있다
+        assert inp.prev_conditions is not None and inp.prev_conditions.days == cond["days"]
+    assert store.get_coord(sid)["prev_conditions"] is not None
+
+
+def test_unconfirmed_reply_not_used_next_round(client):
+    from backend.app.main import store
+    sid = _sent_section(client)
+    r = client.post(f"/coord/{enc(sid)}/reply", json={"text": "목요일 오후면 됩니다", "choice": "none"})
+    assert r.json()["proposal"]["action"] == "next"
+    # [확인]을 누르지 않고 다음 차수 → 답장 조건은 반영하지 않는다
+    assert client.post("/rounds/next").json()["round_no"] == 2
+    assert store.get_coord(sid)["prev_conditions"] is None
+    assert store.message_input(sid).prev_conditions is None
+
+
+def test_decide_proposal_cannot_be_confirmed(client):
+    sid = _sent_section(client)
+    r = client.post(f"/coord/{enc(sid)}/reply", json={"text": "음 글쎄요"})
+    assert r.json()["parse"]["kind"] == "확인 필요"
+    assert r.json()["proposal"]["action"] == "decide"
+    r = client.post(f"/coord/{enc(sid)}/decide", json={"action": "confirm"})
+    assert r.status_code == 409 and "action=decide" in r.json()["detail"]
+
+
+def test_reply_needs_text_or_choice(client):
+    sid = _sent_section(client)
+    assert client.post(f"/coord/{enc(sid)}/reply", json={"text": "  "}).status_code == 422
+    assert client.post(f"/coord/{enc(sid)}/reply", json={"text": "x", "choice": "D"}).status_code == 422
+
+
+def test_conditions_shape_and_end_before(client):
+    sid = _sent_section(client)
+    r = client.post(f"/coord/{enc(sid)}/reply", json={"text": REPLY})
+    k = r.json()["parse"]["conditions"]
+    assert set(k) == {"days", "window", "end_before"}
+    assert {"day": 2, "time": "17:00"} in k["end_before"]      # 수요일 = 2

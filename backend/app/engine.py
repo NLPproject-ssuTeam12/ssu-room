@@ -9,12 +9,16 @@
 - 모듈은 있는데 불러오다 실패      → 가짜를 쓰되 경고 (load_warnings, 서버 시작 로그)
   (문법 오류, 모듈 안에서 필요한 패키지가 없어 나는 ImportError 등 모든 에러)
 - 모듈은 불러왔는데 그 이름이 없음 → 경고 없이 가짜
+- 조율 함수는 진짜와 가짜(stubs.py)의 시그니처를 inspect.signature로 비교한다.
+  인자 이름·순서·종류(키워드 전용 등)·기본값이 하나라도 다르면 가짜를 쓰고 경고
+  ("OOO: 진짜 함수 모양이 서버와 다름 (차이)"). 타입 표시(annotation)는 비교하지 않는다.
 
 main.py와 store.py는 stubs.py를 직접 import하지 않고 이 파일만 쓴다.
 """
 
 import importlib
 import importlib.util
+import inspect
 import pkgutil
 import sys
 from typing import Callable, Dict, List, Optional, Tuple
@@ -68,6 +72,40 @@ def _pick(name: str, modules: List[object]) -> Tuple[Callable, str]:
     return getattr(stubs, name), "stub"
 
 
+_KIND = {
+    inspect.Parameter.POSITIONAL_ONLY: "위치 전용",
+    inspect.Parameter.POSITIONAL_OR_KEYWORD: "위치",
+    inspect.Parameter.VAR_POSITIONAL: "*args",
+    inspect.Parameter.KEYWORD_ONLY: "키워드 전용",
+    inspect.Parameter.VAR_KEYWORD: "**kwargs",
+}
+
+
+def _param_text(p: inspect.Parameter) -> str:
+    d = "" if p.default is inspect.Parameter.empty else f"={p.default!r}"
+    return f"{p.name}{d} [{_KIND[p.kind]}]"
+
+
+def signature_diff(real: Callable, stub: Callable) -> List[str]:
+    """진짜와 가짜의 인자 차이. 빈 목록 = 같음."""
+    try:
+        a = list(inspect.signature(real).parameters.values())
+    except (TypeError, ValueError) as e:
+        return [f"시그니처를 읽을 수 없음: {e}"]
+    b = list(inspect.signature(stub).parameters.values())
+    diff = []
+    for i in range(max(len(a), len(b))):
+        pa = a[i] if i < len(a) else None
+        pb = b[i] if i < len(b) else None
+        if pa is None:
+            diff.append(f"{i + 1}번째 인자: 진짜에 없음, 서버는 {_param_text(pb)}")
+        elif pb is None:
+            diff.append(f"{i + 1}번째 인자: 진짜는 {_param_text(pa)}, 서버에 없음")
+        elif (pa.name, pa.kind, pa.default) != (pb.name, pb.kind, pb.default):
+            diff.append(f"{i + 1}번째 인자: 진짜 {_param_text(pa)} / 서버 {_param_text(pb)}")
+    return diff
+
+
 def _resolve() -> Tuple[Dict[str, Tuple[Callable, str]], List[str]]:
     table: Dict[str, Tuple[Callable, str]] = {}
     warnings: List[str] = []
@@ -84,6 +122,15 @@ def _resolve() -> Tuple[Dict[str, Tuple[Callable, str]], List[str]]:
             table[n] = _pick(n, mods)
             if table[n][1] == "stub" and fails:
                 warnings.append(f"{n} 함수: 진짜 모듈 불러오기 실패 → 가짜 사용 ({'; '.join(fails)})")
+
+    for n in COORD_NAMES:   # 조율 함수는 모양까지 맞아야 진짜를 쓴다
+        fn, src = table[n]
+        if src == "stub":
+            continue
+        diff = signature_diff(fn, getattr(stubs, n))
+        if diff:
+            table[n] = (getattr(stubs, n), "stub")
+            warnings.append(f"{n}: 진짜 함수 모양이 서버와 다름 ({'; '.join(diff)}) → 가짜 사용")
     return table, warnings
 
 
