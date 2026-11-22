@@ -410,7 +410,7 @@ fetch(`http://localhost:8000/coord/${encodeURIComponent(sectionId)}/message`, { 
   "parse": {
     "kind": "조건부",
     "picks": ["A", "C"],
-    "conditions": { "days": [], "slots": [], "end_before": [ { "day": 2, "time": "17:00" } ] },
+    "conditions": { "day_slots": {}, "end_before": [ { "day": 2, "time": "17:00" } ] },
     "note": "",
     "method": "keyword",
     "fallback": false
@@ -418,7 +418,7 @@ fetch(`http://localhost:8000/coord/${encodeURIComponent(sectionId)}/message`, { 
   "proposal": {
     "action": "move",
     "key": "A",
-    "conditions": { "days": [], "slots": [], "end_before": [ { "day": 2, "time": "17:00" } ] },
+    "conditions": { "day_slots": {}, "end_before": [ { "day": 2, "time": "17:00" } ] },
     "text": "A안(화·목 18:00~19:15 · 문화관 03105)으로 옮길까요?",
     "checks": [ { "key": "A", "ok": true, "why": "조건과 맞음" }, { "key": "C", "ok": true, "why": "조건과 맞음" } ]
   },
@@ -428,7 +428,13 @@ fetch(`http://localhost:8000/coord/${encodeURIComponent(sectionId)}/message`, { 
 }
 ```
 - `parse.kind`: `수용` / `조건부` / `거절` / `확인 필요` (한글 그대로. `확인 필요`는 띄어 쓴다).
-- `parse.conditions.slots`: 되는 교시 시작 시각 목록(예: 오후 = `["13:30", "15:00", "16:30"]`, 늦은 오후 = `["16:30"]`). 빈 목록 = 제한 없음. 연강은 두 교시가 모두 들어 있어야 맞는다. 8교시 시작 시각 밖의 값은 들어오지 않는다.
+- `parse.conditions` (요일별 교시, 11/22): `{"day_slots": {요일 번호: [교시 시작 시각]}, "end_before": [...]}`.
+  - 요일 번호는 0=월 … 4=금, JSON에서는 문자열 키(`"1"`).
+  - 교시: 오전 = `["09:00", "10:30"]`, 점심 = `["12:00"]`, 오후 = `["13:30", "15:00", "16:30"]`, 늦은 오후 = `["16:30"]`, 저녁 = `["18:00", "19:30"]`. 8교시 시작 시각 밖의 값은 들어오지 않는다.
+  - 빈 목록 = 그 요일은 아무 교시나. `day_slots`가 `{}`이면 요일·교시 제한 없음.
+  - 요일이 둘 이상이면 수업이 그 요일들 안에서만(키 없는 요일 불가), 하나면 그 요일이 들어가기만 하면 된다(주 2회의 다른 하루는 자유). 연강은 두 교시가 모두 들어 있어야 맞는다.
+  - 예: "화 오전이나 목 오후" = `{"1": ["09:00", "10:30"], "3": ["13:30", "15:00", "16:30"]}`, "화목이면 돼요" = `{"1": [], "3": []}`.
+  - 옛 모양(`days`·`slots`)은 서버가 받아서 이 모양으로 바꿔 내보낸다. 답장 기록·처리안·`/coord`의 `prev_conditions`·`next_conditions`·`/decide`의 `applied` 모두 같은 모양.
 - `note`: 조교가 확인할 교수 요청(예: `"실습용 PC가 있는 방"`). `parse.note`와 같은 값을 맨 위에도 둔다 — **화면은 처리안과 함께 보여 준다.** 배정·다음 차수 조건에는 쓰지 않는다(조교가 직접 처리). 언어 모델(`llm`)만 채우고 `keyword`는 항상 `""`. 자세한 규칙은 API_조율.md.
 - `proposal.action`과 조교 버튼:
   - `move`: `key` 안으로 옮기자는 안. `[확인]`하면 옮긴다.
@@ -437,14 +443,14 @@ fetch(`http://localhost:8000/coord/${encodeURIComponent(sectionId)}/message`, { 
 
 거절 예 (진짜 함수, `method: "keyword"`, `choice: "none"`, 글 "셋 다 안 됩니다. 화요일 오후면 괜찮아요"):
 ```json
-{ "parse": { "kind": "거절", "picks": [], "conditions": { "days": [1], "slots": ["13:30", "15:00", "16:30"], "end_before": [] }, "note": "", "method": "keyword", "fallback": false },
+{ "parse": { "kind": "거절", "picks": [], "conditions": { "day_slots": { "1": ["13:30", "15:00", "16:30"] }, "end_before": [] }, "note": "", "method": "keyword", "fallback": false },
   "proposal": { "action": "next", "key": null, "conditions": { "…": "…" }, "text": "새 조건(화요일, 오후)으로 다음 차수 대안을 만들까요?", "checks": [] },
   "note": "" }
 ```
 
 `note`가 있는 예 (언어 모델이 교수 요청을 뽑은 경우. 모양만 보이는 예):
 ```json
-{ "parse": { "kind": "조건부", "picks": ["A"], "conditions": { "days": [], "slots": [], "end_before": [] }, "note": "실습용 PC가 있는 방", "method": "llm", "fallback": false },
+{ "parse": { "kind": "조건부", "picks": ["A"], "conditions": { "day_slots": {}, "end_before": [] }, "note": "실습용 PC가 있는 방", "method": "llm", "fallback": false },
   "proposal": { "action": "move", "key": "A", "…": "…", "text": "A안(…)으로 옮길까요? 교수님 요청: 실습용 PC가 있는 방" },
   "note": "실습용 PC가 있는 방" }
 ```
@@ -481,7 +487,7 @@ fetch(`http://localhost:8000/coord/${encodeURIComponent(sectionId)}/message`, { 
 }
 ```
 - 옮긴 분반은 시간표에서 `status: "DONE"`이 되고 `blocks`·`room`이 `applied.meetings`로 바뀐다(강의실은 첫 수업의 것).
-- confirm `next` 응답은 `{decision, coord}`: `decision.action: "confirm_next"`, `applied`는 조건(`Conditions`), `coord.state: "NEXT"`.
+- confirm `next` 응답은 `{decision, coord}`: `decision.action: "confirm_next"`, `applied`는 조건(`{"day_slots": {...}, "end_before": [...]}`), `coord.state: "NEXT"`.
 - keep 응답은 `violations` 없이 `{decision, coord}` (`applied: null`, `state: "KEPT"`).
 
 에러:
@@ -518,7 +524,7 @@ fetch(`http://localhost:8000/coord/${encodeURIComponent(sectionId)}/message`, { 
 ```
 - `open`: 아직 반영 안 된 조율 분반.
 
-2차 메시지 예 (조건 "화요일, 오후" = `{"days": [1], "slots": ["13:30", "15:00", "16:30"]}`를 [확인]한 뒤, 진짜 `write_message`):
+2차 메시지 예 (조건 "화요일, 오후" = `{"day_slots": {"1": ["13:30", "15:00", "16:30"]}}`를 [확인]한 뒤, 진짜 `write_message`):
 ```text
 2027-1학기 웹프로그래밍 03 (공통-재수강) 분반 시간표 2차 조율 안내드립니다.
 

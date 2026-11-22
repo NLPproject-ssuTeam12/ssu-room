@@ -13,11 +13,12 @@ import os
 from typing import List, Literal, Optional
 
 from fastapi import FastAPI, HTTPException
+from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from . import engine
-from .contracts import Alternative, Key, Timetable, Wish, dump, meetings_to_blocks, parse
+from .contracts import Alternative, Key, Timetable, Wish, fix_conditions, dump, meetings_to_blocks, parse
 from .nlp import assistant
 from .store import MAX_ROUND, store
 
@@ -116,7 +117,8 @@ def _normalize(tt: Timetable) -> Timetable:
 
 def _coord_out(item: dict) -> dict:
     sec = store.get_section(item["section_id"])
-    out = dict(item)
+    # 조건(prev/next_conditions, 처리안·답장 해석 안)은 요일별 교시 모양으로 내보낸다
+    out = fix_conditions(jsonable_encoder(item))
     out["name"] = sec.name if sec else None
     out["professor"] = sec.professor if sec else None
     return out

@@ -15,7 +15,7 @@ from typing import List, Literal, Optional, Tuple, Union
 from .contracts import (
     DAYN, DAYS, STARTS, Alternative, Assignment, Block, Conditions, EndBefore, Message, MessageInput,
     PickCheck, Proposal, ReplyParse, Room, Section, Timetable, Violation, WhatIfResult, Wish,
-    alternative, dump, late_penalty, meetings_to_blocks, no_long_at_1800, parse,
+    alternative, as_day_slots, dump, late_penalty, meetings_to_blocks, no_long_at_1800, parse,
 )
 
 Method = Literal["keyword", "llm"]
@@ -170,22 +170,33 @@ def _move_day(blocks: List[Block], step: int) -> List[Block]:
 
 
 def _fits(blocks: List[Block], cond: Optional[Conditions]) -> Tuple[bool, str]:
-    """조건 읽는 법은 coord_models.Conditions 주석과 같다.
-    days: 둘 이상 = 그 요일 안에서만, 하나 = 그 요일을 포함.
-    slots: 되는 교시 시작 시각 (연강이면 두 교시 모두 들어 있어야 함). end_before: 요일별 종료 시각."""
+    """조건 읽는 법은 coord_models.Conditions 주석과 같다 (요일별 교시 day_slots, 11/22).
+    day_slots가 비면 요일·교시 제한 없음. 요일 키가 둘 이상 = 그 요일들 안에서만(키 없는 요일 불가),
+    하나 = 그 요일이 들어가기만 하면 됨(주 2회의 다른 하루는 자유).
+    그 요일 목록이 비면 아무 교시나, 있으면 그 교시만 (연강이면 두 교시 모두 들어 있어야 함).
+    end_before: 요일별 종료 시각. 옛 모양(days·slots) 조건도 받는다."""
     if cond is None:
         return True, ""
-    days = [DAYS.index(b.day) for b in blocks]
-    if cond.days:
-        ok = all(d in cond.days for d in days) if len(cond.days) >= 2 else cond.days[0] in days
-        if not ok:
-            return False, "가능한 요일이 아님"
+    cond = as_day_slots(cond)
+    ds = cond.day_slots
     for b in blocks:
-        s, e = _block_range(b)
+        _, e = _block_range(b)
         for eb in cond.end_before:
             if DAYS.index(b.day) == eb.day and e > _to_min(eb.time):
                 return False, f"{_block_text(b)} 종료라 '{b.day} {eb.time} 전 종료'와 안 맞음"
-        if cond.slots and not all(st in cond.slots for st in _slot_starts(b)):
+    if not ds:
+        return True, ""
+    days = [DAYS.index(b.day) for b in blocks]
+    if len(ds) >= 2:
+        ok, checked = all(d in ds for d in days), blocks
+    else:
+        (d0,) = ds
+        ok, checked = d0 in days, [b for b in blocks if DAYS.index(b.day) == d0]
+    if not ok:
+        return False, "가능한 요일이 아님"
+    for b in checked:
+        allowed = ds[DAYS.index(b.day)]
+        if allowed and not all(st in allowed for st in _slot_starts(b)):
             return False, f"{_block_text(b)}가 가능한 교시 밖"
     return True, ""
 
@@ -260,7 +271,7 @@ def reassign(timetable: Timetable, section_id: str, choice: Union[Alternative, C
     """STUB: 담당 문하윤
     현재 배정 + 고른 안 또는 조건 → 새 배정. 가짜: 그 분반 하나만 바꾼다."""
     tt = parse(Timetable, dump(timetable))
-    if isinstance(choice, Conditions):
+    if not isinstance(choice, Alternative):   # 조건 (옛 모양·새 모양 모두)
         alts = make_alternatives(section_id, choice)
         if not alts:
             return tt

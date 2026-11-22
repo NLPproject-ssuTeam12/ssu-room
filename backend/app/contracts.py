@@ -6,12 +6,12 @@
 #    — 최재성 backend/app/nlp/coord_models.py 기준. 필드 이름·타입·값을 바꾸지 않는다.)
 # 배정 쪽 모델(Room, Section, Block, Wish, Assignment, Timetable 등)은 이 파일이 기준이다.
 #
-# validator, parse(), dump()는 Pydantic 1.x 시절 모양을 그대로 둔다.
+# validator, parse()는 Pydantic 1.x 시절 모양을 그대로 둔다. 조율 Conditions는 coord_models와 똑같이 Pydantic 2 모양.
 
 import re
 from typing import Dict, List, Literal, Optional, Tuple
 
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field, field_validator, model_validator, validator
 
 DAYS = ("월", "화", "수", "목", "금")
 STARTS = ("09:00", "10:30", "12:00", "13:30", "15:00", "16:30", "18:00", "19:30")
@@ -137,20 +137,58 @@ class EndBefore(BaseModel):
 
 
 class Conditions(BaseModel):
-    """교수 답장에서 뽑은 조건. 다음 차수 대안을 만들 때 배정 엔진이 읽는다."""
-    days: List[int] = []           # 둘 이상 = 그 요일 안에서만, 하나 = 그 요일을 포함
-    slots: List[str] = []          # 되는 교시(시작 시각). 비면 제한 없음. 연강은 두 칸 모두 들어 있어야 맞음
+    """교수 답장에서 뽑은 조건. 다음 차수 대안을 만들 때 배정 엔진이 읽는다.
+
+    day_slots: 요일(0~4) → 그 요일에 되는 교시 시작 시각. 빈 목록 = 그 요일은 아무 교시나 (11/22, 요일별 교시)
+      - "화 오전이나 목 오후" → {1: ["09:00", "10:30"], 3: ["13:30", "15:00", "16:30"]}
+      - "화목이면 돼요"       → {1: [], 3: []}
+      - 비어 있으면 요일·교시 제한 없음
+      요일이 둘 이상이면 수업이 그 요일들 안에서만, 하나면 그 요일이 들어가기만 하면 된다 (주 2회의 다른 하루는 자유).
+      연강은 두 교시가 모두 들어 있어야 맞다.
+    end_before: 요일별로 이 시각 전에 끝나야 함.
+
+    옛 모양 {"days": [...], "slots": [...]}도 받는다 (요일 × 교시로 바꿈). 읽기용 days·slots는 옛 코드용 근사값이다.
+    """
+    day_slots: Dict[int, List[str]] = {}
     end_before: List[EndBefore] = []
 
-    @validator("slots", allow_reuse=True)
-    def _known_slots(cls, v):
-        bad = [s for s in v if s not in SLOTS]
-        if bad:
-            raise ValueError(f"교시 시작 시각이 아님: {bad}")
-        return sorted(set(v), key=SLOTS.index)
+    @model_validator(mode="before")
+    @classmethod
+    def _from_old_shape(cls, v):
+        if isinstance(v, dict) and "day_slots" not in v and ("days" in v or "slots" in v):
+            v = dict(v)
+            days, slots = v.pop("days", None) or [], v.pop("slots", None) or []
+            v["day_slots"] = {d: list(slots) for d in (days or (range(5) if slots else []))}
+        return v
+
+    @field_validator("day_slots")
+    @classmethod
+    def _check_day_slots(cls, v):
+        out = {}
+        for d in sorted(v):
+            if not 0 <= d <= 4:
+                raise ValueError(f"요일은 0~4: {d}")
+            bad = [s for s in v[d] if s not in SLOTS]
+            if bad:
+                raise ValueError(f"교시 시작 시각이 아님: {bad}")
+            out[d] = sorted(set(v[d]), key=SLOTS.index)
+        return out
 
     def is_empty(self) -> bool:
-        return not self.days and not self.slots and not self.end_before
+        return not self.day_slots and not self.end_before
+
+    # ---- 옛 코드(days·slots를 읽던 곳)용 읽기 전용 근사값. 새 코드는 day_slots를 읽는다 ----
+    @property
+    def days(self) -> List[int]:
+        """다섯 요일이 다 있으면 요일 제한 없음([])으로 본다."""
+        return [] if set(self.day_slots) == set(range(5)) else list(self.day_slots)
+
+    @property
+    def slots(self) -> List[str]:
+        """요일별 교시를 합친 것. 어느 요일이 '아무 교시나'면 교시 제한 없음([])."""
+        if not self.day_slots or any(not s for s in self.day_slots.values()):
+            return []
+        return sorted({s for v in self.day_slots.values() for s in v}, key=SLOTS.index)
 
 
 class ReplyParse(BaseModel):
@@ -201,6 +239,8 @@ class Proposal(BaseModel):
     checks: List[PickCheck] = []
 
 
+ConditionsCopy = Conditions   # 사본은 진짜 모델을 불러온 뒤에도 남겨 둔다 (옛 모양 → 새 모양 바꾸기에 쓴다)
+
 try:   # 합쳐진 뒤: 진짜 모델을 쓴다 (위 사본과 같은 모양이어야 한다)
     from .nlp.coord_models import (  # type: ignore  # noqa: F811
         Alternative, Conditions, EndBefore, Meeting, Message, MessageInput, PickCheck, Proposal, ReplyParse,
@@ -208,6 +248,28 @@ try:   # 합쳐진 뒤: 진짜 모델을 쓴다 (위 사본과 같은 모양이�
     COORD_MODELS = "real (nlp.coord_models)"
 except Exception:   # 없거나 불러오다 실패하면 사본 (실패 경고는 engine이 남긴다)
     COORD_MODELS = "copy (contracts.py)"
+
+
+def as_day_slots(cond) -> "ConditionsCopy":
+    """어떤 모양의 조건이든 요일별 교시(day_slots) 사본으로 바꾼다.
+    진짜 coord_models가 아직 옛 모양(days·slots)일 때도 서버는 day_slots로 읽고 내보낸다."""
+    if cond is None:
+        return ConditionsCopy()
+    if isinstance(cond, ConditionsCopy):
+        return cond
+    data = cond if isinstance(cond, dict) else cond.model_dump()
+    return ConditionsCopy.model_validate(data)
+
+
+def conditions_json(cond) -> dict:
+    """API로 내보내는 조건 모양: {"day_slots": {"1": [...]}, "end_before": [...]}. 요일 키는 문자열."""
+    c = as_day_slots(cond)
+    return {"day_slots": {str(d): list(s) for d, s in c.day_slots.items()},
+            "end_before": [{"day": e.day, "time": e.time} for e in c.end_before]}
+
+
+def _is_conditions_dict(v) -> bool:
+    return isinstance(v, dict) and "end_before" in v and set(v) <= {"days", "slots", "day_slots", "end_before"}
 
 
 # ---------- 배정 결과 확인 ----------
@@ -277,7 +339,21 @@ def parse(cls, data):
 
 
 def dump(model) -> dict:
-    return model.model_dump() if hasattr(model, "model_dump") else model.dict()
+    """모델 → dict. 안에 든 조건은 모두 요일별 교시 모양(conditions_json)으로 바꾼다."""
+    if isinstance(model, ConditionsCopy) or type(model).__name__ == "Conditions":
+        return conditions_json(model)
+    data = model.model_dump() if hasattr(model, "model_dump") else model.dict()
+    return fix_conditions(data)
+
+
+def fix_conditions(v):
+    if _is_conditions_dict(v):
+        return conditions_json(v)
+    if isinstance(v, dict):
+        return {k: fix_conditions(x) for k, x in v.items()}
+    if isinstance(v, list):
+        return [fix_conditions(x) for x in v]
+    return v
 
 
 # ---------- 배정 칸(Block) ↔ 조율 수업(Meeting) ----------
