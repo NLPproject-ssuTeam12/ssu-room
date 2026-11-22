@@ -1,0 +1,324 @@
+"""조율 NLP (백엔드 2): 조율 메시지 작성·검사, 교수 답장 해석, 조건 대조.
+
+    write_message(inp, method)          → Message      교수에게 보낼 조율 글
+    check_message(text, inp)            → list[str]    글에서 걸린 문제 (빈 목록 = 보내도 됨)
+    parse_reply(text, choice, ..., method) → ReplyParse 답장 → 판정·고른 안·조건
+    match_conditions(parse, alts, round)   → Proposal   조교에게 보여 줄 처리안
+
+method="keyword"는 비교 기준(규칙)이고, method="llm"은 언어 모델을 쓴다.
+언어 모델이 실패하거나 결과가 검사를 통과하지 못하면 키워드 방식으로 대신 처리하고 fallback=True로 표시한다.
+check_message와 match_conditions는 항상 코드(규칙)로만 한다. 배정을 정하는 건 언어 모델이 아니다.
+
+키워드 규칙은 화면 시안 v4(docs/prototype)의 parseReply·msgText·msgChecks·check를 옮긴 것이다.
+프롬프트 예시 문장은 평가 문장과 겹치지 않게 따로 쓴다 (평가 문장은 팀원·지인이 직접 쓴다).
+"""
+import re
+from typing import Literal
+
+from pydantic import BaseModel
+
+from .coord_models import (DAYN, SLOTS, Alternative, Conditions, EndBefore, Message, MessageInput,
+                           PickCheck, Proposal, ReplyParse)
+from .llm import LLMUnavailable, generate_json, load_prompt
+
+Method = Literal["keyword", "llm"]
+
+# 말로 하는 시간대 → 되는 교시(시작 시각). '늦은 오후'를 '오후'보다 먼저 찾는다 (11/21 팀 결정)
+# 18:00 시작(19:15 종료)은 저녁이다. 답장을 쓴 사람들이 18:00을 '저녁'이라고 불렀다 (11/22)
+SLOT_WORDS = {
+    "늦은 오후": ["16:30"],
+    "오전": ["09:00", "10:30"],
+    "점심": ["12:00"],
+    "저녁": ["18:00", "19:30"],
+    "오후": ["13:30", "15:00", "16:30"],
+}
+MAX_ROUND = 3
+EARLY_END_MIN = 15   # 고른 안이 종료 조건보다 이만큼 이내로만 늦게 끝나면 교수 재량(몇 분 일찍 마침)으로 보고 조건에서 뺀다 (11/22)
+FORBIDDEN = re.compile(r"연차|임용|우선순위|경력|꼭 표시")
+CLOSING = "가능한 안을 골라 주시거나, 모두 어려우시면 가능한 시간을 적어 주세요. 회신 기한은 1주이며, 기한 전에 한 번 더 알려 드립니다."
+
+
+# ---------------- 표시 ----------------
+def _mins(t: str) -> int:
+    h, m = t.split(":")
+    return int(h) * 60 + int(m)
+
+
+def alt_label(a: Alternative) -> str:
+    """예: '월·수 16:30~17:45 · 정보관 305', '수 13:30~16:15 연강 · 정보관 210'"""
+    ms = a.meetings
+    times = {(m.start, m.end) for m in ms}
+    if len(times) == 1:
+        s, e = ms[0].start, ms[0].end
+        when = f"{'·'.join(DAYN[m.day] for m in ms)} {s}~{e}"
+        if len(ms) == 1 and _mins(e) - _mins(s) > 75:
+            when += " 연강"
+    else:   # 주 2회인데 요일마다 시각이 다른 경우
+        when = " / ".join(f"{DAYN[m.day]} {m.start}~{m.end}" for m in ms)
+    rooms = {m.room for m in ms}
+    where = ms[0].room if len(rooms) == 1 else " / ".join(f"{DAYN[m.day]} {m.room}" for m in ms)
+    return f"{when} · {where}"
+
+
+def cond_label(k: Conditions) -> str:
+    a = []
+    if k.days:
+        a.append("·".join(DAYN[d] for d in k.days) + "요일")
+    if k.slots:
+        name = next((n for n, w in SLOT_WORDS.items() if w == k.slots), None)
+        a.append(name or "·".join(k.slots) + " 시작 수업")
+    for eb in k.end_before:
+        a.append(f"{DAYN[eb.day]}요일 {eb.time} 전 종료")
+    return ", ".join(a)
+
+
+# ---------------- 조율 메시지 ----------------
+def _template(inp: MessageInput) -> str:
+    L = [f"{inp.professor} 교수님, 안녕하세요. 학과사무실입니다.",
+         f"{inp.term} {inp.course} 분반 시간표 {inp.round}차 조율 안내드립니다.", ""]
+    if inp.round == 1:
+        other = (f"{inp.blocker_prof} 교수님의 {inp.blocker_course} 분반과"
+                 if inp.reveal and inp.blocker_prof and inp.blocker_course else "다른 강의와")
+        L.append(f"희망하신 시간({inp.wish})이 {other} 겹칩니다.")
+    else:
+        if inp.prev_conditions and not inp.prev_conditions.is_empty():
+            L.append(f"지난 회신에서 주신 조건({cond_label(inp.prev_conditions)})을 반영해 대안을 다시 드립니다.")
+        else:
+            L.append("지난 차수 이후 바뀐 시간표를 반영해 대안을 다시 드립니다.")
+        L.append(f"처음 희망하신 시간: {inp.wish}")
+    L.append("")
+    L += [f"{a.key}  {alt_label(a)}" for a in inp.alternatives]
+    L += ["", CLOSING]
+    return "\n".join(L)
+
+
+class _MessageLLM(BaseModel):
+    text: str
+
+
+def write_message(inp: MessageInput, method: Method = "keyword") -> Message:
+    if method == "keyword":
+        return Message(text=_template(inp), method="keyword")
+    if inp.round == 1:
+        situation = (f"희망 시간이 {inp.blocker_prof} 교수님의 {inp.blocker_course} 분반과 겹친다. 상대 교수와 강의 이름을 적는다."
+                     if inp.reveal and inp.blocker_prof and inp.blocker_course
+                     else "희망 시간이 다른 강의와 겹친다. 상대 교수 이름과 강의 이름은 적지 않는다 (학과 설정).")
+    elif inp.prev_conditions and not inp.prev_conditions.is_empty():
+        situation = f"지난 회신의 조건({cond_label(inp.prev_conditions)})을 반영한 대안을 다시 보낸다. 처음 희망도 다시 적는다."
+    else:
+        situation = "지난 차수 이후 바뀐 시간표를 반영한 대안을 다시 보낸다. 처음 희망도 다시 적는다."
+    prompt = (load_prompt("write_message")
+              .replace("<<PROFESSOR>>", inp.professor).replace("<<TERM>>", inp.term)
+              .replace("<<COURSE>>", inp.course).replace("<<ROUND>>", str(inp.round))
+              .replace("<<WISH>>", inp.wish).replace("<<SITUATION>>", situation)
+              .replace("<<ALTERNATIVES>>", "\n".join(f"{a.key}  {alt_label(a)}" for a in inp.alternatives))
+              .replace("<<CLOSING>>", CLOSING))
+    try:
+        text = generate_json(prompt, _MessageLLM).text.strip()
+    except LLMUnavailable as e:
+        return Message(text=_template(inp), method="keyword", fallback=True, problems=[str(e)])
+    problems = check_message(text, inp)
+    if problems:
+        return Message(text=_template(inp), method="keyword", fallback=True, problems=problems)
+    return Message(text=text, method="llm")
+
+
+def check_message(text: str, inp: MessageInput) -> list[str]:
+    """보내기 전에 코드로 검사한다. 하나라도 걸리면 보내지 않는다."""
+    p = []
+    m = FORBIDDEN.search(text)
+    if m:
+        p.append(f"연차·우선순위 이유를 썼음 ('{m.group(0)}')")
+    for h in inp.hidden:
+        if h.strip() and h.strip() in text:
+            p.append("상대 교수의 사정(기타 요청)을 썼음")
+    if not inp.reveal and inp.blocker_prof and f"{inp.blocker_prof} 교수" in text:
+        p.append("상대 교수 이름을 썼음 (학과 설정: 알리지 않음)")
+    if inp.course not in text:
+        p.append("과목·분반 이름이 빠짐")
+    if inp.wish not in text:
+        p.append("본인 희망 시간이 빠지거나 바뀜")
+    if not inp.alternatives:
+        p.append("대안이 없음")
+    lines = text.splitlines()
+    for a in inp.alternatives:
+        lab = alt_label(a)
+        if not any(lab in ln and ln.lstrip().startswith(a.key) for ln in lines):
+            p.append(f"{a.key}안이 빠지거나 바뀜")
+    return p
+
+
+# ---------------- 답장 해석 ----------------
+_PICK = re.compile(r"(?<![A-Za-z])([ABC])(?![A-Za-z])")
+_ORD = re.compile(r"(첫|두|세)\s*번째")
+_ALL_NO = re.compile(r"(셋\s*다|모두|전부|다)\s*(어렵|안\s?되|안\s?돼|불가|힘들)")
+_NO = re.compile(r"(어렵|안\s?되|안\s?돼|불가|힘들)")
+_END = re.compile(r"([월화수목금])요?일?[은는]?\s*(\d{1,2})시\s*(?:전|이전|까지)")
+# 요일 글자: 앞이 한글이 아니거나(또는 다른 요일 글자), 뒤가 구분 기호·'요'·다른 요일 글자·끝
+_DAY = re.compile(r"(?:(?<![가-힣])|(?<=[월화수목금]))([월화수목금])(?=[·\s,/요월화수목금]|$)")
+_NOT_DAY = re.compile(r"(?<![가-힣])([월화수목금])(?:요일)?(?:만|은|는|이나|도)?\s*(?:아니면|빼고|제외|말고|안\s*[돼되]|어렵|곤란|불가)")
+
+
+def _hour(h: int) -> int:
+    return h + 12 if h < 8 else h      # "5시" = 17시
+
+
+def _keyword_reply(text: str, choice: str | None) -> ReplyParse:
+    t = text or ""
+    picks = _PICK.findall(t) + [{"첫": "A", "두": "B", "세": "C"}[m] for m in _ORD.findall(t)]
+    if choice and choice != "none":
+        picks.insert(0, choice)
+    all_no = choice == "none" or bool(_ALL_NO.search(t))
+    picks = [] if all_no else list(dict.fromkeys(picks))
+    k = Conditions()
+    for d, h in _END.findall(t):
+        k.end_before.append(EndBefore(day=DAYN.index(d), time=f"{_hour(int(h)):02d}:00"))
+    if not picks:
+        no_days = {DAYN.index(d) for d in _NOT_DAY.findall(t)}      # "목요일만 아니면" = 목 빼고 다 됨
+        days = {DAYN.index(d) for d in _DAY.findall(t)} - no_days
+        k.days = sorted(days or (set(range(5)) - no_days if no_days else set()))
+        k.slots = next((list(w) for n, w in SLOT_WORDS.items() if n in t), [])
+    if picks:
+        kind = "조건부" if not k.is_empty() else "수용"
+    else:
+        kind = "거절" if all_no or _NO.search(t) else "확인 필요"
+    return ReplyParse(kind=kind, picks=picks, conditions=k, method="keyword")
+
+
+class _EndBeforeLLM(BaseModel):
+    day: int
+    time: str
+
+
+class _ReplyLLM(BaseModel):
+    kind: Literal["수용", "조건부", "거절", "확인 필요"]
+    picks: list[Literal["A", "B", "C"]]
+    days: list[int]
+    slots: list[str]
+    end_before: list[_EndBeforeLLM]
+    rooms: list[str] = []  # 고른 안을 이 강의실에서 해 달라는 요청 (번호). 이미 그 방인지는 코드가 대안과 대조한다
+    note: str = ""        # 그 밖에 조교가 확인할 요청 (장비·정원·빈 시간·다른 교시로 조정 희망). 조교에게 그대로 보여 준다
+
+
+_HHMM = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
+_ROOM_NO = re.compile(r"\d{3,5}")
+
+
+def _room_note(rooms: list[str], alt: Alternative | None, note: str) -> str:
+    """강의실 요청을 고른 안과 대조한다. 이미 그 방이면 할 일이 없으니 요청을 지우고, 아니면 note에 남긴다.
+    충족 여부는 대안에 적힌 강의실 번호로만 판단한다 (계단식·장비·정원은 알 수 없어 note로 둔다)."""
+    want = {n for x in rooms for n in _ROOM_NO.findall(x)}
+    if not want or alt is None:
+        return note
+    if all(set(_ROOM_NO.findall(m.room)) & want for m in alt.meetings):
+        return "" if any(n in note for n in want) else note   # 모델이 note에도 같은 방을 적었으면 같이 지운다
+    if any(n in note for n in want):
+        return note
+    return (note + " / " if note else "") + f"강의실 {'·'.join(sorted(want))} 요청"
+
+
+def _from_llm(r: _ReplyLLM, choice: str | None, alts: list[Alternative], text: str = "") -> ReplyParse:
+    """언어 모델 답을 검사하고 ReplyParse로 바꾼다. 모양이 이상하면 ValueError."""
+    keys = [a.key for a in alts]
+    if not (_DAY.search(text) or "평일" in text):   # '화목'·'수금'처럼 붙여 쓴 요일도 요일로 본다
+        r = r.model_copy(update={"days": []})   # 답장에 요일이 없는데 요일을 넣었으면 지어낸 것으로 보고 버린다
+    picks = [p for p in dict.fromkeys(r.picks) if not keys or p in keys]
+    if choice and choice != "none":
+        picks = [choice] + [p for p in picks if p != choice]
+    if choice == "none":
+        picks = []
+    if any(x not in SLOTS for x in r.slots):
+        raise ValueError("교시 형식")
+    ebs = []
+    for e in r.end_before:
+        if not (0 <= e.day <= 4 and _HHMM.match(e.time)):
+            raise ValueError("종료 조건 형식")
+        ebs.append(EndBefore(day=e.day, time=e.time))
+    first = next((a for a in alts if picks and a.key == picks[0]), None)
+    if first:   # "17:45 종료인데 17:30에 끝낼 수 있으면" → 교수님이 수업 안에서 정할 일. 조건으로 받으면 고른 안이 탈락한다
+        ebs = [e for e in ebs if not any(m.day == e.day and 0 < _mins(m.end) - _mins(e.time) <= EARLY_END_MIN
+                                         for m in first.meetings)]
+    k = Conditions(days=sorted({d for d in r.days if 0 <= d <= 4}), slots=r.slots, end_before=ebs)
+    note = _room_note(r.rooms, first, r.note.strip())[:100]
+    kind = r.kind
+    if kind in ("수용", "조건부"):
+        kind = "확인 필요" if not picks else ("조건부" if not k.is_empty() or note else "수용")
+    elif picks:           # 거절·확인 필요인데 안을 골랐다고 하면 모순
+        kind = "확인 필요"
+    if choice == "none" and kind in ("수용", "조건부", "확인 필요"):
+        kind = "거절"
+    return ReplyParse(kind=kind, picks=picks, conditions=k, note=note, method="llm")
+
+
+def parse_reply(text: str, choice: str | None = None, *, alternatives: list[Alternative] | None = None,
+                message: str = "", method: Method = "keyword") -> ReplyParse:
+    """choice = 교수가 화면에서 누른 선택 ('A'/'B'/'C', 'none' = 모두 어려움, None = 안 누름)."""
+    if method == "keyword":
+        return _keyword_reply(text, choice)
+    alts = alternatives or []
+    prompt = (load_prompt("parse_reply")
+              .replace("<<MESSAGE>>", message or "(없음)")
+              .replace("<<ALTERNATIVES>>", "\n".join(f"{a.key}  {alt_label(a)}" for a in alts) or "(없음)")
+              .replace("<<CHOICE>>", {None: "누르지 않음", "none": "모두 어려움"}.get(choice, f"{choice}안"))
+              .replace("<<REPLY>>", text or "(빈 답장)"))
+    try:
+        return _from_llm(generate_json(prompt, _ReplyLLM), choice, alts, text)
+    except (LLMUnavailable, ValueError):
+        r = _keyword_reply(text, choice)
+        r.fallback = True
+        return r
+
+
+# ---------------- 조건 대조 ----------------
+def _fits(a: Alternative, k: Conditions) -> tuple[bool, str]:
+    for e in k.end_before:
+        for m in a.meetings:
+            if m.day == e.day and _mins(m.end) > _mins(e.time):
+                return False, f"{DAYN[m.day]}요일 {m.end} 종료 → {e.time} 전 종료 조건과 어긋남"
+    if k.days:
+        ds = [m.day for m in a.meetings]
+        ok = all(d in k.days for d in ds) if len(k.days) >= 2 else k.days[0] in ds
+        if not ok:
+            return False, f"{'·'.join(DAYN[d] for d in ds)}요일 → 가능 요일({cond_label(Conditions(days=k.days))})과 어긋남"
+    if k.slots:
+        for m in a.meetings:
+            used = [s for s in SLOTS if _mins(m.start) <= _mins(s) < _mins(m.end)]   # 연강은 두 칸
+            if any(s not in k.slots for s in used):
+                return False, f"{DAYN[m.day]} {m.start}~{m.end} → 가능 교시({cond_label(Conditions(slots=k.slots))})와 어긋남"
+    return True, "조건과 맞음" if not k.is_empty() else "고른 안"
+
+
+def match_conditions(parse: ReplyParse, alternatives: list[Alternative], round: int,
+                     unavailable: list[str] = ()) -> Proposal:
+    """unavailable = 그사이 다른 강의가 들어가서 못 쓰는 안 (배정 엔진이 알려 준다)."""
+    k = parse.conditions
+    if parse.kind == "확인 필요":
+        return Proposal(action="decide", text="답장을 확실히 읽지 못했습니다. [수정]으로 직접 정해 주세요.")
+    if parse.picks:
+        checks = []
+        for key in parse.picks:
+            a = next((x for x in alternatives if x.key == key), None)
+            if not a:
+                checks.append(PickCheck(key=key, ok=False, why="없는 안"))
+                continue
+            ok, why = _fits(a, k)
+            if ok and key in unavailable:
+                ok, why = False, "그사이 다른 강의가 들어감"
+            checks.append(PickCheck(key=key, ok=ok, why=why))
+        g = next((c for c in checks if c.ok), None)
+        if g:
+            a = next(x for x in alternatives if x.key == g.key)
+            return Proposal(action="move", key=g.key, conditions=k, checks=checks,
+                            text=f"{g.key}안({alt_label(a)})으로 옮길까요?"
+                                 + (f" 교수님 요청: {parse.note}" if parse.note else ""))
+        if round < MAX_ROUND:
+            return Proposal(action="next", conditions=k, checks=checks,
+                            text="고른 안이 모두 조건과 어긋납니다. 조건을 넣어 다음 차수 대안을 만들까요?")
+        return Proposal(action="decide", conditions=k, checks=checks,
+                        text=f"{MAX_ROUND}차라 더 묻지 않습니다. [수정]이나 [현재대로 유지]로 정해 주세요.")
+    if round >= MAX_ROUND:
+        return Proposal(action="decide", conditions=k,
+                        text=f"{MAX_ROUND}차라 더 묻지 않습니다. [수정]이나 [현재대로 유지]로 정해 주세요.")
+    return Proposal(action="next", conditions=k,
+                    text=(f"새 조건({cond_label(k)})으로 다음 차수 대안을 만들까요?" if not k.is_empty()
+                          else "다른 조건 없이 거절했습니다. 다음 차수 대안을 만들까요?"))
