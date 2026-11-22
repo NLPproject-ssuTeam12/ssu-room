@@ -10,7 +10,7 @@ import seed_time_slot as sd, solver_core as sc, db
 
 def build(seed=1, n_courses=70, n_prof=30):
     rnd = random.Random(seed)
-    c = db.connect(":memory:"); c.executescript(open(SCHEMA_PATH).read()); sd.seed(c)
+    c = db.connect(":memory:"); c.executescript(open(SCHEMA_PATH, encoding="utf-8").read()); sd.seed(c)
     assert c.execute("pragma foreign_keys").fetchone()[0] == 1   # 외래키 검사 켜진 채로 테스트
     c.execute("INSERT INTO department VALUES (1,'AI소프트웨어학부','AI융합대학')")
     c.execute("INSERT INTO term(id,year,semester,grid_id) VALUES (1,2026,'2',1)")
