@@ -53,6 +53,7 @@ erDiagram
         int id PK
         int timetable_id FK
         int course_id FK
+        int section_no "어느 분반인지"
         text reason
         text status
     }
@@ -80,7 +81,7 @@ erDiagram
     }
     reply_interpretation {
         int message_id PK
-        text label "수용 조건부 거절 불명"
+        text label "ACCEPT CONDITIONAL REJECT UNCLEAR"
         int chosen_option_id FK
         text extracted_json
         text ta_action "CONFIRM EDIT KEEP"

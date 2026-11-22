@@ -1,0 +1,133 @@
+# 배정 엔진(solver_core.py) 사용법 — 조율·서버 쪽 참고
+
+DB 연결은 항상 `db.connect()`로 한다. SQLite는 외래키 검사가 연결마다 꺼진 채로 시작해서,
+`sqlite3.connect`를 직접 쓰면 잘못된 번호가 에러 없이 저장된다.
+
+`db.py`는 `db/`에, `solver_core.py`는 `solver/`에 있다. 둘 다 `sys.path`에 있어야 아래처럼 부를 수 있다
+(테스트는 `solver/tests/test_data.py`가 경로를 잡아 준다).
+
+```python
+import sys; sys.path[:0] = ["db", "solver"]      # 저장소 맨 위에서 실행할 때
+import db, solver_core as sc
+con = db.connect("ssuroom.db")
+```
+
+## 1. 초안 만들기 / 일부만 다시 풀기
+
+```python
+r = sc.solve(con, term_id, round_id, time_limit=60)
+# r = dict(status, timetable_id, unplaced=[(과목,분반,회차)...], unsupported=[(과목,이유)...], objective, seconds)
+
+# 교수 한 명의 응답이 바뀐 뒤: 그 교수 분반만 다시 풀고 나머지는 그대로 고정 (수 초 이내)
+sc.solve(con, term_id, round_id, previous_timetable_id=tt,
+         free_courses={(과목id, 분반번호), ...})        # 과목 id만 넣으면 그 과목의 모든 분반
+```
+
+## 2. 대안 만들기 — `make_alternatives` (= `alternatives`)
+
+```python
+opts = sc.make_alternatives(con, term_id, round_id, timetable_id, course_id,
+                            section_no=2,            # 생략하면 과목의 모든 분반
+                            condition={...},         # 생략 가능. 아래 참고
+                            n=3)
+```
+
+조율 쪽이 넘기는 모양을 **그대로** `condition`에 받는다. 모든 칸이 선택 사항이다.
+
+```json
+{"days": [0, 2], "window": ["13:30", "17:45"], "end_before": [{"day": 2, "time": "17:00"}]}
+
+요일마다 시간이 다르면 `by_day`를 쓴다:
+
+```json
+{"by_day": {"0": ["13:30", "14:45"], "2": ["15:00", "16:15"]}}
+```
+```
+
+| 칸 | 뜻 | 엔진에서의 처리 |
+|---|---|---|
+| `days` | 되는 요일 (0=월 … 4=금) | 하나면 **그 요일이 들어간 안**, 둘 이상이면 **그 요일들 안에서만** |
+| `window` | 되는 시간대 [시작, 끝] | 수업이 시작 ≥ 시작, 끝 ≤ 끝 이어야 함 (`"13:30"~"17:45"` = 4~6교시) |
+| `by_day` | 요일별 시간대 `{"요일번호": [시작, 끝]}`. 한 요일에 여러 개면 `[[시작,끝],[시작,끝]]` | **적힌 요일에서만**, 그 요일의 시간대 안에서만(수업 전체가 범위 안에 들어가야 함). 요일 키는 `"0"`도 `0`도 됨 |
+| `end_before` | 요일별로 끝나야 하는 시각 | 그 요일에 놓이는 수업은 끝 시각 ≤ time |
+| `slot_ids` | 칸 번호 목록(위 셋 대신 써도 됨) | 수업이 차지하는 칸이 모두 목록 안에 있어야 함 |
+
+- `days`(하나면 "그 요일이 들어간 안")와 `by_day`("적힌 요일에서만")는 뜻이 다르다. 한 요일만 허용하려면 `by_day`, 그 요일이 꼭 들어가면 되는 경우는 `days`.
+- 시각은 75분 격자(1교시 09:00~10:15, 2교시 10:30~11:45, …)와 맞춰야 한다. 예를 들어 `["09:00","10:30"]`은 1교시만 통과한다(2교시는 10:30에 시작해서 범위를 벗어남).
+
+조건은 **대상 과목·분반에만** 적용된다. 시간은 `"HH:MM"` 0 채움 형식.
+
+반환: 대안 리스트(최대 n개). 각 항목:
+
+```python
+dict(stage="다른 수업은 그대로" | "같은 교수·같은 학년 필수과목 일부 이동",
+     placements={(분반, 회차): (시작 칸 id, 강의실 id)},
+     ks={(분반, 회차): 한 회에 차지하는 칸 수},
+     moves=[((과목, 분반, 회차), (이전 칸, 이전 방), (새 칸, 새 방))],   # 2단계에서 같이 움직인 다른 수업
+     objective=...)
+```
+
+- 현재 배정과 같은 안은 나오지 않는다.
+- 조건을 만족하는 안이 없거나 모자라면 리스트가 짧거나 비어 있다(= 교수에게 "가능한 안이 없다"고 알려야 하는 경우).
+- 저장: `sc.save_proposal(con, round_id, timetable_id, course_id, opts, reason, section_no=2)`
+  → `proposal`(분반 번호 포함), `proposal_option`, `proposal_option_slot`
+
+## 3. 값의 뜻
+
+| 항목 | 값 |
+|---|---|
+| 선호 시간 외 불가 `course_response.prefer_only` | `1` 희망 칸 안에서만 / `0` 아니면 |
+| 실습실 `course_response.lab_requirement` | `1` 쓴다(실습실만 배정) / `0` 안 쓴다 (필수 입력) |
+| 칠한 칸 `response_slot.kind` | `PREFER` 희망 / `BLOCK` 불가. 칠하지 않은 칸은 상관없음 |
+| 주 1회 연강 `course_response.single_day_pref` | `MUST` 하루에 연속 2칸 / `PREFER` 가능하면 하루에 / `NONE` 1칸씩 이틀 (필수 입력) |
+| 답장 해석 `reply_interpretation.label` | `ACCEPT` 수용 / `CONDITIONAL` 조건부 / `REJECT` 거절 / `UNCLEAR` 확인 필요 |
+
+### 연강은 두 종류다 (용어 구분)
+
+| 용어 | 뜻 | 어디서 받나 |
+|---|---|---|
+| **주 1회 연강** | 한 분반이 **하루에 2칸을 이어서** 수업 (예: 화 3·4교시). 3학점 수업이 이틀 나눠 하지 않고 하루에 끝남 | 교수 응답 `single_day_pref` (MUST/PREFER/NONE) |
+| **분반 연강** | 두 분반을 맡을 때 **가반이 끝나자마자 나반**이 이어짐. 교차는 가반 월1·목2, 나반 월2·목1처럼 엇갈리게 | 기타 요청 → `request_item` `SECTION_PAIR` (`BACK_TO_BACK` / `CROSS`) |
+
+- 주 1회 연강은 **주당 2칸짜리 수업(1칸×2회)** 에만 적용된다. 그 외 수업은 입력된 구성 그대로.
+- 응답이 없는 분반(미회신)은 입력된 구성 그대로 두고 주 1회 연강을 가정하지 않는다.
+
+## 4. 분반별 담당 교수
+
+- `course_section(course_id, section_no, professor_id)`에 행이 있으면 그 분반은 그 교수가, 없으면 `course.professor_id`가 맡는다.
+- 교수 겹침 검사, 불가 시간·실습실·연강 응답은 **분반의 담당 교수 기준**이다.
+  응답(`course_response`)도 교수별로 받는다: `UNIQUE (round_id, course_id, professor_id)`.
+- 같은 과목의 분반을 다른 교수가 맡으면, 그 교수의 응답이 없을 때 그 분반은 미회신으로 본다.
+- `v_schedule`, `v_professor_conflict` 뷰도 분반 담당 교수를 따른다.
+
+## 5. 분반 수와 교수 배정
+
+- 분반 수 = 과목에 관련된 교수별 요청(`SECTION_COUNT`)의 합. 가 2 + 나 2 → 4개 (1·2=가, 3·4=나).
+- 관련된 교수 = `course.professor_id`, `course_section`에 적힌 교수, 그 과목에 응답한 다른 교수 (이 순서).
+- 교수별 개수 = max(요청 개수, 조교가 `course_section`에 지정한 행 수, 1). 지정한 번호는 그대로 두고, 남은 개수를 빈 번호에 순서대로 채운다.
+- 두 교수가 같은 시간대에 수업해도 된다(다른 강의실이면). 교수 겹침은 분반 담당 교수 기준으로만 막는다.
+
+## 6. 선호 시간 외 불가 (`course_response.prefer_only = 1`)
+
+- 그 분반이 차지하는 모든 칸이 응답의 `PREFER` 칸 안에 있어야 한다(필수 조건). 2칸 연속 수업은 두 칸 모두.
+- `PREFER` 칸이 하나도 없으면 적용하지 않고 `r['unsupported']`에 한 번 알린다.
+- 대안 생성(`make_alternatives`)에도 같이 적용된다.
+- 못 놓이면 `unplaced`에 나온다. 분반 연강/교차와 겹치면 정말 불가능한 경우가 있다(같은 요일에 인접한 희망 칸이 없을 때).
+
+## 7. 서버 단계와 기타 요청 (`db.py`)
+
+```python
+db.get_phase(con, term_id)                    # ('ROUND1', '1차 조율')
+db.set_phase(con, term_id, 'ROUND2', user_id) # 한 칸씩만. 건너뛰기·되돌리기는 force=True. phase_log에 기록
+db.pending_other_requests(con, round_id)      # 조교가 아직 확인 안 한 기타 요청
+db.confirm_other_request(con, other_request_id, user_id, memo=None)
+```
+
+- 단계: `COLLECTING` 희망 수집 → `ROUND1` 1차 조율 → `ROUND2` 2차 조율 → `FINAL` 확정.
+- 기타 요청은 AI를 거치지 않는다. 교수 원문(`other_request.body`, `PENDING`) → 조교가 읽고 필요하면 `request_item`(`source='TA'`, `other_request_id`)을 직접 입력 → "확인함"(`CONFIRMED`).
+- 솔버가 읽는 `request_item` 종류는 `SECTION_COUNT`, `SECTION_PAIR`뿐이다. 그 밖의 요청은 조교가 보고 판단한다.
+
+## 8. 알려진 한계
+
+- 분반 연강·교차(`SECTION_PAIR`)는 분반이 정확히 2개이고 1회 한 칸일 때만 지원. 이때 주 1회 연강 응답은 무시된다(`unsupported`에 표시).
+- 풀이 시간: 조건이 빡빡한 분반 연강·교차 과목이 있으면 30초 안에는 일부가 못 놓일 수 있다. 60~90초를 권장.
