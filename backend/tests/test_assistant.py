@@ -136,11 +136,129 @@ def test_time_parsing(text, start):
     assert read_question(text, [], store).start == start
 
 
-def test_llm_not_implemented(client):
-    with pytest.raises(NotImplementedError):
-        read_question("현황", [], store, method="llm")
-    r = client.post("/assistant", json={"text": "현황 알려줘", "method": "llm"})
-    assert r.status_code == 501
+# ---------- 언어 모델 버전 (generate_json을 가짜로 바꿔 검사) ----------
+
+def _fake_llm(monkeypatch, **out):
+    """언어 모델 대신 정해진 답을 돌려준다. 받은 프롬프트는 seen에 남긴다."""
+    seen = {}
+
+    def fake(prompt, schema):
+        seen["prompt"] = prompt
+        if isinstance(out.get("raise"), Exception):
+            raise out["raise"]
+        return schema(**out)
+
+    monkeypatch.setattr(assistant, "generate_json", fake)
+    return seen
+
+
+def test_llm_normal_output(monkeypatch):
+    seen = _fake_llm(monkeypatch, intent="move", course="확률및통계", section_no="2",
+                     days=["월", "수"], start="12:00")
+    q = read_question("확통 2분반 월수 12시로 옮겨", [], store, method="llm")
+    assert (q.intent, q.section_id, q.days, q.start) == ("move", sid_of("확률및통계", "02"), ["월", "수"], "12:00")
+    assert q.method == "llm" and q.fallback is False and q.fallback_reason is None and q.ask_back is None
+    # 프롬프트에 분반 목록(과목명·분반·교수 가명)과 질문이 들어간다
+    assert "확률및통계 | 02분반" in seen["prompt"] and "확통 2분반 월수 12시로 옮겨" in seen["prompt"]
+
+
+def test_llm_unknown_course_is_dropped(monkeypatch):
+    _fake_llm(monkeypatch, intent="explain", course="양자요리학", section_no="01")
+    q = read_question("양자요리학 01분반 왜 밀렸어", [], store, method="llm")
+    assert q.section_id is None and q.method == "llm"
+    assert q.ask_back and "어느 분반" in q.ask_back                  # 키워드 버전과 같은 되묻기
+
+
+def test_llm_bad_time_day_professor_room_are_dropped(monkeypatch):
+    _fake_llm(monkeypatch, intent="what_if", course="확률및통계", section_no="02",
+              days=["월", "토", "수", "월"], start="14:00", professor="교수99", room_no="99999")
+    q = read_question("확통 2분반 월수 2시로 옮기면?", [], store, method="llm")
+    assert q.days == ["월", "수"]                    # 토요일·중복은 버림
+    assert q.start is None                          # 교시 시작 시각이 아님
+    assert q.professor is None                      # 없는 교수
+    assert q.room is None                           # 질문에 없는 강의실 번호 = 지어낸 것
+    assert q.section_id == sid_of("확률및통계", "02")
+
+
+def test_llm_section_rules_same_as_keyword(monkeypatch):
+    """분반이 여러 개인데 번호가 없으면 되묻고, 주 2회인데 요일이 하나면 묶을 요일을 되묻는다 (코드가 판단)."""
+    _fake_llm(monkeypatch, intent="move", course="알고리즘", days=["화", "목"], start="13:30")
+    q = read_question("알고리즘 화목 1시 반으로 옮겨", [], store, method="llm")
+    kw = read_question("알고리즘 화목 1시 반으로 옮겨", [], store)
+    assert q.section_id is None and q.ask_back == kw.ask_back and "몇 분반" in q.ask_back
+    _fake_llm(monkeypatch, intent="move", course="확률및통계", section_no="02", days=["금"], start="12:00")
+    q = read_question("확통 2분반 금요일 12시로", [], store, method="llm")
+    assert q.ask_back and "묶을 요일" in q.ask_back
+
+
+def test_llm_history_pronoun(monkeypatch):
+    # 모델이 앞 대화의 분반을 가리킨다고만 하고 과목명은 비움 → 코드가 앞 대화에서 찾는다
+    seen = _fake_llm(monkeypatch, intent="explain", from_history=True)
+    q = read_question("그 강의 왜 밀렸어?", HIST_ID(), store, method="llm")
+    assert q.section_id == sid_of("확률및통계", "02") and q.ask_back is None
+    assert "도우미: …" in seen["prompt"]
+    # 모델이 앞 대화에서 과목명·번호를 찾아 넣은 경우
+    _fake_llm(monkeypatch, intent="explain", course="자료구조", section_no="02", from_history=True)
+    q = read_question("그거 왜 그 시간이야?", HIST, store, method="llm")
+    assert q.section_id == sid_of("자료구조", "02")
+
+
+@pytest.mark.parametrize("err", [assistant.LLMUnavailable("GEMINI_API_KEY가 없습니다"), ValueError("빈 응답")])
+def test_llm_failure_falls_back_to_keyword(monkeypatch, err):
+    _fake_llm(monkeypatch, intent="status", **{"raise": err})
+    q = read_question("확통 2분반 왜 밀렸어?", [], store, method="llm")
+    kw = read_question("확통 2분반 왜 밀렸어?", [], store)
+    assert q.fallback is True and q.fallback_reason == str(err) and q.method == "keyword"
+    assert (q.intent, q.section_id, q.ask_back) == (kw.intent, kw.section_id, kw.ask_back)
+
+
+def test_llm_without_key_falls_back(monkeypatch):
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("LLM_CACHE_DIR", raising=False)
+    q = read_question("지금 현황 알려줘", [], store, method="llm")
+    assert q.fallback is True and "GEMINI_API_KEY" in q.fallback_reason and q.intent == "status"
+
+
+def test_llm_endpoint_proposes_only(client, monkeypatch):
+    client.post("/draft")
+    _fake_llm(monkeypatch, intent="move", course="확률및통계", section_no="02", days=["월", "수"], start="12:00")
+    before = client.get("/timetable").json()["assignments"]
+    r = client.post("/assistant", json={"text": "확통 2분반 월수 12시로 옮겨", "method": "llm"})
+    assert r.status_code == 200, r.text
+    j = r.json()
+    assert j["command"]["method"] == "llm" and j["command"]["fallback"] is False
+    assert set(j["command"]) >= {"fallback", "fallback_reason"}
+    assert j["needs_apply"] is True and j["proposal_id"]
+    assert client.get("/timetable").json()["assignments"] == before      # [적용] 전에는 그대로
+
+
+@pytest.mark.skipif(not os.environ.get("GEMINI_API_KEY"), reason="GEMINI_API_KEY가 없어 실제 언어 모델 호출은 건너뜀")
+def test_llm_real_call():
+    q = read_question("확통 2분반 월수 12시로 옮겨 줘", [], store, method="llm")
+    assert q.fallback is False, q.fallback_reason
+    assert q.intent == "move" and q.section_id == sid_of("확률및통계", "02")
+
+
+# ---------- 평가 스크립트 (작은 가짜 라벨로 돌아가는지만) ----------
+
+def test_eval_script_runs_on_tiny_labels(tmp_path):
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("run_assistant", REPO_ROOT / "eval" / "run_assistant.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    f = tmp_path / "assistant_questions_test.csv"
+    f.write_text(
+        "id,history,question,writer,intent,section,professor,days,start,room,building,ask_back,memo\n"
+        "t1,,확통 2분반 월수 12시로 옮겨,t,move,확률및통계 02,,월·수,12:00,,,N,\n"
+        "t2,,알고리즘 왜 밀렸어,t,explain,,,,,,,Y,\n"
+        "t3,,오늘 날씨 어때,t,out_of_scope,,,,,,,N,\n"
+        "t4,,라벨 안 단 줄,t,,,,,,,,,\n",
+        encoding="utf-8-sig")
+    out = tmp_path / "results"
+    s = mod.main(["--method", "keyword", "--labels", str(f), "--out", str(out)])
+    assert s["rows"] == 3 and s["skipped"] == 1
+    assert s["intent_accuracy"] == 1.0 and s["info"]["f1"] == 1.0 and s["ask_back"]["accuracy"] == 1.0
+    assert sorted(p.suffix for p in out.iterdir()) == [".csv", ".json"]
 
 
 # ---------- run_assistant / API ----------

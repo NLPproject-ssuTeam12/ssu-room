@@ -573,7 +573,7 @@ A  화 13:30~16:15 연강 · 정보과학관 21101
 ### `POST /assistant`
 조교 질문을 읽고(의도·정보) 배정 함수를 불러 설명한다. 모든 단계.
 **시간표는 바꾸지 않는다.** 옮기기(move)는 제안만 만들고, `/assistant/apply`를 불러야 반영된다.
-질문 해석은 키워드 기준선(`backend/app/nlp/assistant.py`). 미리 보기·옮기기는 STUB `what_if`(문하윤).
+질문 해석은 키워드 기준선 또는 언어 모델(`backend/app/nlp/assistant.py`, `method`로 고름). 미리 보기·옮기기는 STUB `what_if`(문하윤).
 
 요청:
 ```json
@@ -587,12 +587,17 @@ A  화 13:30~16:15 연강 · 정보과학관 21101
 }
 ```
 - `history`: 앞 대화. 빼도 된다. **응답의 `section_id`를 assistant 항목에 넣어 보내면** "그 강의", "아까 그거", "그거"를 그 분반으로 읽는다.
-- `method`: `keyword`(기본). `llm`은 다음 단계 → 501.
+- `method`: `keyword`(기본) 또는 `llm`.
+  - `llm`: 언어 모델(Gemini)이 의도와 정보(과목명·분반 번호·교수·요일·시작 시각·강의실·건물)만 뽑는다. 프롬프트는 `backend/app/nlp/prompts/assistant.txt`.
+  - 분반 id는 모델이 정하지 않는다. 모델이 쓴 과목명·번호를 키워드 버전과 같은 코드로 실제 분반에 연결한다. 목록에 없는 과목, 교시 시작 시각이 아닌 시각, 월~금이 아닌 요일, 없는 교수, 질문에 없는 강의실 번호는 버린다.
+  - 되묻기(`ask_back`)와 옮길 수 있는지(교수 불가 시간·채플·18:00 연강)는 두 방식 모두 같은 코드가 판단한다.
+  - 언어 모델이 실패하면(키 없음, 호출 실패, 형식 오류, 빈 질문) 오류 없이 키워드 방식으로 대신 처리한다. 이때 `command.method: "keyword"`, `command.fallback: true`, `command.fallback_reason`에 이유(예: `GEMINI_API_KEY가 없습니다`, `호출 실패: ServerError: 503 …`).
+  - 옮기기는 `llm`이어도 제안만 만든다. `/assistant/apply` 전에는 반영하지 않는다.
 
 응답 공통 모양:
 | 키 | 뜻 |
 |---|---|
-| `command` | 읽은 의도·정보. `intent`, `section_id`, `professor`, `day`, `days`, `start`, `room`, `building`, `ask_back` |
+| `command` | 읽은 의도·정보. `intent`, `section_id`, `professor`, `day`, `days`, `start`, `room`, `building`, `ask_back`, 그리고 `method`(실제로 쓴 방식), `fallback`(`llm` 실패로 키워드로 대신 처리했으면 `true`), `fallback_reason`(그 이유, 아니면 `null`) |
 | `section_id` | 이 질문의 분반 (없으면 `null`). history에 넣는다 |
 | `answer` | 화면에 보여 줄 문장 |
 | `changes` | 표로 보여 줄 줄 `[{section_id, name, before, after, note}]` |
