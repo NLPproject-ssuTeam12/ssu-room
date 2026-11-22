@@ -194,6 +194,52 @@ def _minutes(t):
     return int(h) * 60 + int(m)
 
 
+def _norm_time(t):
+    """'9:00' 같은 표기도 '09:00'로 맞춘다."""
+    h, m = str(t).split(":")
+    return f"{int(h):02d}:{int(m):02d}"
+
+
+def _apply_day_slots(cond, slot_info):
+    """조율 쪽의 day_slots를 솔버가 아는 조건(days, slot_ids)으로 바꾼다.
+      day_slots = {요일(0~4): [그 요일에 되는 교시의 시작 시각, ...]}   빈 목록 = 그 요일 아무 교시나
+        요일 둘 이상 -> slot_ids = 그 요일들의 해당 교시 칸 (수업은 그 요일들 안에서만)
+        요일 하나    -> days=[그 요일] + slot_ids = 그 요일의 해당 교시 칸 + 나머지 요일 전체 칸
+                        (그 요일이 들어가야 하고, 주 2회의 다른 하루는 자유)
+        비어 있음    -> 요일·교시 조건 없음
+      연강(2칸 이어진 수업)은 두 교시가 모두 slot_ids 안에 있어야 놓인다.
+    다른 키(days, window, by_day, end_before, slot_ids)는 그대로 두고 함께 적용한다(모두 AND).
+    시작 시각이 격자의 어느 교시 시작과도 맞지 않으면 그 교시는 없는 것으로 본다."""
+    ds = cond.get("day_slots")
+    if not ds:
+        return {k: v for k, v in cond.items() if k != "day_slots"}
+    want = {int(k): [_norm_time(t) for t in (v or [])] for k, v in ds.items()}
+    by_idx = defaultdict(list)                          # 요일 번호 -> [(slot_id, 시작시각)]
+    for sid, (day, _p, st, _en) in slot_info.items():
+        by_idx[DAYS.index(day)].append((sid, _norm_time(st)))
+
+    def pick(d):                                         # 그 요일에서 되는 칸
+        return {sid for sid, st in by_idx[d] if not want[d] or st in want[d]}
+
+    out = {k: v for k, v in cond.items() if k != "day_slots"}
+    slots = set()
+    if len(want) >= 2:
+        for d in want:
+            slots |= pick(d)
+    else:
+        (d0,) = want
+        slots = pick(d0)
+        for d, lst in by_idx.items():
+            if d != d0:
+                slots |= {sid for sid, _ in lst}
+        if not out.get("days"):
+            out["days"] = [d0]
+    if out.get("slot_ids"):
+        slots &= set(out["slot_ids"])                    # slot_ids도 함께 주면 둘 다 만족
+    out["slot_ids"] = sorted(slots) or [-1]              # 빈 집합이면 아무 데도 못 놓는다(-1은 없는 칸)
+    return out
+
+
 def _structures(c, sd):
     """한 분반이 가질 수 있는 수업 구성들. 각 구성 = [(회차번호, 한 회 칸 수), ...]
     주당 2칸짜리 수업이고 교수가 연강을 답했을 때만 '연속 2칸 한 번'과 '1칸 두 번'을 오간다."""
@@ -555,13 +601,20 @@ def alternatives(con, term_id, round_id, timetable_id, course_id, section_no=Non
        "by_day": {"0": ["13:30","14:45"], "2": ["15:00","16:15"]},
                                          요일별 시간대. 적힌 요일에서만, 그 요일의 시간대 안에서만. 한 요일에 여러 개면 [[시작,끝],[시작,끝]]
        "end_before": [{"day":2,"time":"17:00"}],   요일별로 끝나야 하는 시각
-       "slot_ids": [..]}                 칸 번호 목록으로 줘도 됨
+       "slot_ids": [..],                 칸 번호 목록으로 줘도 됨
+       "day_slots": {"0": ["13:30","15:00"], "2": []}
+                                         요일(0~4) -> 그 요일에 되는 교시의 시작 시각. 빈 목록 = 그 요일 아무 교시나.
+                                         요일이 둘 이상이면 그 요일들 안에서만, 하나면 그 요일이 들어가야 함(다른 날은 자유).
+                                         연강(2칸)은 두 교시가 모두 들어 있어야 함. 비어 있으면({}) 요일·교시 조건 없음.
+                                         안에서 days/slot_ids로 바뀐다. end_before는 그대로 쓴다.}
     1단계: 다른 수업은 그대로 두고 대상만 새로 놓는다.
     2단계(모자라면): 같은 교수의 다른 분반과 같은 학년 필수과목까지 움직일 수 있게 하고, 움직인 수업을 함께 알려 준다.
     반환: [dict(stage, placements{(분반,회차):(시작칸,강의실)}, ks{(분반,회차):칸 수}, moves[(키,이전,이후)], objective)]"""
     W = {**DEFAULT_WEIGHTS, **(weights or {})}
     prev, prevk = load_assignment(con, timetable_id)
-    _, courses, secs, _, _, _ = load_input(con, term_id, round_id)
+    _, courses, secs, _, _, slot_info = load_input(con, term_id, round_id)
+    if condition and condition.get("day_slots") is not None:
+        condition = _apply_day_slots(condition, slot_info)
     target = courses[course_id]
     t_secs = {(course_id, s) for s in (range(1, target["sections"] + 1) if section_no is None else [section_no])}
     t_profs = {secs[ts]["prof"] for ts in t_secs}
