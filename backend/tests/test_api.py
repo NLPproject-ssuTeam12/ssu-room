@@ -396,23 +396,46 @@ def _sent_section(client) -> str:
     return sid
 
 
-def test_message_record_shape_and_no_blocker_name(client):
+def _sid_with_blocker(client):
     from backend.app.main import store
-    sid = start_round(client)
+    start_round(client)
+    for c in client.get("/coord").json():
+        if store.message_input(c["section_id"]).blocker_prof:
+            return c["section_id"]
+    pytest.fail("겹친 상대를 찾은 조율 분반이 없음 (데이터 확인)")
+
+
+def test_message_record_shape_and_opponent_name_shown_by_default(client):
+    from backend.app.main import store
+    assert client.get("/settings").json() == {"reveal_opponent": True}   # 기본 켬
+    sid = _sid_with_blocker(client)
     inp = store.message_input(sid)
-    assert inp.reveal is False                      # 기본: 상대 교수 이름 알리지 않음
-    assert inp.round == 1 and inp.alternatives
+    assert inp.reveal is True and inp.round == 1 and inp.alternatives
     assert not ({"seniority", "hired", "priority"} & set(type(inp).model_fields))
     r = client.post(f"/coord/{enc(sid)}/message", json={"method": "keyword"})
     assert r.status_code == 200, r.text
     rec = r.json()
     assert set(rec) >= {"text", "method", "fallback", "problems", "issues", "sent"}
     assert rec["issues"] == [] and rec["sent"] is True
-    if inp.blocker_prof:
-        assert f"{inp.blocker_prof} 교수" not in rec["text"]
+    assert f"{inp.blocker_prof} 교수" in rec["text"] and inp.blocker_course in rec["text"]
     for w in ("연차", "임용", "우선순위"):
         assert w not in rec["text"]
     assert inp.course in rec["text"] and inp.wish in rec["text"]
+
+
+def test_settings_turn_off_opponent_name(client):
+    from backend.app.main import store
+    sid = _sid_with_blocker(client)
+    r = client.post("/settings", json={"reveal_opponent": False})
+    assert r.status_code == 200 and r.json() == {"reveal_opponent": False}
+    inp = store.message_input(sid)
+    assert inp.reveal is False
+    rec = client.post(f"/coord/{enc(sid)}/message").json()
+    assert rec["sent"] is True and f"{inp.blocker_prof} 교수" not in rec["text"]
+    # 모르는 칸은 422, /reset 하면 기본값(켬)으로
+    assert client.post("/settings", json={"reveal_opponent": "maybe"}).status_code == 422
+    client.post("/reset")
+    assert client.get("/settings").json()["reveal_opponent"] is True
 
 
 def test_reply_choice_button(client):

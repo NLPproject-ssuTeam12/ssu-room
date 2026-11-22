@@ -51,6 +51,7 @@ COLLECT ──POST /draft──▶ DRAFT ──POST /rounds/next──▶ ROUND 
 | `POST /rounds/next` | | ✓ (→1차) | ✓ (1·2차만) | |
 | `POST /finalize` | | ✓ | ✓ | |
 | `POST /reset` | ✓ | ✓ | ✓ | ✓ |
+| `GET /settings` `POST /settings` | ✓ | ✓ | ✓ | ✓ |
 | `POST /assistant` | ✓ | ✓ | ✓ | ✓ |
 | `POST /assistant/apply` | | ✓ | ✓ | |
 | `GET /export.xlsx` | 501 (다음 단계) | | | |
@@ -351,7 +352,7 @@ fetch(`http://localhost:8000/coord/${encodeURIComponent(sectionId)}/message`, { 
 | `wish` | 희망(PREFER) 칸을 글로. 같은 시각끼리 묶음 `화·목 18:00, 화 19:30` |
 | `alternatives` | 조율 목록의 대안 |
 | `blocker_prof`, `blocker_course` | 희망 칸을 막은 상대 분반. 같은 강의실 → 같은 교수 순으로 찾은 **추정값** |
-| `reveal` | 상대 교수 이름 알리기. **기본 `false`** (환경변수 `COORD_REVEAL_BLOCKER=1`이면 켬). 꺼져 있으면 메시지에 상대 이름이 나오지 않고, `check_message`가 새지 않았는지 검사한다 |
+| `reveal` | 학과 설정 `reveal_opponent`(**기본 켬**, `POST /settings`로 끔). 켜져 있으면 메시지에 "○○ 교수님의 △△ 분반과 겹칩니다"가 들어간다. 끄면 "다른 강의와"로 쓰고, `check_message`가 이름이 새지 않았는지 검사한다 |
 | `prev_conditions` | 2차부터, 지난 차수에 조교가 [확인]한 조건 |
 | `hidden` | 상대 교수의 기타 요청(`note`). 검사에만 쓴다 |
 | `term` | 기본 `2027-1학기` (환경변수 `COORD_TERM`으로 바꿈) |
@@ -538,8 +539,19 @@ A  화 13:30~16:15 연강 · 정보과학관 21101
 
 에러: 409 `확정할 수 없는 단계입니다: COLLECT` (COLLECT·FINAL)
 
+### `GET /settings` · `POST /settings`
+학과 설정. 모든 단계에서 보고 바꿀 수 있다. 바꾸면 그다음에 쓰는 조율 메시지부터 적용된다.
+
+```json
+{ "reveal_opponent": true }
+```
+- `reveal_opponent`: 조율 메시지에 겹친 상대 교수 이름 알리기. 기본 `true` (팀 결정: 기본 켬, 조교가 끌 수 있음).
+- `POST /settings`는 바꿀 칸만 보낸다. 예: `{ "reveal_opponent": false }` → 바뀐 설정 전체를 돌려준다.
+- 값 형식이 틀리면 422.
+- `POST /reset` 하면 기본값으로 돌아간다.
+
 ### `POST /reset`
-처음 상태(COLLECT)로. 희망 수정, 시간표, 조율·메시지·답장·결정 기록이 모두 지워진다. 시연용.
+처음 상태(COLLECT)로. 희망 수정, 시간표, 조율·메시지·답장·결정 기록, 학과 설정이 모두 처음으로 돌아간다. 시연용.
 
 ```json
 { "stage": "COLLECT" }
@@ -720,6 +732,7 @@ STUB: `reassign`·`check_rules`(문하윤).
 
 ```
 POST /reset
+GET  /settings                     (학과 설정: 상대 교수 이름 알리기)
 GET  /sections, /rooms, /wishes
 POST /wishes                       (교수 입력 화면, 여러 번)
 POST /draft

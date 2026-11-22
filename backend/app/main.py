@@ -78,6 +78,10 @@ class AssistantIn(BaseModel):
     method: Literal["keyword", "llm"] = "keyword"
 
 
+class SettingsIn(BaseModel):
+    reveal_opponent: Optional[bool] = None   # 조율 메시지에 상대 교수 이름 알리기
+
+
 class ApplyIn(BaseModel):
     proposal_id: str
     reason: Optional[str] = None
@@ -167,6 +171,20 @@ def health():
         "engine": engine.sources(),
         "load_warnings": engine.load_warnings() + store.load_warnings,
     }
+
+
+# ---------- 학과 설정 ----------
+
+@app.get("/settings")
+def get_settings():
+    return store.get_settings()
+
+
+@app.post("/settings")
+def post_settings(body: SettingsIn):
+    """보낸 칸만 바꾼다. 모든 단계에서 바꿀 수 있고, 다음에 쓰는 조율 메시지부터 적용된다."""
+    fields = {k: v for k, v in dump(body).items() if v is not None}
+    return store.update_settings(**fields)
 
 
 # ---------- 기본 자료 ----------

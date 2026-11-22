@@ -36,10 +36,12 @@ def _grid_cell(key: str) -> bool:
     return day in DAYS and start in STARTS
 
 
-def reveal_blocker() -> bool:
-    """학과 설정 '상대 교수 이름 알리기'. 기본은 알리지 않음 (CLAUDE.md: 상대 교수 이름을 쓰지 않는다).
-    켜려면 환경변수 COORD_REVEAL_BLOCKER=1."""
-    return os.environ.get("COORD_REVEAL_BLOCKER", "0") == "1"
+# 학과 설정 기본값. GET/POST /settings 로 보고 바꾼다. /reset 하면 기본값으로 돌아간다.
+DEFAULT_SETTINGS = {
+    # 조율 메시지에 겹친 상대 교수 이름 알리기
+    # (팀 결정: 상대 교수 이름 공개는 기본 켬, 조교가 설정에서 끌 수 있음)
+    "reveal_opponent": True,
+}
 
 
 def course_text(sec: Section) -> str:
@@ -124,6 +126,7 @@ class Store:
         self.professors: Dict[str, dict] = wishes_raw.get("professors", {})
         self.fixed_blocks: List[dict] = _load("fixed_blocks.json")
 
+        self.settings: Dict[str, object] = dict(DEFAULT_SETTINGS)   # 학과 설정
         self.stage: str = "COLLECT"
         self.round_no: int = 0            # 0 = 조율 시작 전, 1~3 = 차수
         self.timetable: Optional[Timetable] = None
@@ -191,6 +194,18 @@ class Store:
         self.coord[sid].update(fields)
         return self.coord[sid]
 
+    # ---------- 학과 설정 ----------
+
+    def get_settings(self) -> Dict[str, object]:
+        return dict(self.settings)
+
+    def update_settings(self, **fields) -> Dict[str, object]:
+        unknown = set(fields) - set(DEFAULT_SETTINGS)
+        if unknown:
+            raise KeyError(", ".join(sorted(unknown)))
+        self.settings.update(fields)
+        return self.get_settings()
+
     # ---------- 조율 메시지 입력 ----------
 
     def blocker(self, sid: str) -> Optional[str]:
@@ -218,7 +233,7 @@ class Store:
 
     def message_input(self, sid: str) -> MessageInput:
         """write_message·check_message에 넣을 값. 분반·희망·대안·차수·겹친 상대로 채운다.
-        - 상대 교수 이름은 학과 설정(reveal_blocker)이 꺼져 있으면 메시지에 쓰지 않는다.
+        - 상대 교수 이름은 학과 설정 reveal_opponent(기본 켬)를 따른다. 끄면 메시지에 쓰지 않는다.
           그래도 blocker_prof는 넣는다: check_message가 이름이 새지 않았는지 검사하는 데 쓴다.
         - 연차·임용일·우선순위는 MessageInput에 칸이 없고, 넣지 않는다.
         - hidden: 상대 교수가 적은 기타 요청(Wish.note). 메시지에 나오면 안 되므로 검사에만 쓴다."""
@@ -236,7 +251,7 @@ class Store:
             alternatives=item["alternatives"],
             blocker_prof=other.professor if other else None,
             blocker_course=course_text(other) if other else None,
-            reveal=reveal_blocker(),
+            reveal=bool(self.settings["reveal_opponent"]),
             prev_conditions=prev if prev is not None and not prev.is_empty() else None,
             hidden=[other_wish.note.strip()] if other_wish and other_wish.note.strip() else [],
         )
