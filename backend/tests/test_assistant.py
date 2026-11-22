@@ -70,7 +70,7 @@ CASES = [
     ("그 강의 목요일 오후 3시로 옮기면 될까?", HIST, "what_if", ("자료구조", "02", False), ["목"], "15:00", False),  # 아까 그거
     # move
     ("확통 월수 10시 반으로 옮겨줘", None, "move", ("확률및통계", "02", False), ["월", "수"], "10:30", False),
-    ("확률및통계 금요일 저녁으로 바꿔줘", None, "move", ("확률및통계", "02", False), ["금"], "18:00", False),
+    ("확률및통계 금요일 저녁으로 바꿔줘", None, "move", ("확률및통계", "02", False), ["금"], "18:00", True),  # 주 2회인데 요일 하나 → 묶을 요일 되묻기
     ("웹프 재수강 정보관으로 옮겨줘", None, "move", ("웹프로그래밍", "03", True), [], None, False),
     ("그거 21305로 옮겨줘", HIST, "move", ("자료구조", "02", False), [], None, False),
     ("리눅스 활용 화·목 오후 4시 반으로 옮겨줘", None, "move", ("리눅스활용", "01", False), ["화", "목"], "16:30", False),
@@ -195,7 +195,7 @@ def test_move_then_apply(client):
     sid = sid_of("확률및통계", "02")
     before = client.get("/timetable").json()
 
-    j = client.post("/assistant", json={"text": "확통 월수 10시 반으로 옮겨줘"}).json()
+    j = client.post("/assistant", json={"text": "확통 월수 12시로 옮겨줘"}).json()
     assert j["needs_apply"] is True and j["proposal_id"]
     assert j["changes"][0]["section_id"] == sid
     assert client.get("/timetable").json() == before          # 적용 전에는 그대로
@@ -209,7 +209,7 @@ def test_move_then_apply(client):
     assert r.status_code == 200, r.text
     assert r.json()["decision"]["reason"] == "교수님 전화 요청"
     a = next(x for x in client.get("/timetable").json()["assignments"] if x["section_id"] == sid)
-    assert [(b["day"], b["start"]) for b in a["blocks"]] == [("월", "10:30"), ("수", "10:30")]
+    assert [(b["day"], b["start"]) for b in a["blocks"]] == [("월", "12:00"), ("수", "12:00")]
     rec = store.decisions[-1]
     assert rec["action"] == "assistant_move" and rec["reason"] == "교수님 전화 요청" and rec["section_id"] == sid
 
@@ -219,7 +219,7 @@ def test_move_then_apply(client):
 
 def test_apply_after_timetable_changed_409(client):
     client.post("/draft")
-    p1 = client.post("/assistant", json={"text": "확통 월수 10시 반으로 옮겨줘"}).json()["proposal_id"]
+    p1 = client.post("/assistant", json={"text": "확통 월수 12시로 옮겨줘"}).json()["proposal_id"]
     p2 = client.post("/assistant", json={"text": "리눅스 활용 화·목 오후 4시 반으로 옮겨줘"}).json()["proposal_id"]
     assert client.post("/assistant/apply", json={"proposal_id": p1, "reason": "a"}).status_code == 200
     r = client.post("/assistant/apply", json={"proposal_id": p2, "reason": "b"})
@@ -228,7 +228,7 @@ def test_apply_after_timetable_changed_409(client):
 
 def test_apply_in_final_409(client):
     client.post("/draft")
-    pid = client.post("/assistant", json={"text": "확통 월수 10시 반으로 옮겨줘"}).json()["proposal_id"]
+    pid = client.post("/assistant", json={"text": "확통 월수 12시로 옮겨줘"}).json()["proposal_id"]
     client.post("/finalize")
     r = client.post("/assistant/apply", json={"proposal_id": pid, "reason": "늦은 요청"})
     assert r.status_code == 409
@@ -239,7 +239,7 @@ def test_apply_in_final_409(client):
 
 def test_reset_clears_proposals(client):
     client.post("/draft")
-    pid = client.post("/assistant", json={"text": "확통 월수 10시 반으로 옮겨줘"}).json()["proposal_id"]
+    pid = client.post("/assistant", json={"text": "확통 월수 12시로 옮겨줘"}).json()["proposal_id"]
     client.post("/reset")
     assert assistant.get_proposal(pid) is None
 
@@ -253,3 +253,57 @@ def test_history_from_previous_answer(client):
     j2 = client.post("/assistant", json={"text": "그 강의 금요일로 옮기면?", "history": hist}).json()
     assert j2["command"]["section_id"] == j["section_id"]
     assert j2["command"]["intent"] == "what_if"
+
+
+
+# ---------- 팀 결정: 요일 되묻기, 불가 시간·채플·18:00 연강으로는 안 옮김, 19:30 감점 ----------
+
+def test_single_day_asks_pair_for_twice_section(client):
+    client.post("/draft")
+    for q in ("확률및통계 금요일 저녁으로 바꿔줘", "확통 화요일 12시로 옮기면?"):
+        j = client.post("/assistant", json={"text": q}).json()
+        assert j["command"]["ask_back"] and "묶을 요일" in j["answer"], j["answer"]
+        assert j["proposal_id"] is None and j["changes"] == []
+    # 주 1회 연강 분반은 요일 하나가 맞으므로 되묻지 않는다
+    assert store.get_section(sid_of("자료구조", "02")).shape == "ONCE_LONG"
+    j = client.post("/assistant", json={"text": "자료구조 금요일 오후 1시 반으로 옮기면?"}).json()
+    assert not j["command"]["ask_back"] and "묶을 요일" not in j["answer"], j["answer"]
+
+
+def test_no_move_into_professor_unavailable(client):
+    client.post("/draft")
+    sid = sid_of("확률및통계", "02")
+    assert store.get_wish(sid).cells.get("수-15:00") == "BLOCK"
+    for q in ("확통 월수 3시로 옮겨줘", "확통 월수 3시로 옮기면?"):
+        j = client.post("/assistant", json={"text": q}).json()
+        assert "교수 불가 시간" in j["answer"] and "수-15:00" in j["answer"], j["answer"]
+        assert j["proposal_id"] is None and j["changes"] == []
+
+
+def test_no_move_into_chapel_of_that_year(client):
+    client.post("/draft")
+    assert store.get_section(sid_of("확률및통계", "02")).year == 2
+    # 월 10:30~11:20 = AI대학 2학년 비전채플
+    for q in ("확통 월수 10시 반으로 옮겨줘", "확통 월수 10시 반으로 옮기면?"):
+        j = client.post("/assistant", json={"text": q}).json()
+        assert "2학년 채플 시간" in j["answer"] and "월 10:30~11:20" in j["answer"], j["answer"]
+        assert j["proposal_id"] is None and j["changes"] == []
+
+
+def test_chapel_without_clear_target_only_warns(client):
+    client.post("/draft")
+    # 화 16:30·목 16:30 = 모든 단과대학 2~4학년이 고르는 독서채플 → 막지 않고 경고만
+    j = client.post("/assistant", json={"text": "확통 화목 4시 반으로 옮겨줘"}).json()
+    assert j["proposal_id"] and "채플 시간" in j["answer"] and "막지는 않았어요" in j["answer"], j["answer"]
+    # 1학년 분반에는 2~4학년 독서채플이 해당하지 않는다
+    assert store.get_section(sid_of("리눅스활용", "01")).year == 1
+    j = client.post("/assistant", json={"text": "리눅스 활용 화·목 오후 4시 반으로 옮겨줘"}).json()
+    assert j["proposal_id"] and "채플" not in j["answer"], j["answer"]
+
+
+def test_no_long_class_at_1800_and_late_slot_warning(client):
+    client.post("/draft")
+    j = client.post("/assistant", json={"text": "자료구조 금요일 저녁 6시로 옮겨줘"}).json()
+    assert "18:00에 시작하는 연강은 없어요" in j["answer"] and j["proposal_id"] is None, j["answer"]
+    j = client.post("/assistant", json={"text": "확통 화목 저녁 7시 반으로 옮겨줘"}).json()
+    assert j["proposal_id"] and "19:30 교시는 다른 방법이 없을 때만" in j["answer"], j["answer"]

@@ -51,6 +51,7 @@ COLLECT ──POST /draft──▶ DRAFT ──POST /rounds/next──▶ ROUND 
 | `POST /rounds/next` | | ✓ (→1차) | ✓ (1·2차만) | |
 | `POST /finalize` | | ✓ | ✓ | |
 | `POST /reset` | ✓ | ✓ | ✓ | ✓ |
+| `GET /settings` `POST /settings` | ✓ | ✓ | ✓ | ✓ |
 | `POST /assistant` | ✓ | ✓ | ✓ | ✓ |
 | `POST /assistant/apply` | | ✓ | ✓ | |
 | `GET /export.xlsx` | 501 (다음 단계) | | | |
@@ -129,6 +130,7 @@ fetch(`http://localhost:8000/coord/${encodeURIComponent(sectionId)}/message`, { 
 - 대안 A·B·C는 같은 강의실을 쓰는 다른 분반과의 겹침만 피한다. 교수·학년 겹침은 안 본다.
 - 가짜 조율 함수는 `method`와 상관없이 틀 문장·간단한 키워드로 처리한다(답장에서 요일·교시는 안 뽑고 종료 시각만, `note`는 항상 `""`).
 - 가짜 `make_alternatives`는 지금 자리에서 한두 교시·요일을 옮겨 보는 것만 해서, 조건(`slots` 등)에 맞는 대안이 없으면 0개가 된다. 그러면 다음 차수 메시지는 409.
+- 시간 규칙(팀 결정 11/21): 가짜 `make_alternatives`는 18:00 시작 연강을 만들지 않고(하드), 19:30 교시는 큰 감점으로 보아 19:30을 안 쓰는 안을 먼저 고른다. 19:30 안은 다른 안이 3개가 안 될 때만 들어간다. 가짜 `check_rules`는 이 둘을 위반으로 세지 않는다(실제 초안에 18:00 연강이 5개 있다).
 - 가짜 `what_if`는 옮기는 분반의 **첫 번째 수업만** 옮겨 보고 위반을 센다(강의실 겹침만). 그래서 미리 보기 위반 수와 실제 적용 뒤 위반 수가 다를 수 있다.
 
 ---
@@ -180,7 +182,7 @@ fetch(`http://localhost:8000/coord/${encodeURIComponent(sectionId)}/message`, { 
 - `division`: 분반 번호. 없으면 `null` (이때 `id` = `code`).
 - `weekly_blocks`: 주당 75분 칸 수.
 - `professor`: 가명. 담당 미정이면 `null`.
-- `lab_need`: `MUST`(필수) / `PREFER`(있으면 좋음) / `NONE`.
+- `lab_need`: `MUST`(실습실 필요) / `NONE`(필요 없음). 두 가지뿐이다 (팀 결정 11/21. 값 이름은 하윤 DB `lab_requirement`와 같다).
 
 ### `GET /rooms`
 강의실 목록. 모든 단계.
@@ -202,20 +204,24 @@ fetch(`http://localhost:8000/coord/${encodeURIComponent(sectionId)}/message`, { 
     {
       "section_id": "2150164203-(공통-재수강)",
       "professor": "교수42",
-      "cells": { "화-09:00": "BLOCK", "화-18:00": "PREFER", "목-18:00": "PREFER" },
+      "cells": { "금-13:30": "BLOCK", "목-12:00": "BLOCK", "목-18:00": "PREFER", "화-09:00": "BLOCK",
+                 "화-18:00": "PREFER", "화-19:30": "PREFER" },
       "must": false,
-      "lab": "PREFER",
+      "lab": "NONE",
+      "single_day": "NONE",
       "building": "문화관",
       "room": null,
       "note": ""
     }
   ],
-  "professors": { "교수41": { "consecutive": "상관없음" } }
+  "professors": { "교수42": { "sections": ["2150164203-(공통-재수강)", "2150166301"] } }
 }
 ```
 - `cells`: 칸 이름 `"요일-시작"` → `PREFER`(희망) / `BLOCK`(불가). **없는 칸 = 가능.**
 - `must`: '꼭' 체크 (분반마다 하나).
-- `professors.*.consecutive`: 연강 선호 `좋음` / `싫음` / `상관없음`.
+- `lab`: 실습실 `MUST`(필요) / `NONE`(필요 없음).
+- `single_day`: 주 1회 연강(하루에 두 교시를 이어서) `MUST`(무조건) / `PREFER`(선호) / `NONE`(필요 없음 = 주 2회, 기본). 하윤 DB `single_day_pref`와 같은 이름. 지금 데이터는 모두 `NONE`(가상 희망에 값이 없어 기본값).
+- `professors`: 교수(가명)별 맡은 분반 id. 예전 '연강'(`consecutive`, 맡은 강의를 이어서 하기) 값은 팀 결정(11/21)으로 뺐다.
 
 ### `POST /wishes`
 분반 하나의 희망을 저장한다(덮어씀). **COLLECT에서만.**
@@ -226,27 +232,29 @@ fetch(`http://localhost:8000/coord/${encodeURIComponent(sectionId)}/message`, { 
   "section_id": "2150164203-(공통-재수강)",
   "cells": { "월-09:00": "PREFER", "금-19:30": "BLOCK" },
   "must": false,
-  "lab": "PREFER",
+  "lab": "MUST",
+  "single_day": "PREFER",
   "building": null,
   "room": null,
   "note": "화요일 오전 불가"
 }
 ```
-- `section_id`만 필수. 나머지는 빼면 기본값(`cells: {}`, `must: false`, `lab: "NONE"`, `note: ""`).
+- `section_id`만 필수. 나머지는 빼면 기본값(`cells: {}`, `must: false`, `lab: "NONE"`, `single_day: "NONE"`, `note: ""`).
+- `lab`은 `MUST`/`NONE`만 받는다. `PREFER`를 보내면 422.
 - `professor`는 빼면 그 분반 담당 교수로 채운다.
 
 응답 200:
 ```json
 { "saved": { "section_id": "2150164203-(공통-재수강)", "professor": "교수42",
-             "cells": { "월-09:00": "PREFER", "금-19:30": "BLOCK" }, "must": false, "lab": "PREFER",
-             "building": null, "room": null, "note": "화요일 오전 불가" } }
+             "cells": { "월-09:00": "PREFER", "금-19:30": "BLOCK" }, "must": false, "lab": "MUST",
+             "single_day": "PREFER", "building": null, "room": null, "note": "화요일 오전 불가" } }
 ```
 
 에러:
 | 코드 | 언제 | detail |
 |---|---|---|
 | 422 | 칸 이름이 틀림 (토요일, `월-09:30` 같은 없는 시작 시각) | `[{"loc": ["body","cells"], "msg": "칸 이름은 '요일-시작'(예: 월-09:00)이어야 함: '토-09:00'"}]` |
-| 422 | 칸 값이 `PREFER`/`BLOCK`이 아님, `lab` 값이 틀림 | Pydantic 목록 |
+| 422 | 칸 값이 `PREFER`/`BLOCK`이 아님, `lab`이 `MUST`/`NONE`이 아님(`PREFER` 포함), `single_day`가 `MUST`/`PREFER`/`NONE`이 아님 | Pydantic 목록 |
 | 422 | 다른 교수 이름 | `이 분반의 담당 교수가 아닙니다.` |
 | 404 | 없는 분반 | `분반이 없습니다: 없는-분반` |
 | 409 | COLLECT가 아님 | `희망은 수집 단계(COLLECT)에서만 받습니다. 지금 단계: FINAL` |
@@ -351,7 +359,7 @@ fetch(`http://localhost:8000/coord/${encodeURIComponent(sectionId)}/message`, { 
 | `wish` | 희망(PREFER) 칸을 글로. 같은 시각끼리 묶음 `화·목 18:00, 화 19:30` |
 | `alternatives` | 조율 목록의 대안 |
 | `blocker_prof`, `blocker_course` | 희망 칸을 막은 상대 분반. 같은 강의실 → 같은 교수 순으로 찾은 **추정값** |
-| `reveal` | 상대 교수 이름 알리기. **기본 `false`** (환경변수 `COORD_REVEAL_BLOCKER=1`이면 켬). 꺼져 있으면 메시지에 상대 이름이 나오지 않고, `check_message`가 새지 않았는지 검사한다 |
+| `reveal` | 학과 설정 `reveal_opponent`(**기본 켬**, `POST /settings`로 끔). 켜져 있으면 메시지에 "○○ 교수님의 △△ 분반과 겹칩니다"가 들어간다. 끄면 "다른 강의와"로 쓰고, `check_message`가 이름이 새지 않았는지 검사한다 |
 | `prev_conditions` | 2차부터, 지난 차수에 조교가 [확인]한 조건 |
 | `hidden` | 상대 교수의 기타 요청(`note`). 검사에만 쓴다 |
 | `term` | 기본 `2027-1학기` (환경변수 `COORD_TERM`으로 바꿈) |
@@ -402,7 +410,7 @@ fetch(`http://localhost:8000/coord/${encodeURIComponent(sectionId)}/message`, { 
   "parse": {
     "kind": "조건부",
     "picks": ["A", "C"],
-    "conditions": { "days": [], "slots": [], "end_before": [ { "day": 2, "time": "17:00" } ] },
+    "conditions": { "day_slots": {}, "end_before": [ { "day": 2, "time": "17:00" } ] },
     "note": "",
     "method": "keyword",
     "fallback": false
@@ -410,7 +418,7 @@ fetch(`http://localhost:8000/coord/${encodeURIComponent(sectionId)}/message`, { 
   "proposal": {
     "action": "move",
     "key": "A",
-    "conditions": { "days": [], "slots": [], "end_before": [ { "day": 2, "time": "17:00" } ] },
+    "conditions": { "day_slots": {}, "end_before": [ { "day": 2, "time": "17:00" } ] },
     "text": "A안(화·목 18:00~19:15 · 문화관 03105)으로 옮길까요?",
     "checks": [ { "key": "A", "ok": true, "why": "조건과 맞음" }, { "key": "C", "ok": true, "why": "조건과 맞음" } ]
   },
@@ -420,7 +428,13 @@ fetch(`http://localhost:8000/coord/${encodeURIComponent(sectionId)}/message`, { 
 }
 ```
 - `parse.kind`: `수용` / `조건부` / `거절` / `확인 필요` (한글 그대로. `확인 필요`는 띄어 쓴다).
-- `parse.conditions.slots`: 되는 교시 시작 시각 목록(예: 오후 = `["13:30", "15:00", "16:30"]`, 늦은 오후 = `["16:30"]`). 빈 목록 = 제한 없음. 연강은 두 교시가 모두 들어 있어야 맞는다. 8교시 시작 시각 밖의 값은 들어오지 않는다.
+- `parse.conditions` (요일별 교시, 11/22): `{"day_slots": {요일 번호: [교시 시작 시각]}, "end_before": [...]}`.
+  - 요일 번호는 0=월 … 4=금, JSON에서는 문자열 키(`"1"`).
+  - 교시: 오전 = `["09:00", "10:30"]`, 점심 = `["12:00"]`, 오후 = `["13:30", "15:00", "16:30"]`, 늦은 오후 = `["16:30"]`, 저녁 = `["18:00", "19:30"]`. 8교시 시작 시각 밖의 값은 들어오지 않는다.
+  - 빈 목록 = 그 요일은 아무 교시나. `day_slots`가 `{}`이면 요일·교시 제한 없음.
+  - 요일이 둘 이상이면 수업이 그 요일들 안에서만(키 없는 요일 불가), 하나면 그 요일이 들어가기만 하면 된다(주 2회의 다른 하루는 자유). 연강은 두 교시가 모두 들어 있어야 맞는다.
+  - 예: "화 오전이나 목 오후" = `{"1": ["09:00", "10:30"], "3": ["13:30", "15:00", "16:30"]}`, "화목이면 돼요" = `{"1": [], "3": []}`.
+  - 옛 모양(`days`·`slots`)은 서버가 받아서 이 모양으로 바꿔 내보낸다. 답장 기록·처리안·`/coord`의 `prev_conditions`·`next_conditions`·`/decide`의 `applied` 모두 같은 모양.
 - `note`: 조교가 확인할 교수 요청(예: `"실습용 PC가 있는 방"`). `parse.note`와 같은 값을 맨 위에도 둔다 — **화면은 처리안과 함께 보여 준다.** 배정·다음 차수 조건에는 쓰지 않는다(조교가 직접 처리). 언어 모델(`llm`)만 채우고 `keyword`는 항상 `""`. 자세한 규칙은 API_조율.md.
 - `proposal.action`과 조교 버튼:
   - `move`: `key` 안으로 옮기자는 안. `[확인]`하면 옮긴다.
@@ -429,14 +443,14 @@ fetch(`http://localhost:8000/coord/${encodeURIComponent(sectionId)}/message`, { 
 
 거절 예 (진짜 함수, `method: "keyword"`, `choice: "none"`, 글 "셋 다 안 됩니다. 화요일 오후면 괜찮아요"):
 ```json
-{ "parse": { "kind": "거절", "picks": [], "conditions": { "days": [1], "slots": ["13:30", "15:00", "16:30"], "end_before": [] }, "note": "", "method": "keyword", "fallback": false },
+{ "parse": { "kind": "거절", "picks": [], "conditions": { "day_slots": { "1": ["13:30", "15:00", "16:30"] }, "end_before": [] }, "note": "", "method": "keyword", "fallback": false },
   "proposal": { "action": "next", "key": null, "conditions": { "…": "…" }, "text": "새 조건(화요일, 오후)으로 다음 차수 대안을 만들까요?", "checks": [] },
   "note": "" }
 ```
 
 `note`가 있는 예 (언어 모델이 교수 요청을 뽑은 경우. 모양만 보이는 예):
 ```json
-{ "parse": { "kind": "조건부", "picks": ["A"], "conditions": { "days": [], "slots": [], "end_before": [] }, "note": "실습용 PC가 있는 방", "method": "llm", "fallback": false },
+{ "parse": { "kind": "조건부", "picks": ["A"], "conditions": { "day_slots": {}, "end_before": [] }, "note": "실습용 PC가 있는 방", "method": "llm", "fallback": false },
   "proposal": { "action": "move", "key": "A", "…": "…", "text": "A안(…)으로 옮길까요? 교수님 요청: 실습용 PC가 있는 방" },
   "note": "실습용 PC가 있는 방" }
 ```
@@ -473,7 +487,7 @@ fetch(`http://localhost:8000/coord/${encodeURIComponent(sectionId)}/message`, { 
 }
 ```
 - 옮긴 분반은 시간표에서 `status: "DONE"`이 되고 `blocks`·`room`이 `applied.meetings`로 바뀐다(강의실은 첫 수업의 것).
-- confirm `next` 응답은 `{decision, coord}`: `decision.action: "confirm_next"`, `applied`는 조건(`Conditions`), `coord.state: "NEXT"`.
+- confirm `next` 응답은 `{decision, coord}`: `decision.action: "confirm_next"`, `applied`는 조건(`{"day_slots": {...}, "end_before": [...]}`), `coord.state: "NEXT"`.
 - keep 응답은 `violations` 없이 `{decision, coord}` (`applied: null`, `state: "KEPT"`).
 
 에러:
@@ -510,7 +524,7 @@ fetch(`http://localhost:8000/coord/${encodeURIComponent(sectionId)}/message`, { 
 ```
 - `open`: 아직 반영 안 된 조율 분반.
 
-2차 메시지 예 (조건 "화요일, 오후" = `{"days": [1], "slots": ["13:30", "15:00", "16:30"]}`를 [확인]한 뒤, 진짜 `write_message`):
+2차 메시지 예 (조건 "화요일, 오후" = `{"day_slots": {"1": ["13:30", "15:00", "16:30"]}}`를 [확인]한 뒤, 진짜 `write_message`):
 ```text
 2027-1학기 웹프로그래밍 03 (공통-재수강) 분반 시간표 2차 조율 안내드립니다.
 
@@ -538,8 +552,19 @@ A  화 13:30~16:15 연강 · 정보과학관 21101
 
 에러: 409 `확정할 수 없는 단계입니다: COLLECT` (COLLECT·FINAL)
 
+### `GET /settings` · `POST /settings`
+학과 설정. 모든 단계에서 보고 바꿀 수 있다. 바꾸면 그다음에 쓰는 조율 메시지부터 적용된다.
+
+```json
+{ "reveal_opponent": true }
+```
+- `reveal_opponent`: 조율 메시지에 겹친 상대 교수 이름 알리기. 기본 `true` (팀 결정: 기본 켬, 조교가 끌 수 있음).
+- `POST /settings`는 바꿀 칸만 보낸다. 예: `{ "reveal_opponent": false }` → 바뀐 설정 전체를 돌려준다.
+- 값 형식이 틀리면 422.
+- `POST /reset` 하면 기본값으로 돌아간다.
+
 ### `POST /reset`
-처음 상태(COLLECT)로. 희망 수정, 시간표, 조율·메시지·답장·결정 기록이 모두 지워진다. 시연용.
+처음 상태(COLLECT)로. 희망 수정, 시간표, 조율·메시지·답장·결정 기록, 학과 설정이 모두 처음으로 돌아간다. 시연용.
 
 ```json
 { "stage": "COLLECT" }
@@ -553,7 +578,7 @@ A  화 13:30~16:15 연강 · 정보과학관 21101
 요청:
 ```json
 {
-  "text": "확통 월수 10시 반으로 옮겨줘",
+  "text": "확통 월수 12시로 옮겨줘",
   "history": [
     { "role": "user", "text": "자료구조 언제야?" },
     { "role": "assistant", "text": "자료구조 02분반 지금 배정: …", "section_id": "2150163202" }
@@ -587,7 +612,7 @@ A  화 13:30~16:15 연강 · 정보과학관 21101
 - 분반: 과목명(띄어쓰기 달라도 됨, 앞부분 일부도 됨), 줄임말 몇 개(운체, 자구, 확통, 웹프, 컴네 …), 분반 번호(`02`, `2분반` = 과목 코드 끝 두 자리), `재수강`, 과목 코드 10자리, 교수 가명(`교수07`).
 - 요일: `월`, `월요일`, `월·수`, `월수`. 시각: `13:30`, `13시 반`, `1시 반`(1~7시는 오후), `오전/오후/저녁` → 가장 가까운 시작 칸. (`오후`만 쓰면 13:30, `저녁`은 18:00)
 - 강의실: `21303`, `정보과학관 21303`. 건물만(`정보관`, `문화관` …) 말하면 `building`.
-- 모자라면 `command.ask_back`에 되물을 말이 들어가고, `answer`도 그 문장이다. (예: 분반이 여러 개, 옮길 곳이 없음)
+- 모자라면 `command.ask_back`에 되물을 말이 들어가고, `answer`도 그 문장이다. (예: 분반이 여러 개, 옮길 곳이 없음, 주 2회 분반인데 요일을 하나만 말함)
 
 **explain** — `디지털시스템입문 재수강 분반 왜 밀렸어?`
 ```json
@@ -631,23 +656,39 @@ MANUAL 분반이면 `…은(는) 조교 직접 배정 분반이에요(수업 모
 ```
 - 분반 없이도 된다: `수요일 15시를 비우면?`(그 시간 비우기), `21303 못 쓰면 어떻게 돼?`(강의실 못 씀). `changes`에 영향 받는 분반이 `note: "영향 받음"`으로 나온다.
 
-**move** — `확통 월수 10시 반으로 옮겨줘`
+**move** — `확통 월수 12시로 옮겨줘`
 ```json
 {
-  "command": { "intent": "move", "section_id": "2150163102", "days": ["월", "수"], "start": "10:30", "…": "…" },
+  "command": { "intent": "move", "section_id": "2150163102", "days": ["월", "수"], "start": "12:00", "…": "…" },
   "section_id": "2150163102",
-  "answer": "확률및통계 02분반을(를) 월 10:30~11:45 / 수 10:30~11:45 · 정보과학관 21501(으)로 옮기면 같이 바뀌어야 하는 다른 분반 0개, 규칙 위반 0건이에요. 아직 반영하지 않았어요. [적용]을 누르고 사유를 적으면 반영돼요.",
-  "proposal_id": "1f30c8a9a57a",
+  "answer": "확률및통계 02분반을(를) 월 12:00~13:15 / 수 12:00~13:15 · 정보과학관 21501(으)로 옮기면 같이 바뀌어야 하는 다른 분반 0개, 규칙 위반 0건이에요. 아직 반영하지 않았어요. [적용]을 누르고 사유를 적으면 반영돼요.",
+  "proposal_id": "…",
   "changes": [
     { "section_id": "2150163102", "name": "확률및통계 02분반",
       "before": "월 12:00~13:15 / 화 12:00~13:15 · 정보과학관 21501",
-      "after": "월 10:30~11:45 / 수 10:30~11:45 · 정보과학관 21501", "note": "옮김" }
+      "after": "월 12:00~13:15 / 수 12:00~13:15 · 정보과학관 21501", "note": "옮김" }
   ],
   "needs_apply": true
 }
 ```
-- 제안을 만들지 않는 경우(`proposal_id: null`): MANUAL 분반, 초안 전, FINAL 뒤(`시간표가 이미 확정됐어요…`), 이미 그 자리, 되묻기.
-- 주 2회 분반에 요일을 하나만 말하면 어느 수업인지 되묻는다. 주 1회 연강 분반에 요일 두 개를 말하면 하나만 달라고 되묻는다.
+- 제안을 만들지 않는 경우(`proposal_id: null`): MANUAL 분반, 초안 전, FINAL 뒤(`시간표가 이미 확정됐어요…`), 이미 그 자리, 되묻기, 옮기면 안 되는 자리(아래).
+- **요일 되묻기** (팀 결정): 주 2회 분반에 요일을 하나만 말하면 묶을 요일을 되묻는다. 주 1회 연강 분반은 요일 하나가 맞으므로 묻지 않는다. 주 1회 연강 분반에 요일 두 개를 말하면 하나만 달라고 되묻는다.
+  - `확률및통계 금요일 저녁으로 바꿔줘` → `확률및통계 02분반은(는) 주 2회 수업이에요. 금요일과 묶을 요일을 하나 더 알려 주세요. (예: 수·금)`
+
+**옮기지 않는 자리** (팀 결정. move와 what_if 모두. 미리 보기도 하지 않고 `changes: []`, `proposal_id: null`):
+
+| 경우 | 예 (실제 응답) |
+|---|---|
+| 교수 불가 시간(`cells`의 `BLOCK`) | `확통 월수 3시로 옮겨줘` → `…(으)로는 옮기지 않아요. 교수 불가 시간(수-15:00)이에요. 다른 시간을 알려 주세요.` |
+| 그 학년 채플 시간 | `확통 월수 10시 반으로 옮겨줘` (2학년) → `…(으)로는 옮기지 않아요. 2학년 채플 시간(월 10:30~11:20)과 겹쳐요. 그 시간은 비워 둬야 해요. 다른 시간을 알려 주세요.` |
+| 18:00 시작 연강 | `자료구조 금요일 저녁 6시로 옮겨줘` → `…(으)로는 옮기지 않아요. 18:00에 시작하는 연강은 없어요(20:45에 끝나요). 더 이른 시각을 알려 주세요.` |
+
+채플은 개설 강좌의 수강 대상을 보고 나눈다:
+- **막음**: AI대학(AI소프트웨어학부·정보보호학과) 대상 채플 시간, 분반 학년이 그 채플 대상 학년과 같을 때만. 지금 데이터: 1학년 목 10:30~11:40(소그룹채플), 2학년 월 10:30~11:20, 3학년 화 15:00~15:50(비전채플).
+- **경고만** (제안은 만든다): 모든 단과대학이 고르는 채플(독서채플 2~4학년 화 15:00·화 16:30·목 16:30, 비전채플 전체학년 수 10:30)이나 학년이 없는 분반. 답 끝에 `채플 시간(…)과 겹쳐요. 대상 학년이 정해지지 않은 채플이라 막지는 않았어요. 조교님이 확인해 주세요.`
+- 다른 학과 대상 채플은 보지 않는다.
+
+**19:30 교시**는 막지 않고 알린다(큰 감점, 팀 결정 11/21): `확통 화목 저녁 7시 반으로 옮겨줘` → `… 19:30 교시는 다른 방법이 없을 때만 쓰는 늦은 교시예요(큰 감점). 아직 반영하지 않았어요. …`
 
 **out_of_scope** — `점심 뭐 먹지?`
 ```json
@@ -678,7 +719,7 @@ STUB: `reassign`·`check_rules`(문하윤).
 
 요청:
 ```json
-{ "proposal_id": "1f30c8a9a57a", "reason": "교수님 전화 요청" }
+{ "proposal_id": "…", "reason": "교수님 전화 요청" }
 ```
 
 응답 200:
@@ -689,14 +730,15 @@ STUB: `reassign`·`check_rules`(문하윤).
     "round_no": 1,
     "action": "assistant_move",
     "reason": "교수님 전화 요청",
-    "applied": { "key": "A", "meetings": [ { "day": 0, "start": "10:30", "end": "11:45", "room": "정보과학관 21501" },
-                                           { "day": 2, "start": "10:30", "end": "11:45", "room": "정보과학관 21501" } ] },
-    "at": "2026-11-21T17:53:31"
+    "applied": { "key": "A", "meetings": [ { "day": 0, "start": "12:00", "end": "13:15", "room": "정보과학관 21501" },
+                                           { "day": 2, "start": "12:00", "end": "13:15", "room": "정보과학관 21501" } ] },
+    "at": "…"
   },
-  "summary": "확률및통계 02분반: 월 12:00~13:15 / 화 12:00~13:15 · 정보과학관 21501 → 월 10:30~11:45 / 수 10:30~11:45 · 정보과학관 21501",
-  "violations": 0
+  "summary": "확률및통계 02분반: 월 12:00~13:15 / 화 12:00~13:15 · 정보과학관 21501 → 월 12:00~13:15 / 수 12:00~13:15 · 정보과학관 21501",
+  "violations": 1
 }
 ```
+- 이 예에서 미리 보기는 위반 0건인데 적용 뒤 1건이다. 가짜 `what_if`는 첫 번째 수업만 옮겨 보고 세기 때문이다(3절 참고).
 - 수정 기록(조교 결정 기록)에 `action: "assistant_move"`와 사유가 남는다.
 - 그 분반이 조율 목록에 있었으면 조율 `state`가 `RESOLVED`가 된다(조교가 직접 옮김).
 - 제안은 한 번만 쓸 수 있다. `/reset` 하면 제안이 모두 사라진다.
@@ -720,6 +762,7 @@ STUB: `reassign`·`check_rules`(문하윤).
 
 ```
 POST /reset
+GET  /settings                     (학과 설정: 상대 교수 이름 알리기)
 GET  /sections, /rooms, /wishes
 POST /wishes                       (교수 입력 화면, 여러 번)
 POST /draft

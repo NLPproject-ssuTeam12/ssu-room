@@ -19,8 +19,10 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_OUT = REPO_ROOT / "data" / "private" / "real"
 
-LAB_FROM_LABEL = {"Y": "MUST", "?": "PREFER", "N": "NONE"}
-LAB_FROM_WISH = {"필수": "MUST", "있으면 좋음": "PREFER", "필요 없음": "NONE"}
+# 실습실은 필요(MUST) / 필요 없음(NONE) 두 가지 (팀 결정 11/21). 라벨 Y만 MUST, 그 밖(N, ?)은 NONE.
+LAB_FROM_LABEL = {"Y": "MUST", "?": "NONE", "N": "NONE"}
+LAB_FROM_WISH = {"필수": "MUST", "있으면 좋음": "NONE", "필요 없음": "NONE"}
+SINGLE_DAY_DEFAULT = "NONE"   # 주 1회 연강 희망. 가상 희망 파일에 없으므로 기본값(주 2회)
 WISH_CELL = {"희망": "PREFER"}
 
 
@@ -193,6 +195,7 @@ def build_wishes(src: Path, sections: list[dict], warnings: list) -> dict:
             "cells": dict(sorted(cells.items())),
             "must": False,
             "lab": LAB_FROM_WISH.get(lab_raw, "NONE"),
+            "single_day": SINGLE_DAY_DEFAULT,
             "building": w.get("building") or None,
             "room": None,
             "note": w.get("note", ""),
@@ -203,7 +206,9 @@ def build_wishes(src: Path, sections: list[dict], warnings: list) -> dict:
 
     return {
         "wishes": items,
-        "professors": {p: {"consecutive": v.get("consecutive")} for p, v in profs.items()},
+        # 교수별 맡은 분반. 예전 '연강'(consecutive, 맡은 강의 이어서 하기) 값은 팀 결정(11/21)으로 뺐다
+        "professors": {p: {"sections": sorted(s["id"] for s in sections if s["professor"] == p)}
+                       for p in sorted(profs)},
     }
 
 
@@ -230,9 +235,52 @@ def build_timetable(src: Path, warnings: list) -> dict:
     return {"status": "DRAFT", "assignments": assignments}
 
 
-def build_fixed(src: Path) -> list[dict]:
+CHAPEL_TIME = re.compile(r"([월화수목금토])\s+(\d{2}:\d{2})-(\d{2}:\d{2})")
+AI_TARGET = re.compile(r"AI대|AI소프트|정보보호")
+
+
+def chapel_scope(target: str) -> tuple[str, list[int]]:
+    """채플 수강 대상 글 → (범위, 대상 학년).
+    범위: "AI대학" = AI소프트웨어학부·정보보호학과 대상 / "전체" = 모든 단과대학이 고르는 채플(대상이 애매)
+          / "다른 학과" = 그 밖. 대상 학년 [] = 전체 학년.
+    '(수강제한: …)' 뒤는 대상이 아니라 막는 쪽이라 보지 않는다."""
+    main = re.split(r"\(수강제한|\(대상외", target)[0]
+    main = re.sub(r"\([^)]*수강제한[^)]*\)", "", main)     # '(1학년은 수강제한)'처럼 막는 쪽 설명은 뺀다
+    years = sorted({int(y) for y in re.findall(r"(\d)학년", main)})
+    if "전체 단과대학" in main or "전체학년 수강가능" in main:
+        return "전체", years
+    if AI_TARGET.search(main) and "정보보호 제외" not in main:
+        return "AI대학", years
+    return "다른 학과", years
+
+
+def build_chapels(src: Path, warnings: list) -> list[dict]:
+    """개설 강좌(lectures_2026_2.csv)에서 채플 시간과 수강 대상(범위·학년)을 뽑는다.
+    schedule_room의 괄호 부분(강의실·담당자 이름)은 읽어도 출력에 넣지 않는다."""
+    out, seen = [], set()
+    for r in read_csv(src / "lectures_2026_2.csv"):
+        if not r.get("group", "").startswith("채플"):
+            continue
+        scope, years = chapel_scope(r.get("target", ""))
+        times = CHAPEL_TIME.findall(r.get("schedule_room", "").split("(")[0])
+        if not times:
+            warnings.append(f"채플 {r['code']}: 시간을 읽지 못해 뺌")
+        for day, start, end in times:
+            key = (day, start, end, scope, tuple(years))
+            if key in seen:      # 같은 시간·같은 대상 분반이 여럿이면 한 번만
+                continue
+            seen.add(key)
+            out.append({"kind": "채플", "sub": r["group"].split(":", 1)[-1], "day": day, "start": start,
+                        "end": end, "scope": scope, "years": years})
+    return out
+
+
+def build_fixed(src: Path, warnings: list) -> list[dict]:
+    """고정 시간. 교양필수는 fixed_blocks.csv 그대로, 채플은 개설 강좌에서 대상까지 읽어 넣는다."""
     rows = read_csv(src / "fixed_blocks.csv")
-    return [{"kind": r["kind"], "day": r["day"], "start": r["start"], "end": r["end"]} for r in rows]
+    out = [{"kind": r["kind"], "day": r["day"], "start": r["start"], "end": r["end"], "scope": None, "years": []}
+           for r in rows if r["kind"] != "채플"]
+    return out + build_chapels(src, warnings)
 
 
 # ---------- 검사 ----------
@@ -267,7 +315,7 @@ def main() -> int:
     rooms = build_rooms(src, warnings)
     wishes = build_wishes(src, sections, warnings)
     timetable = build_timetable(src, warnings)
-    fixed = build_fixed(src)
+    fixed = build_fixed(src, warnings)
 
     room_ids = {r["id"] for r in rooms}
     for a in timetable["assignments"]:

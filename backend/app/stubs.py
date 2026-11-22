@@ -15,7 +15,7 @@ from typing import List, Literal, Optional, Tuple, Union
 from .contracts import (
     DAYN, DAYS, STARTS, Alternative, Assignment, Block, Conditions, EndBefore, Message, MessageInput,
     PickCheck, Proposal, ReplyParse, Room, Section, Timetable, Violation, WhatIfResult, Wish,
-    alternative, dump, meetings_to_blocks, parse,
+    alternative, as_day_slots, dump, late_penalty, meetings_to_blocks, no_long_at_1800, parse,
 )
 
 Method = Literal["keyword", "llm"]
@@ -170,22 +170,33 @@ def _move_day(blocks: List[Block], step: int) -> List[Block]:
 
 
 def _fits(blocks: List[Block], cond: Optional[Conditions]) -> Tuple[bool, str]:
-    """조건 읽는 법은 coord_models.Conditions 주석과 같다.
-    days: 둘 이상 = 그 요일 안에서만, 하나 = 그 요일을 포함.
-    slots: 되는 교시 시작 시각 (연강이면 두 교시 모두 들어 있어야 함). end_before: 요일별 종료 시각."""
+    """조건 읽는 법은 coord_models.Conditions 주석과 같다 (요일별 교시 day_slots, 11/22).
+    day_slots가 비면 요일·교시 제한 없음. 요일 키가 둘 이상 = 그 요일들 안에서만(키 없는 요일 불가),
+    하나 = 그 요일이 들어가기만 하면 됨(주 2회의 다른 하루는 자유).
+    그 요일 목록이 비면 아무 교시나, 있으면 그 교시만 (연강이면 두 교시 모두 들어 있어야 함).
+    end_before: 요일별 종료 시각. 옛 모양(days·slots) 조건도 받는다."""
     if cond is None:
         return True, ""
-    days = [DAYS.index(b.day) for b in blocks]
-    if cond.days:
-        ok = all(d in cond.days for d in days) if len(cond.days) >= 2 else cond.days[0] in days
-        if not ok:
-            return False, "가능한 요일이 아님"
+    cond = as_day_slots(cond)
+    ds = cond.day_slots
     for b in blocks:
-        s, e = _block_range(b)
+        _, e = _block_range(b)
         for eb in cond.end_before:
             if DAYS.index(b.day) == eb.day and e > _to_min(eb.time):
                 return False, f"{_block_text(b)} 종료라 '{b.day} {eb.time} 전 종료'와 안 맞음"
-        if cond.slots and not all(st in cond.slots for st in _slot_starts(b)):
+    if not ds:
+        return True, ""
+    days = [DAYS.index(b.day) for b in blocks]
+    if len(ds) >= 2:
+        ok, checked = all(d in ds for d in days), blocks
+    else:
+        (d0,) = ds
+        ok, checked = d0 in days, [b for b in blocks if DAYS.index(b.day) == d0]
+    if not ok:
+        return False, "가능한 요일이 아님"
+    for b in checked:
+        allowed = ds[DAYS.index(b.day)]
+        if allowed and not all(st in allowed for st in _slot_starts(b)):
             return False, f"{_block_text(b)}가 가능한 교시 밖"
     return True, ""
 
@@ -203,11 +214,13 @@ def make_alternatives(section_id: str, conditions: Optional[Conditions] = None) 
     밀린 분반 (+ 조건) → 대안 A·B·C.
     가짜: 초안 자리에서 같은 강의실로 한 칸·두 칸 뒤, 같은 시간 다른 강의실 순으로 만들고
     조건이 있으면 맞는 것만 남긴다. 초안에서 같은 강의실을 쓰는 다른 분반과 겹치는 자리는 뺀다
-    (교수·학년 겹침은 보지 않는다)."""
+    (교수·학년 겹침은 보지 않는다).
+    시간 규칙: 18:00 시작 연강은 만들지 않는다(하드). 19:30 교시는 감점(late_penalty)이라
+    19:30을 안 쓰는 안을 먼저 고르고, 모자랄 때만 19:30 안을 넣는다."""
     d = _data()
     cur = next((a for a in d["timetable"].assignments if a.section_id == section_id), None)
-    if cur is None or not cur.blocks:
-        return []
+    if cur is None or not cur.blocks or any(b.day not in DAYS for b in cur.blocks):
+        return []   # 토요일 등 MANUAL 분반은 자동 대안 대상이 아니다
     sec = d["sections"].get(section_id, {})
     need_lab = sec.get("lab_need") == "MUST"
     size = sec.get("enrollment") or 0
@@ -240,23 +253,25 @@ def make_alternatives(section_id: str, conditions: Optional[Conditions] = None) 
         return any(a.section_id != section_id and a.room == room and _overlap(b, x)
                    for a in d["timetable"].assignments for b in a.blocks for x in blocks)
 
-    out, seen = [], set()
+    ok, seen = [], set()
     for blocks, room in cands:
         key = (tuple((b.day, b.start, b.slots) for b in blocks), room)
-        if key in seen or not _fits(blocks, conditions)[0] or room_busy(blocks, room):
+        if key in seen or not no_long_at_1800(blocks):
+            continue
+        if not _fits(blocks, conditions)[0] or room_busy(blocks, room):
             continue
         seen.add(key)
-        out.append(alternative("ABC"[len(out)], blocks, room))
-        if len(out) == 3:
-            break
-    return out
+        ok.append((blocks, room))
+    # 감점이 적은 순 (같으면 원래 순서). 19:30 안은 다른 안이 3개가 안 될 때만 들어간다
+    ok.sort(key=lambda br: late_penalty(br[0]))
+    return [alternative("ABC"[i], blocks, room) for i, (blocks, room) in enumerate(ok[:3])]
 
 
 def reassign(timetable: Timetable, section_id: str, choice: Union[Alternative, Conditions]) -> Timetable:
     """STUB: 담당 문하윤
     현재 배정 + 고른 안 또는 조건 → 새 배정. 가짜: 그 분반 하나만 바꾼다."""
     tt = parse(Timetable, dump(timetable))
-    if isinstance(choice, Conditions):
+    if not isinstance(choice, Alternative):   # 조건 (옛 모양·새 모양 모두)
         alts = make_alternatives(section_id, choice)
         if not alts:
             return tt

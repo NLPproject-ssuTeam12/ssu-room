@@ -16,7 +16,9 @@ import uuid
 from typing import Dict, List, Optional, Tuple
 
 from .. import engine
-from ..contracts import DAYS, STARTS, AssistantCommand, Block, Day, alternative, dump
+from ..contracts import (
+    DAYS, LATE_SLOT, STARTS, AssistantCommand, Block, Day, alternative, dump, late_penalty, no_long_at_1800,
+)
 
 # ---------- 모양 ----------
 
@@ -306,6 +308,8 @@ def read_question(text: str, history: Optional[List[dict]], store, method: str =
                 ask = "무엇을 바꿔 볼까요? 분반과 옮길 시간, 또는 비울 시간(요일+시각)이나 못 쓰는 강의실을 알려 주세요."
             elif section_id and not has_target:
                 ask = "어디로 옮겨 볼까요? 요일·시각이나 강의실을 알려 주세요."
+        if not ask and intent in ("move", "what_if") and section_id and len(days) == 1:
+            ask = _ask_pair_day(store.get_section(section_id), days[0])
     if intent == "out_of_scope":
         ask = None
 
@@ -314,6 +318,17 @@ def read_question(text: str, history: Optional[List[dict]], store, method: str =
         day=days[0] if days else None, days=days, start=start,
         room=room, building=building, ask_back=ask,
     )
+
+
+def _ask_pair_day(sec, day: str) -> Optional[str]:
+    """주 2회 분반인데 요일을 하나만 말하면 묶을 요일을 되묻는다. 주 1회 연강·MANUAL 분반은 묻지 않는다."""
+    if sec is None or sec.shape != "TWICE":
+        return None
+    i = DAYS.index(day)
+    other = DAYS[i + 2] if i + 2 < len(DAYS) else DAYS[i - 2]
+    pair = "·".join(sorted((day, other), key=DAYS.index))
+    return (f"{section_title(sec)}은(는) 주 2회 수업이에요. {day}요일과 묶을 요일을 하나 더 알려 주세요. "
+            f"(예: {pair})")
 
 
 # ---------- 실행 ----------
@@ -378,6 +393,49 @@ def _new_blocks(cur: List[Block], cmd: AssistantQuery) -> Tuple[Optional[List[Bl
                 return None, f"{cmd.start}에 시작하면 {b.slots}칸 수업이 너무 늦게 끝나요. 더 이른 시각을 알려 주세요."
             b.start = cmd.start
     return out, None
+
+
+def _overlaps(b: Block, f: dict) -> bool:
+    s0 = _to_min(b.start)
+    s1 = s0 + 75 * b.slots + 15 * (b.slots - 1)
+    return f.get("day") == b.day and _to_min(f["start"]) < s1 and s0 < _to_min(f["end"])
+
+
+def _chapels(blocks: List[Block], fixed_blocks: List[dict], year: Optional[int]) -> Tuple[List[str], List[str]]:
+    """이 분반이 옮길 자리와 겹치는 채플 → (막을 채플, 경고만 할 채플). 각각 '요일 시작~끝'.
+    - 막음: AI대학(AI소프트웨어학부·정보보호학과) 대상 채플이고, 분반 학년이 그 채플 대상 학년과 같을 때
+    - 경고: 모든 단과대학이 고르는 채플(대상이 애매), 또는 학년이 정해지지 않은 분반(year 없음)의 AI대학 채플
+    - 다른 학과 채플은 보지 않는다"""
+    block, warn = [], []
+    for f in fixed_blocks:
+        if f.get("kind") != "채플" or not any(_overlaps(b, f) for b in blocks):
+            continue
+        scope, years = f.get("scope"), f.get("years") or []
+        text = f"{f['day']} {f['start']}~{f['end']}"
+        if scope == "AI대학" and year is not None and year in years:
+            block.append(text)
+        elif scope == "AI대학" and year is None:
+            warn.append(text)
+        elif scope == "전체" and (not years or year is None or year in years):
+            warn.append(text)
+    order = lambda t: (DAYS.index(t[0]), t[2:])   # 요일 순
+    return sorted(set(block), key=order), sorted(set(warn), key=order)
+
+
+def _forbidden(blocks: List[Block], sec, wish, fixed_blocks: List[dict]) -> Tuple[Optional[str], Optional[str]]:
+    """(옮기면 안 되는 이유, 경고). 교수 불가 시간 → 채플(대상 학년) → 18:00 연강 순으로 본다."""
+    blocked = [c for b in blocks for c in _cells(b) if wish and wish.cells.get(c) == "BLOCK"]
+    if blocked:
+        return f"교수 불가 시간({', '.join(blocked)})이에요. 다른 시간을 알려 주세요.", None
+    block, warn = _chapels(blocks, fixed_blocks, sec.year)
+    if block:
+        return (f"{sec.year}학년 채플 시간({', '.join(block)})과 겹쳐요. 그 시간은 비워 둬야 해요. "
+                "다른 시간을 알려 주세요."), None
+    if not no_long_at_1800(blocks):
+        return "18:00에 시작하는 연강은 없어요(20:45에 끝나요). 더 이른 시각을 알려 주세요.", None
+    note = (f"채플 시간({', '.join(warn)})과 겹쳐요. 대상 학년이 정해지지 않은 채플이라 막지는 않았어요. "
+            "조교님이 확인해 주세요.") if warn else None
+    return None, note
 
 
 def _pick_room(cmd: AssistantQuery, store, current: Optional[str]) -> Optional[str]:
@@ -494,6 +552,9 @@ def _what_if(cmd: AssistantQuery, store, as_move: bool) -> dict:
     room = _pick_room(cmd, store, a.room)
     if [dump(b) for b in blocks] == [dump(b) for b in a.blocks] and room == a.room:
         return _result(f"{title}은(는) 이미 그 자리예요: {_place_text(a.blocks, a.room)}.")
+    why_not, chapel_note = _forbidden(blocks, sec, store.get_wish(sec.id), store.fixed_blocks)
+    if why_not:   # 교수 불가 시간·채플·18:00 연강으로는 옮기지 않는다 (미리 보기도 하지 않음)
+        return _result(f"{title}을(를) {_place_text(blocks, room)}(으)로는 옮기지 않아요. {why_not}")
 
     change = {"kind": "move", "section_id": sec.id, "day": blocks[0].day, "start": blocks[0].start,
               "room": room, "blocks": [dump(b) for b in blocks]}
@@ -502,12 +563,12 @@ def _what_if(cmd: AssistantQuery, store, as_move: bool) -> dict:
     rows = [row(sec.id, _place_text(blocks, room), "옮김")]
     rows += [row(s, "겹침 → 다시 배정 필요", "영향 받음") for s in others]
 
-    wish = store.get_wish(sec.id)
-    blocked = [c for b in blocks for c in _cells(b) if wish and wish.cells.get(c) == "BLOCK"]
     lines = [f"{title}을(를) {_place_text(blocks, room)}(으)로 옮기면"]
     lines.append(f"같이 바뀌어야 하는 다른 분반 {len(others)}개, 규칙 위반 {res['violations']}건이에요.")
-    if blocked:
-        lines.append(f"교수 불가 칸({', '.join(blocked)})에 걸려요.")
+    if late_penalty(blocks):
+        lines.append(f"{LATE_SLOT} 교시는 다른 방법이 없을 때만 쓰는 늦은 교시예요(큰 감점).")
+    if chapel_note:
+        lines.append(chapel_note)
 
     if not as_move:
         lines.append("(미리 보기만 했어요. 옮기려면 '옮겨줘'라고 말해 주세요.)")

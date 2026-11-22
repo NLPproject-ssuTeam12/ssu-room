@@ -28,6 +28,7 @@ if not (DATA / "sections.json").exists():
 from fastapi.testclient import TestClient  # noqa: E402
 
 from backend.app import engine  # noqa: E402
+from backend.app.contracts import conditions_json  # noqa: E402
 from backend.app.main import app  # noqa: E402
 
 REPLY = "A나 C 다 괜찮아요. 수요일은 17시 전에 끝나야 해요"
@@ -219,10 +220,32 @@ def test_wish_format_422(client, cells):
 def test_wish_ok(client):
     sid = first_auto_section(client)
     r = client.post("/wishes", json={"section_id": sid, "cells": {"월-09:00": "PREFER", "금-19:30": "BLOCK"},
-                                     "lab": "PREFER"})
+                                     "lab": "MUST", "single_day": "PREFER"})
     assert r.status_code == 200, r.text
     w = next(x for x in client.get("/wishes").json()["wishes"] if x["section_id"] == sid)
     assert w["cells"] == {"월-09:00": "PREFER", "금-19:30": "BLOCK"}
+    assert w["lab"] == "MUST" and w["single_day"] == "PREFER"
+
+
+@pytest.mark.parametrize("extra", [
+    {"lab": "PREFER"},             # 실습실은 MUST(필요)·NONE(필요 없음) 두 가지만
+    {"lab": "있으면 좋음"},
+    {"single_day": "YES"},         # 주 1회 연강은 MUST·PREFER·NONE
+])
+def test_wish_lab_and_single_day_values_422(client, extra):
+    sid = first_auto_section(client)
+    r = client.post("/wishes", json={"section_id": sid, "cells": {}, **extra})
+    assert r.status_code == 422, r.text
+
+
+def test_wishes_shape_after_team_decisions(client):
+    body = client.get("/wishes").json()
+    assert all(w["lab"] in ("MUST", "NONE") for w in body["wishes"])
+    assert all(w["single_day"] in ("MUST", "PREFER", "NONE") for w in body["wishes"])
+    assert all(s["lab_need"] in ("MUST", "NONE") for s in sections(client))
+    # 예전 '연강'(consecutive) 칸은 없다. professors는 교수별 맡은 분반
+    assert "consecutive" not in str(body)
+    assert all(set(v) == {"sections"} for v in body["professors"].values())
 
 
 # ---------- MANUAL·없는 분반 ----------
@@ -396,23 +419,46 @@ def _sent_section(client) -> str:
     return sid
 
 
-def test_message_record_shape_and_no_blocker_name(client):
+def _sid_with_blocker(client):
     from backend.app.main import store
-    sid = start_round(client)
+    start_round(client)
+    for c in client.get("/coord").json():
+        if store.message_input(c["section_id"]).blocker_prof:
+            return c["section_id"]
+    pytest.fail("겹친 상대를 찾은 조율 분반이 없음 (데이터 확인)")
+
+
+def test_message_record_shape_and_opponent_name_shown_by_default(client):
+    from backend.app.main import store
+    assert client.get("/settings").json() == {"reveal_opponent": True}   # 기본 켬
+    sid = _sid_with_blocker(client)
     inp = store.message_input(sid)
-    assert inp.reveal is False                      # 기본: 상대 교수 이름 알리지 않음
-    assert inp.round == 1 and inp.alternatives
+    assert inp.reveal is True and inp.round == 1 and inp.alternatives
     assert not ({"seniority", "hired", "priority"} & set(type(inp).model_fields))
     r = client.post(f"/coord/{enc(sid)}/message", json={"method": "keyword"})
     assert r.status_code == 200, r.text
     rec = r.json()
     assert set(rec) >= {"text", "method", "fallback", "problems", "issues", "sent"}
     assert rec["issues"] == [] and rec["sent"] is True
-    if inp.blocker_prof:
-        assert f"{inp.blocker_prof} 교수" not in rec["text"]
+    assert f"{inp.blocker_prof} 교수" in rec["text"] and inp.blocker_course in rec["text"]
     for w in ("연차", "임용", "우선순위"):
         assert w not in rec["text"]
     assert inp.course in rec["text"] and inp.wish in rec["text"]
+
+
+def test_settings_turn_off_opponent_name(client):
+    from backend.app.main import store
+    sid = _sid_with_blocker(client)
+    r = client.post("/settings", json={"reveal_opponent": False})
+    assert r.status_code == 200 and r.json() == {"reveal_opponent": False}
+    inp = store.message_input(sid)
+    assert inp.reveal is False
+    rec = client.post(f"/coord/{enc(sid)}/message").json()
+    assert rec["sent"] is True and f"{inp.blocker_prof} 교수" not in rec["text"]
+    # 모르는 칸은 422, /reset 하면 기본값(켬)으로
+    assert client.post("/settings", json={"reveal_opponent": "maybe"}).status_code == 422
+    client.post("/reset")
+    assert client.get("/settings").json()["reveal_opponent"] is True
 
 
 def test_reply_choice_button(client):
@@ -444,8 +490,10 @@ def test_reply_choice_none_then_confirm_next(client):
     inp = store.message_input(sid)
     assert inp.round == 2
     cond = prop["conditions"]
-    if cond["days"] or cond["slots"] or cond["end_before"]:     # 가짜 parse_reply는 요일을 안 뽑을 수 있다
-        assert inp.prev_conditions is not None and inp.prev_conditions.days == cond["days"]
+    assert set(cond) == {"day_slots", "end_before"}
+    if cond["day_slots"] or cond["end_before"]:     # 가짜 parse_reply는 요일을 안 뽑을 수 있다
+        assert inp.prev_conditions is not None
+        assert conditions_json(inp.prev_conditions) == cond
     assert store.get_coord(sid)["prev_conditions"] is not None
 
 
@@ -479,7 +527,7 @@ def test_conditions_shape_and_end_before(client):
     sid = _sent_section(client)
     r = client.post(f"/coord/{enc(sid)}/reply", json={"text": REPLY})
     k = r.json()["parse"]["conditions"]
-    assert set(k) == {"days", "slots", "end_before"}
+    assert set(k) == {"day_slots", "end_before"}
     assert {"day": 2, "time": "17:00"} in k["end_before"]      # 수요일 = 2
 
 
@@ -496,7 +544,7 @@ def test_reply_note_shown_but_not_used(client, monkeypatch):
 
     # 언어 모델이 note를 채운 경우 (실제 호출 대신 가짜 응답)
     def fake_parse(text, choice=None, *, alternatives=None, message="", method="keyword"):
-        return ReplyParse(kind="거절", conditions=Conditions(days=[3], slots=["13:30", "15:00"]),
+        return ReplyParse(kind="거절", conditions=Conditions.model_validate({"days": [3], "slots": ["13:30", "15:00"]}),
                           note="실습용 PC가 있는 방", method="llm")
 
     monkeypatch.setattr(engine, "parse_reply", fake_parse)
@@ -508,26 +556,145 @@ def test_reply_note_shown_but_not_used(client, monkeypatch):
     r = client.post(f"/coord/{enc(sid)}/decide", json={"action": "confirm"})
     assert r.status_code == 200, r.text
     applied = r.json()["decision"]["applied"]          # 다음 차수로 넘기는 것 = 조건만
-    assert applied == {"days": [3], "slots": ["13:30", "15:00"], "end_before": []}
+    assert applied == {"day_slots": {"3": ["13:30", "15:00"]}, "end_before": []}
     assert "실습용" not in str(applied)
     nxt = store.get_coord(sid)["next_conditions"]
-    assert nxt.slots == ["13:30", "15:00"] and nxt.days == [3]
+    assert conditions_json(nxt) == applied
+    out = next(c for c in client.get("/coord").json() if c["section_id"] == sid)
+    assert out["next_conditions"] == applied              # 화면에 나가는 모양도 요일별 교시
 
 
-def test_conditions_slots_validation():
-    from backend.app.contracts import Conditions
-    assert Conditions(slots=["16:30", "13:30", "13:30"]).slots == ["13:30", "16:30"]   # 교시 순, 중복 없음
+def _cond_classes():
+    """요일별 교시 모양 Conditions: contracts 사본, 그리고 진짜 coord_models가 새 모양이면 그것도."""
+    from backend.app import contracts
+    out = [contracts.ConditionsCopy]
+    if "day_slots" in contracts.Conditions.model_fields and contracts.Conditions is not contracts.ConditionsCopy:
+        out.append(contracts.Conditions)
+    return out
+
+
+@pytest.mark.parametrize("Cond", _cond_classes())
+def test_conditions_day_slots_validation(Cond):
+    c = Cond(day_slots={"3": ["16:30", "13:30", "13:30"]})      # 문자열 키도 받는다
+    assert c.day_slots == {3: ["13:30", "16:30"]}               # 교시 순, 중복 없음
     with pytest.raises(Exception):
-        Conditions(slots=["13:00"])
-    assert Conditions(slots=["13:30"]).is_empty() is False
-    assert Conditions().is_empty() is True
+        Cond(day_slots={1: ["13:00"]})                          # 교시 시작 시각이 아님
+    with pytest.raises(Exception):
+        Cond(day_slots={5: []})                                 # 토요일 없음
+    assert Cond(day_slots={1: []}).is_empty() is False
+    assert Cond().is_empty() is True
+    # 옛 코드용 읽기 값
+    assert (c.days, c.slots) == ([3], ["13:30", "16:30"])
+    assert Cond(day_slots={1: [], 3: ["09:00"]}).slots == []    # 어느 요일이 '아무 교시나'면 교시 제한 없음
+
+
+@pytest.mark.parametrize("Cond", _cond_classes())
+def test_conditions_old_shape_input(Cond):
+    """옛 모양 {days, slots}도 받아 요일 × 교시로 바꾼다."""
+    assert Cond.model_validate({"days": [1, 3], "slots": ["13:30"]}).day_slots == {1: ["13:30"], 3: ["13:30"]}
+    assert Cond.model_validate({"slots": ["09:00"]}).day_slots == {d: ["09:00"] for d in range(5)}
+    assert Cond.model_validate({"days": [2]}).day_slots == {2: []}
+    assert Cond.model_validate({"days": [], "slots": [], "end_before": []}).is_empty()
+
+
+def test_conditions_json_shape():
+    from backend.app.contracts import ConditionsCopy, conditions_json, dump
+    c = ConditionsCopy(day_slots={1: ["09:00", "10:30"], 3: []}, end_before=[{"day": 2, "time": "17:00"}])
+    want = {"day_slots": {"1": ["09:00", "10:30"], "3": []}, "end_before": [{"day": 2, "time": "17:00"}]}
+    assert conditions_json(c) == want and dump(c) == want
+    assert conditions_json({"days": [1, 3], "slots": [], "end_before": []}) ==         {"day_slots": {"1": [], "3": []}, "end_before": []}      # 옛 모양 dict도 같은 모양으로
 
 
 def test_stub_fits_uses_slots():
-    from backend.app.contracts import Block, Conditions
+    from backend.app.contracts import Block, ConditionsCopy
     from backend.app.stubs import _fits
-    pm = Conditions(slots=["13:30", "15:00", "16:30"])
+    pm = ConditionsCopy(day_slots={d: ["13:30", "15:00", "16:30"] for d in range(5)})
     assert _fits([Block(day="월", start="13:30", slots=1)], pm)[0] is True
     assert _fits([Block(day="월", start="12:00", slots=1)], pm) == (False, "월 12:00~13:15가 가능한 교시 밖")
     assert _fits([Block(day="수", start="15:00", slots=2)], pm)[0] is True          # 15:00·16:30 둘 다 있음
     assert _fits([Block(day="수", start="16:30", slots=2)], pm)[0] is False         # 18:00 교시가 없음
+
+
+@pytest.mark.parametrize("Cond", _cond_classes())
+def test_stub_fits_different_slots_per_day(Cond):
+    """(a) 화 오전·목 오후처럼 요일마다 다른 교시."""
+    from backend.app.contracts import Block
+    from backend.app.stubs import _fits
+    k = Cond(day_slots={1: ["09:00", "10:30"], 3: ["13:30", "15:00", "16:30"]})
+    ok = lambda *bs: _fits([Block(day=d, start=t, slots=n) for d, t, n in bs], k)[0]   # noqa: E731
+    assert ok(("화", "10:30", 1), ("목", "15:00", 1)) is True
+    assert ok(("화", "15:00", 1), ("목", "15:00", 1)) is False      # 화요일 오후는 안 됨
+    assert ok(("화", "09:00", 1), ("목", "10:30", 1)) is False      # 목요일 오전은 안 됨
+    assert ok(("화", "09:00", 1), ("금", "09:00", 1)) is False      # 키 없는 요일(금)
+    assert ok(("목", "13:30", 2),) is True                          # 연강: 13:30·15:00 둘 다 목 오후
+    assert ok(("화", "10:30", 2),) is False                         # 연강 두 번째 칸 12:00은 화 오전 밖
+
+
+@pytest.mark.parametrize("Cond", _cond_classes())
+def test_stub_fits_empty_list_day(Cond):
+    """(b) 빈 목록 요일 = 그 요일은 아무 교시나. day_slots 자체가 비면 요일 제한 없음."""
+    from backend.app.contracts import Block
+    from backend.app.stubs import _fits
+    k = Cond(day_slots={1: [], 3: ["13:30"]})
+    ok = lambda *bs: _fits([Block(day=d, start=t, slots=n) for d, t, n in bs], k)[0]   # noqa: E731
+    assert ok(("화", "09:00", 1), ("목", "13:30", 1)) is True
+    assert ok(("화", "18:00", 1), ("목", "13:30", 1)) is True       # 화요일은 아무 교시나
+    assert ok(("화", "09:00", 1), ("목", "09:00", 1)) is False      # 목요일은 13:30만
+    assert ok(("월", "09:00", 1), ("화", "09:00", 1)) is False      # 키 없는 요일(월)
+    # 요일 하나 = 그 요일이 들어가면 되고 다른 하루는 자유 (coord_models 주석과 같음)
+    one = Cond(day_slots={1: []})
+    assert _fits([Block(day="화", start="09:00", slots=1), Block(day="금", start="18:00", slots=1)], one)[0]
+    assert not _fits([Block(day="월", start="09:00", slots=1), Block(day="수", start="09:00", slots=1)], one)[0]
+    # 제한 없음 + end_before는 그대로
+    free = Cond(end_before=[{"day": 2, "time": "17:00"}])
+    assert _fits([Block(day="월", start="19:30", slots=1)], free)[0] is True
+    assert _fits([Block(day="수", start="16:30", slots=1)], free)[0] is False    # 17:45 종료
+
+
+@pytest.mark.parametrize("Cond", _cond_classes())
+def test_stub_old_shape_same_result(Cond, client):
+    """(c) 옛 모양(days·slots)으로 넣어도 새 모양과 같은 대안이 나온다."""
+    from backend.app import stubs
+    from backend.app.contracts import conditions_json
+    old = {"days": [1, 3], "slots": ["13:30", "15:00", "16:30"], "end_before": []}
+    new = Cond(day_slots={1: ["13:30", "15:00", "16:30"], 3: ["13:30", "15:00", "16:30"]})
+    assert conditions_json(old) == conditions_json(new)
+    seen = 0
+    for s in sections(client)[:40]:
+        if s["shape"] == "MANUAL":
+            continue
+        a = [stubs.dump(x) for x in stubs.make_alternatives(s["id"], Cond.model_validate(old))]
+        b = [stubs.dump(x) for x in stubs.make_alternatives(s["id"], new)]
+        assert a == b
+        seen += bool(a)
+    assert seen > 0
+
+
+# ---------- 시간 규칙: 19:30 감점, 18:00 연강 없음 ----------
+
+def test_late_slot_helpers():
+    from backend.app.contracts import Block, LATE_PENALTY, late_penalty, no_long_at_1800
+    assert late_penalty([Block(day="월", start="18:00", slots=1)]) == 0
+    assert late_penalty([Block(day="월", start="19:30", slots=1), Block(day="수", start="19:30", slots=1)]) \
+        == 2 * LATE_PENALTY
+    assert late_penalty([Block(day="화", start="18:00", slots=2)]) == LATE_PENALTY   # 18:00 연강은 19:30 칸도 씀
+    assert no_long_at_1800([Block(day="화", start="16:30", slots=2)]) is True       # 16:30 연강은 됨
+    assert no_long_at_1800([Block(day="화", start="18:00", slots=2)]) is False
+
+
+def test_stub_alternatives_late_slot_last_and_no_long_at_1800(client):
+    from backend.app import stubs
+    from backend.app.contracts import late_penalty, meetings_to_blocks, no_long_at_1800
+    checked = late_seen = 0
+    for s in sections(client):
+        if s["shape"] == "MANUAL":
+            continue
+        pens = []
+        for alt in stubs.make_alternatives(s["id"]):
+            blocks = meetings_to_blocks(alt.meetings)[0]
+            assert no_long_at_1800(blocks), (s["id"], alt)
+            pens.append(late_penalty(blocks))
+        assert pens == sorted(pens), (s["id"], pens)      # 19:30 안은 맨 뒤 (다른 안이 없을 때만)
+        checked += 1
+        late_seen += any(pens)
+    assert checked > 50

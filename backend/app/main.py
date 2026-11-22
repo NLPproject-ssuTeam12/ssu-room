@@ -13,11 +13,12 @@ import os
 from typing import List, Literal, Optional
 
 from fastapi import FastAPI, HTTPException
+from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from . import engine
-from .contracts import Alternative, Key, Timetable, Wish, dump, meetings_to_blocks, parse
+from .contracts import Alternative, Key, Timetable, Wish, fix_conditions, dump, meetings_to_blocks, parse
 from .nlp import assistant
 from .store import MAX_ROUND, store
 
@@ -78,6 +79,10 @@ class AssistantIn(BaseModel):
     method: Literal["keyword", "llm"] = "keyword"
 
 
+class SettingsIn(BaseModel):
+    reveal_opponent: Optional[bool] = None   # 조율 메시지에 상대 교수 이름 알리기
+
+
 class ApplyIn(BaseModel):
     proposal_id: str
     reason: Optional[str] = None
@@ -112,7 +117,8 @@ def _normalize(tt: Timetable) -> Timetable:
 
 def _coord_out(item: dict) -> dict:
     sec = store.get_section(item["section_id"])
-    out = dict(item)
+    # 조건(prev/next_conditions, 처리안·답장 해석 안)은 요일별 교시 모양으로 내보낸다
+    out = fix_conditions(jsonable_encoder(item))
     out["name"] = sec.name if sec else None
     out["professor"] = sec.professor if sec else None
     return out
@@ -167,6 +173,20 @@ def health():
         "engine": engine.sources(),
         "load_warnings": engine.load_warnings() + store.load_warnings,
     }
+
+
+# ---------- 학과 설정 ----------
+
+@app.get("/settings")
+def get_settings():
+    return store.get_settings()
+
+
+@app.post("/settings")
+def post_settings(body: SettingsIn):
+    """보낸 칸만 바꾼다. 모든 단계에서 바꿀 수 있고, 다음에 쓰는 조율 메시지부터 적용된다."""
+    fields = {k: v for k, v in dump(body).items() if v is not None}
+    return store.update_settings(**fields)
 
 
 # ---------- 기본 자료 ----------
