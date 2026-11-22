@@ -20,7 +20,11 @@ Day = Literal["월", "화", "수", "목", "금"]
 # 실제 초안에 토요일 블록(Co-op 등 MANUAL 분반)이 있어 Block만 토요일을 받는다.
 # 자동 배정·희망·조건은 월~금(Day)만 쓴다.
 BlockDay = Literal["월", "화", "수", "목", "금", "토"]
-LabNeed = Literal["MUST", "PREFER", "NONE"]
+# 실습실: 필요 / 필요 없음 두 가지 (팀 결정 11/21). 값 이름은 하윤 DB lab_requirement와 같게 MUST·NONE.
+# (DB에는 PREFER도 있지만 서버·화면은 쓰지 않는다)
+LabNeed = Literal["MUST", "NONE"]
+# 주 1회 연강(하루에 두 교시를 이어서): 무조건 / 선호 / 필요 없음(주 2회). 하윤 DB single_day_pref와 같은 이름 (11/21)
+SingleDay = Literal["MUST", "PREFER", "NONE"]
 Shape = Literal["TWICE", "ONCE_LONG", "MANUAL"]
 
 _HHMM = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
@@ -72,7 +76,8 @@ class Wish(BaseModel):
     professor: Optional[str] = None
     cells: Dict[str, Literal["PREFER", "BLOCK"]] = {}   # "월-09:00": "PREFER". 안 칠한 칸 = 가능
     must: bool = False
-    lab: LabNeed = "NONE"
+    lab: LabNeed = "NONE"                        # MUST = 실습실 필요, NONE = 필요 없음
+    single_day: SingleDay = "NONE"               # 주 1회 연강. NONE = 주 2회(기본)
     building: Optional[str] = None
     room: Optional[str] = None
     note: str = ""

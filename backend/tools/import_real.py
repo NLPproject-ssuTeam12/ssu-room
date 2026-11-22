@@ -19,8 +19,10 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_OUT = REPO_ROOT / "data" / "private" / "real"
 
-LAB_FROM_LABEL = {"Y": "MUST", "?": "PREFER", "N": "NONE"}
-LAB_FROM_WISH = {"필수": "MUST", "있으면 좋음": "PREFER", "필요 없음": "NONE"}
+# 실습실은 필요(MUST) / 필요 없음(NONE) 두 가지 (팀 결정 11/21). 라벨 Y만 MUST, 그 밖(N, ?)은 NONE.
+LAB_FROM_LABEL = {"Y": "MUST", "?": "NONE", "N": "NONE"}
+LAB_FROM_WISH = {"필수": "MUST", "있으면 좋음": "NONE", "필요 없음": "NONE"}
+SINGLE_DAY_DEFAULT = "NONE"   # 주 1회 연강 희망. 가상 희망 파일에 없으므로 기본값(주 2회)
 WISH_CELL = {"희망": "PREFER"}
 
 
@@ -193,6 +195,7 @@ def build_wishes(src: Path, sections: list[dict], warnings: list) -> dict:
             "cells": dict(sorted(cells.items())),
             "must": False,
             "lab": LAB_FROM_WISH.get(lab_raw, "NONE"),
+            "single_day": SINGLE_DAY_DEFAULT,
             "building": w.get("building") or None,
             "room": None,
             "note": w.get("note", ""),
@@ -203,7 +206,9 @@ def build_wishes(src: Path, sections: list[dict], warnings: list) -> dict:
 
     return {
         "wishes": items,
-        "professors": {p: {"consecutive": v.get("consecutive")} for p, v in profs.items()},
+        # 교수별 맡은 분반. 예전 '연강'(consecutive, 맡은 강의 이어서 하기) 값은 팀 결정(11/21)으로 뺐다
+        "professors": {p: {"sections": sorted(s["id"] for s in sections if s["professor"] == p)}
+                       for p in sorted(profs)},
     }
 
 

@@ -181,7 +181,7 @@ fetch(`http://localhost:8000/coord/${encodeURIComponent(sectionId)}/message`, { 
 - `division`: 분반 번호. 없으면 `null` (이때 `id` = `code`).
 - `weekly_blocks`: 주당 75분 칸 수.
 - `professor`: 가명. 담당 미정이면 `null`.
-- `lab_need`: `MUST`(필수) / `PREFER`(있으면 좋음) / `NONE`.
+- `lab_need`: `MUST`(실습실 필요) / `NONE`(필요 없음). 두 가지뿐이다 (팀 결정 11/21. 값 이름은 하윤 DB `lab_requirement`와 같다).
 
 ### `GET /rooms`
 강의실 목록. 모든 단계.
@@ -203,20 +203,24 @@ fetch(`http://localhost:8000/coord/${encodeURIComponent(sectionId)}/message`, { 
     {
       "section_id": "2150164203-(공통-재수강)",
       "professor": "교수42",
-      "cells": { "화-09:00": "BLOCK", "화-18:00": "PREFER", "목-18:00": "PREFER" },
+      "cells": { "금-13:30": "BLOCK", "목-12:00": "BLOCK", "목-18:00": "PREFER", "화-09:00": "BLOCK",
+                 "화-18:00": "PREFER", "화-19:30": "PREFER" },
       "must": false,
-      "lab": "PREFER",
+      "lab": "NONE",
+      "single_day": "NONE",
       "building": "문화관",
       "room": null,
       "note": ""
     }
   ],
-  "professors": { "교수41": { "consecutive": "상관없음" } }
+  "professors": { "교수42": { "sections": ["2150164203-(공통-재수강)", "2150166301"] } }
 }
 ```
 - `cells`: 칸 이름 `"요일-시작"` → `PREFER`(희망) / `BLOCK`(불가). **없는 칸 = 가능.**
 - `must`: '꼭' 체크 (분반마다 하나).
-- `professors.*.consecutive`: 연강 선호 `좋음` / `싫음` / `상관없음`.
+- `lab`: 실습실 `MUST`(필요) / `NONE`(필요 없음).
+- `single_day`: 주 1회 연강(하루에 두 교시를 이어서) `MUST`(무조건) / `PREFER`(선호) / `NONE`(필요 없음 = 주 2회, 기본). 하윤 DB `single_day_pref`와 같은 이름. 지금 데이터는 모두 `NONE`(가상 희망에 값이 없어 기본값).
+- `professors`: 교수(가명)별 맡은 분반 id. 예전 '연강'(`consecutive`, 맡은 강의를 이어서 하기) 값은 팀 결정(11/21)으로 뺐다.
 
 ### `POST /wishes`
 분반 하나의 희망을 저장한다(덮어씀). **COLLECT에서만.**
@@ -227,27 +231,29 @@ fetch(`http://localhost:8000/coord/${encodeURIComponent(sectionId)}/message`, { 
   "section_id": "2150164203-(공통-재수강)",
   "cells": { "월-09:00": "PREFER", "금-19:30": "BLOCK" },
   "must": false,
-  "lab": "PREFER",
+  "lab": "MUST",
+  "single_day": "PREFER",
   "building": null,
   "room": null,
   "note": "화요일 오전 불가"
 }
 ```
-- `section_id`만 필수. 나머지는 빼면 기본값(`cells: {}`, `must: false`, `lab: "NONE"`, `note: ""`).
+- `section_id`만 필수. 나머지는 빼면 기본값(`cells: {}`, `must: false`, `lab: "NONE"`, `single_day: "NONE"`, `note: ""`).
+- `lab`은 `MUST`/`NONE`만 받는다. `PREFER`를 보내면 422.
 - `professor`는 빼면 그 분반 담당 교수로 채운다.
 
 응답 200:
 ```json
 { "saved": { "section_id": "2150164203-(공통-재수강)", "professor": "교수42",
-             "cells": { "월-09:00": "PREFER", "금-19:30": "BLOCK" }, "must": false, "lab": "PREFER",
-             "building": null, "room": null, "note": "화요일 오전 불가" } }
+             "cells": { "월-09:00": "PREFER", "금-19:30": "BLOCK" }, "must": false, "lab": "MUST",
+             "single_day": "PREFER", "building": null, "room": null, "note": "화요일 오전 불가" } }
 ```
 
 에러:
 | 코드 | 언제 | detail |
 |---|---|---|
 | 422 | 칸 이름이 틀림 (토요일, `월-09:30` 같은 없는 시작 시각) | `[{"loc": ["body","cells"], "msg": "칸 이름은 '요일-시작'(예: 월-09:00)이어야 함: '토-09:00'"}]` |
-| 422 | 칸 값이 `PREFER`/`BLOCK`이 아님, `lab` 값이 틀림 | Pydantic 목록 |
+| 422 | 칸 값이 `PREFER`/`BLOCK`이 아님, `lab`이 `MUST`/`NONE`이 아님(`PREFER` 포함), `single_day`가 `MUST`/`PREFER`/`NONE`이 아님 | Pydantic 목록 |
 | 422 | 다른 교수 이름 | `이 분반의 담당 교수가 아닙니다.` |
 | 404 | 없는 분반 | `분반이 없습니다: 없는-분반` |
 | 409 | COLLECT가 아님 | `희망은 수집 단계(COLLECT)에서만 받습니다. 지금 단계: FINAL` |
