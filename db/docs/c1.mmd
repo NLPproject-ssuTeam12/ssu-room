@@ -1,0 +1,73 @@
+erDiagram
+    department ||--o{ user : "소속"
+    department ||--o{ course : "개설 학과"
+    department ||--o{ room : "전용 학과"
+    time_grid ||--o{ time_slot : "칸 구성"
+    time_grid ||--o{ term : "사용"
+    term ||--o{ course : "개설"
+    term ||--o{ rule_config : "규칙 설정"
+    user ||--o{ course : "담당 교수"
+    building ||--o{ room : "포함"
+    department {
+        int id PK
+        text name
+        text college "단과대"
+    }
+    user {
+        int id PK
+        text role "TA or PROF"
+        text name
+        text email
+        text phone
+        int department_id FK
+        text password_hash
+    }
+    time_grid {
+        int id PK
+        text name "시간 격자 한 벌"
+    }
+    time_slot {
+        int id PK
+        int grid_id FK
+        text day
+        int period_no
+        text start_time
+        text end_time
+        text label
+    }
+    term {
+        int id PK
+        int year
+        text semester
+        int grid_id FK
+    }
+    building {
+        int id PK
+        text name
+    }
+    room {
+        int id PK
+        int building_id FK
+        text room_no
+        int capacity
+        int is_lab
+        int reserved_department_id FK
+    }
+    course {
+        int id PK
+        int term_id FK
+        int department_id FK
+        int professor_id FK
+        text name
+        int expected_enrollment
+        int session_count
+        int slots_per_session
+    }
+    rule_config {
+        int id PK
+        int term_id FK
+        text rule_key
+        text kind "HARD or SOFT"
+        real weight
+        int enabled
+    }

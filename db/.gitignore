@@ -1,0 +1,18 @@
+# 로컬에서 만들어지는 DB 파일 (각자 schema.sql로 생성)
+*.db
+*.sqlite
+*.sqlite3
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# 환경 변수·비밀 값
+.env
+
+# OS/에디터
+.DS_Store
+.idea/
+.vscode/

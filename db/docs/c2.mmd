@@ -1,0 +1,56 @@
+erDiagram
+    term ||--o{ round : "차수"
+    round ||--o{ round_invite : "응답 대상"
+    user ||--o{ round_invite : "받음"
+    round ||--o{ course_response : "응답"
+    course ||--o{ course_response : "과목"
+    course_response ||--o{ response_slot : "고른 칸"
+    time_slot ||--o{ response_slot : "칸"
+    course_response ||--o{ request_item : "요청 해석"
+    user ||--o{ professor_building_pref : "희망 건물"
+    building ||--o{ professor_building_pref : "건물"
+    term { int id PK }
+    user { int id PK }
+    course { int id PK }
+    time_slot { int id PK }
+    building { int id PK }
+    round {
+        int id PK
+        int term_id FK
+        int round_no "1 or 2"
+        text deadline_at "회신 기한"
+        text status
+    }
+    round_invite {
+        int round_id PK
+        int professor_id PK
+        text status "미회신 회신 기한초과"
+        text responded_at
+    }
+    course_response {
+        int id PK
+        int round_id FK
+        int course_id FK
+        int needs_lab
+        text language
+        text note "기타 요청사항 원문"
+    }
+    response_slot {
+        int response_id PK
+        int slot_id PK
+        text kind "PREFER AVOID BLOCK"
+    }
+    request_item {
+        int id PK
+        int response_id FK
+        text type "SECTION_COUNT 등"
+        int value_int
+        text value_text
+        text source "FORM NLP TA"
+        text status "EXTRACTED CONFIRMED CORRECTED"
+    }
+    professor_building_pref {
+        int professor_id PK
+        int building_id PK
+        int rank
+    }

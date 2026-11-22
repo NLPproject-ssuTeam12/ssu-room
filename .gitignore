@@ -1,0 +1,36 @@
+# 비밀값
+.env
+.env.*
+!.env.example
+
+# 실제 자료·개인 정보 (커밋 금지)
+data/private/
+
+# 큰 파일
+*.mp4
+*.mov
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# DB
+*.db
+*.sqlite3
+
+# Node
+node_modules/
+dist/
+build/
+
+# OS·편집기
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
+~$*

@@ -1,0 +1,87 @@
+erDiagram
+    round ||--o{ solver_run : "실행"
+    solver_run ||--o{ timetable : "초안 생성"
+    timetable ||--o{ timetable_section : "분반 구성"
+    course ||--o{ timetable_section : "과목"
+    timetable_section ||--o{ assignment : "회차별 칸"
+    time_slot ||--o{ assignment : "칸"
+    room ||--o{ assignment : "강의실"
+    timetable ||--o{ proposal : "기준 시간표"
+    course ||--o{ proposal : "바꿀 과목"
+    proposal ||--o{ proposal_option : "대안 3개"
+    proposal_option ||--o{ proposal_option_slot : "분반별 칸"
+    time_slot ||--o{ proposal_option_slot : "칸"
+    room ||--o{ proposal_option_slot : "강의실"
+    proposal ||--o{ message : "관련"
+    user ||--o{ message : "주고받음"
+    message ||--o| reply_interpretation : "해석"
+    proposal_option ||--o{ reply_interpretation : "선택됨"
+    round { int id PK }
+    course { int id PK }
+    room { int id PK }
+    user { int id PK }
+    time_slot { int id PK }
+    solver_run {
+        int id PK
+        int round_id FK
+        text status
+        real objective_value
+        text weights_json
+    }
+    timetable {
+        int id PK
+        int solver_run_id FK
+        int parent_id FK "고친 원본"
+        int created_by FK "NULL이면 시스템"
+        text kind "DRAFT TA_EDIT FINAL"
+    }
+    timetable_section {
+        int timetable_id PK
+        int course_id PK
+        int section_no PK
+        int planned_enrollment
+    }
+    assignment {
+        int timetable_id PK
+        int course_id PK
+        int section_no PK
+        int session_no PK
+        int slot_id PK
+        int room_id FK "같은 칸 같은 방 불가"
+    }
+    proposal {
+        int id PK
+        int timetable_id FK
+        int course_id FK
+        text reason
+        text status
+    }
+    proposal_option {
+        int id PK
+        int proposal_id FK
+        int option_no "1 2 3"
+        text source "SOLVER or TA"
+    }
+    proposal_option_slot {
+        int option_id PK
+        int section_no PK
+        int session_no PK
+        int slot_id PK
+        int room_id FK
+    }
+    message {
+        int id PK
+        int proposal_id FK
+        int sender_id FK
+        int receiver_id FK
+        text kind "NOTICE REMINDER ALTERNATIVE REPLY"
+        text channel "APP EMAIL SMS"
+        text body
+    }
+    reply_interpretation {
+        int message_id PK
+        text label "수용 조건부 거절 불명"
+        int chosen_option_id FK
+        text extracted_json
+        text ta_action "CONFIRM EDIT KEEP"
+    }
