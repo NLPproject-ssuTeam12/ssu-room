@@ -5,8 +5,11 @@ erDiagram
     time_grid ||--o{ time_slot : "칸 구성"
     time_grid ||--o{ term : "사용"
     term ||--o{ course : "개설"
+    term ||--o{ phase_log : "단계 변경 기록"
     term ||--o{ rule_config : "규칙 설정"
-    user ||--o{ course : "담당 교수"
+    user ||--o{ course : "담당 교수(기본)"
+    course ||--o{ course_section : "분반"
+    user ||--o{ course_section : "분반 담당 교수"
     building ||--o{ room : "포함"
     department {
         int id PK
@@ -40,6 +43,16 @@ erDiagram
         int year
         text semester
         int grid_id FK
+        text phase "COLLECTING ROUND1 ROUND2 ROUND3 FINAL 지금 단계"
+        text phase_changed_at
+    }
+    phase_log {
+        int id PK
+        int term_id FK
+        text from_phase
+        text to_phase
+        int changed_by FK
+        text changed_at
     }
     building {
         int id PK
@@ -57,11 +70,19 @@ erDiagram
         int id PK
         int term_id FK
         int department_id FK
-        int professor_id FK
+        int professor_id FK "기본 담당 교수"
+        text code
         text name
+        text category "전공필수 등"
+        text target_year
         int expected_enrollment
         int session_count
         int slots_per_session
+    }
+    course_section {
+        int course_id PK
+        int section_no PK
+        int professor_id FK "분반별 담당 교수"
     }
     rule_config {
         int id PK

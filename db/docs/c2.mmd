@@ -4,9 +4,12 @@ erDiagram
     user ||--o{ round_invite : "받음"
     round ||--o{ course_response : "응답"
     course ||--o{ course_response : "과목"
+    user ||--o{ course_response : "응답한 교수"
     course_response ||--o{ response_slot : "고른 칸"
     time_slot ||--o{ response_slot : "칸"
-    course_response ||--o{ request_item : "요청 해석"
+    course_response ||--o| other_request : "기타 요청(자연어)"
+    course_response ||--o{ request_item : "솔버 요청"
+    other_request ||--o{ request_item : "보고 만든 항목"
     user ||--o{ professor_building_pref : "희망 건물"
     building ||--o{ professor_building_pref : "건물"
     term { int id PK }
@@ -17,7 +20,7 @@ erDiagram
     round {
         int id PK
         int term_id FK
-        int round_no "1 or 2"
+        int round_no "1 2 3"
         text deadline_at "회신 기한"
         text status
     }
@@ -31,23 +34,36 @@ erDiagram
         int id PK
         int round_id FK
         int course_id FK
-        int needs_lab
+        int professor_id FK "분반 담당 교수별 응답"
+        int lab_requirement "1 쓴다 0 안 쓴다 필수 입력"
+        text single_day_pref "MUST PREFER NONE 주1회 연강(분반 내)"
+        int prefer_only "1=선호 시간 외 수업 어려움"
         text language
-        text note "기타 요청사항 원문"
     }
     response_slot {
         int response_id PK
         int slot_id PK
-        text kind "PREFER AVOID BLOCK"
+        text kind "PREFER BLOCK 안 칠하면 상관없음"
+    }
+    other_request {
+        int id PK
+        int response_id FK "응답당 하나"
+        text body "교수가 쓴 자연어 원문"
+        text status "PENDING CONFIRMED 조교 확인함"
+        int confirmed_by FK
+        text confirmed_at
+        text ta_memo
     }
     request_item {
         int id PK
         int response_id FK
-        text type "SECTION_COUNT 등"
+        int other_request_id FK "조교가 기타 요청을 보고 만든 경우"
+        text type "SECTION_COUNT SECTION_PAIR 등"
         int value_int
         text value_text
-        text source "FORM NLP TA"
-        text status "EXTRACTED CONFIRMED CORRECTED"
+        text params_json
+        text source "FORM TA"
+        int created_by FK
     }
     professor_building_pref {
         int professor_id PK
