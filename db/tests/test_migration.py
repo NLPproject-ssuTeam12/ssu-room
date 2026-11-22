@@ -59,17 +59,20 @@ def build_v3():
 def counts(con, tabs): return {t: con.execute(f"select count(*) from {t}").fetchone()[0] for t in tabs}
 KEEP = ("response_slot", "proposal", "reply_interpretation", "assignment", "course", "term")
 
-print("=== 경로 1: schema_v3 → 001 → 002 → 003")
+print("=== 경로 1: schema_v3 → 001 → 002 → 003 → 004")
 old = build_v3(); before = counts(old, KEEP); before["response_slot"] -= 1   # AVOID 1개는 003에서 지워지는 게 정상
 run(P("migrations","001_20261121_feedback.sql"), old)
 run(P("migrations","002_20261122_phase_other_request.sql"), old)
 run(P("migrations","003_20261122_lab_binary_no_avoid.sql"), old)
-ok1 = compare("001+002+003 적용 후", old)
+old.execute("UPDATE term SET phase='ROUND2', phase_changed_at='2026-11-22 10:00:00' WHERE id=1"); old.commit()   # 004 전에 진행 중이던 학기
+run(P("migrations","004_20261122_phase_round3.sql"), old)
+ok1 = compare("001~004 적용 후", old)
 print("  행 수 보존:", before == counts(old, KEEP), "| 응답 수:", old.execute("select count(*) from course_response").fetchone()[0])
 print("  기타 요청 옮김:", old.execute("select id, response_id, body, status from other_request").fetchall())
 print("  prefer_only:", old.execute("select id, prefer_only from course_response order by id").fetchall())
 print("  request_item:", old.execute("select id, response_id, type, value_int, source, created_by, created_at, other_request_id from request_item order by id").fetchall())
-print("  term 단계:", old.execute("select id, phase, phase_changed_at from term").fetchall())
+print("  term 단계(ROUND2 그대로여야 함):", old.execute("select id, phase, phase_changed_at from term").fetchall())
+old.execute("UPDATE term SET phase='ROUND3' WHERE id=1"); print("  ROUND3 허용: OK")
 print("  응답 칸(AVOID 삭제, 2개 남아야 함):", old.execute("select slot_id, kind from response_slot where response_id=100 order by slot_id").fetchall())
 print("  실습실 값(REQUIRE→1, NONE→0):", old.execute("select id, lab_requirement from course_response order by id").fetchall())
 for bad in ["INSERT INTO term(id,year,semester,grid_id,phase) VALUES (9,2027,'1',1,'아무거나')",
@@ -80,12 +83,13 @@ for bad in ["INSERT INTO term(id,year,semester,grid_id,phase) VALUES (9,2027,'1'
     try: old.execute(bad); print("  거부 안 됨!!", bad[:60])
     except sqlite3.IntegrityError as e: print("  새 규칙 거부 OK:", str(e)[:60])
 
-print("\n=== 경로 2: schema_v4(001까지 적용된 모양)에서 002 → 003")
+print("\n=== 경로 2: schema_v4(001까지 적용된 모양)에서 002 → 003 → 004")
 v4 = sqlite3.connect(":memory:"); v4.executescript(open(P("archive","schema_v4.sql")).read()); seed(v4)
 v4.execute("INSERT INTO course_response(id,round_id,course_id,professor_id,lab_requirement,single_day_pref,note) VALUES (100,1,10,2,'PREFER','PREFER','메모')")
 v4.execute("INSERT INTO request_item(response_id,type,value_int) VALUES (100,'SECTION_COUNT',2)"); v4.commit()
 run(P("migrations","002_20261122_phase_other_request.sql"), v4)
 run(P("migrations","003_20261122_lab_binary_no_avoid.sql"), v4)
-ok2 = compare("v4 + 002 + 003", v4)
+run(P("migrations","004_20261122_phase_round3.sql"), v4)
+ok2 = compare("v4 + 002~004", v4)
 print("  응답:", v4.execute("select id, professor_id, lab_requirement, single_day_pref, prefer_only from course_response").fetchall(), "| 기타 요청:", v4.execute("select body, status from other_request").fetchall())
 print("\n결과:", "모두 통과" if ok1 and ok2 else "실패")

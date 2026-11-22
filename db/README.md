@@ -13,9 +13,10 @@ SSU:room의 SQLite 스키마, 변경 SQL, 연결·단계 관리 함수입니다.
 | `migrations/001_20261121_feedback.sql` | `archive/schema_v3.sql`로 만든 DB → 11/21 피드백 반영 모양 |
 | `migrations/002_20261122_phase_other_request.sql` | 001까지 적용한 DB → 단계 관리, 선호 시간 외 불가, 기타 요청 재설계 |
 | `migrations/003_20261122_lab_binary_no_avoid.sql` | 002까지 적용한 DB → `AVOID` 제거, 실습실 0/1 |
+| `migrations/004_20261122_phase_round3.sql` | 003까지 적용한 DB → 단계에 `ROUND3`(3차 조율) 추가 |
 | `docs/c1.png` `c2.png` `c3.png` | ER 다이어그램 (원본 `c1.mmd` `c2.mmd` `c3.mmd`) |
 | `tests/test_migration.py` | 변경 SQL 검사 |
-| `archive/schema_v1~v5.sql` | 지난 버전 (참고용). v4 = 001까지, v5 = 002까지 적용한 모양 |
+| `archive/schema_v1~v6.sql` | 지난 버전 (참고용). v4 = 001까지, v5 = 002까지, v6 = 003까지 적용한 모양 |
 
 ER 다이어그램: `c1.png` 기초 정보(학과·교수·강의실·과목·분반 교수·시간 칸·학기 단계), `c2.png` 1차 응답 수집·기타 요청, `c3.png` 시간표·대안·메시지.
 
@@ -45,14 +46,14 @@ python db/tests/test_migration.py    # 변경 SQL 검사 (오류 없이 '모든 
 | **선호 시간 외 불가** | 희망으로 칠한 칸 밖에서는 수업하기 어려움 | `course_response.prefer_only` (0/1) |
 | **칠한 칸** | 희망 `PREFER` / 불가 `BLOCK`. 칠하지 않은 칸은 상관없음 | `response_slot.kind` |
 | **분반 담당 교수** | 분반마다 교수가 다를 수 있음. `course_section`에 행이 있으면 그 교수, 없으면 `course.professor_id` | `course_section` (조교 입력) |
-| **서버 단계** | `COLLECTING` 희망 수집 → `ROUND1` 1차 조율 → `ROUND2` 2차 조율 → `FINAL` 확정 | `term.phase`, `phase_log` |
+| **서버 단계** | `COLLECTING` 희망 수집 → `ROUND1` 1차 조율 → `ROUND2` 2차 조율 → `ROUND3` 3차 조율 → `FINAL` 확정 | `term.phase`, `phase_log` |
 | **기타 요청** | 교수가 자연어로 쓴 글. AI 없이 조교가 읽고 "확인함"을 누른다 | `other_request` |
 
 ## 단계와 기타 요청 (`db.py`)
 
 ```python
 db.get_phase(con, term_id)                    # ('ROUND1', '1차 조율')
-db.set_phase(con, term_id, 'ROUND2', user_id) # 한 칸씩만. 건너뛰기·되돌리기는 force=True. phase_log에 기록
+db.set_phase(con, term_id, 'ROUND3', user_id) # 한 칸씩만. 건너뛰기·되돌리기는 force=True. phase_log에 기록
 db.pending_other_requests(con, round_id)      # 조교가 아직 확인 안 한 기타 요청
 db.confirm_other_request(con, other_request_id, user_id, memo=None)
 ```
@@ -73,7 +74,7 @@ db.confirm_other_request(con, other_request_id, user_id, memo=None)
 | 11/21 | 주 1회 연강 3단계 | 반영 | `course_response.single_day_pref` (MUST/PREFER/NONE) |
 | 11/21 → 11/22 | 실습실 3단계 → **0/1** | 반영 | `course_response.lab_requirement` (INTEGER 0/1). 003이 MUST·PREFER→1, NONE→0으로 옮김 |
 | 11/22 | "선호 시간을 제외하면 수업하기 어렵다" 버튼 | 반영 | `course_response.prefer_only` |
-| 11/22 | 서버 단계 관리 | 반영 | `term.phase`, `phase_log`, `db.get_phase` `db.set_phase` |
+| 11/22 | 서버 단계 관리 (3차 조율 `ROUND3` 포함) | 반영 | `term.phase`, `phase_log`, `db.get_phase` `db.set_phase`. 004가 `ROUND3`를 추가 |
 | 11/22 | 기타 요청은 AI 없이 조교가 확인 | 반영 | `other_request`, `request_item` 재설계. `note`와 `source='NLP'`는 없앰 |
 | 11/22 | 시간표 칠하기에서 `AVOID` 제거 | 반영 | `response_slot.kind` = `PREFER`/`BLOCK` |
 | 11/22 | 로그인 없이 교수·조교 화면 전환 (시연) | 프런트 일 | DB 변경 없음. 시연 계정은 `user` 행을 만들고 `password_hash`에 아무 값이나 넣는다 |
@@ -98,14 +99,16 @@ cp ssuroom.db ssuroom.db.bak
 sqlite3 ssuroom.db < db/migrations/001_20261121_feedback.sql            # archive/schema_v3로 만든 DB만
 sqlite3 ssuroom.db < db/migrations/002_20261122_phase_other_request.sql # 001까지 된 DB
 sqlite3 ssuroom.db < db/migrations/003_20261122_lab_binary_no_avoid.sql # 002까지 된 DB
+sqlite3 ssuroom.db < db/migrations/004_20261122_phase_round3.sql        # 003까지 된 DB
 ```
 
 - **001**: 기존 응답의 `professor_id`는 그 과목의 담당 교수로, `single_day_pref`는 `NONE`으로 채웁니다(그때는 묻지 않았던 질문). `REQUIRE`는 `MUST`로, 한글 label은 영어 코드로 바꿉니다.
 - **002**: `term`에 `phase`(기존 학기는 `COLLECTING`으로 시작. 이미 진행 중이면 직접 바꿀 것), `phase_log`, `other_request` 생성. 기존 `course_response.note`는 `other_request`에 `PENDING`으로 옮기고 칸은 없앱니다. `prefer_only`는 모두 0. `request_item`은 `source`가 `FORM`이 아니면 `TA`로.
 - **003**: `AVOID` 칸은 지워집니다(= 상관없음). 실습실은 MUST·PREFER → 1, NONE → 0.
+- **004**: `term` 테이블을 다시 만들어 `phase`에 `ROUND3`를 추가합니다. 학기 행과 지금 단계는 그대로 옮깁니다.
 - 마지막 `PRAGMA foreign_key_check`가 아무것도 출력하지 않아야 정상입니다. 두 번 실행하면 오류가 납니다.
 - **주의**: `term` 칸이 늘어서 `INSERT INTO term VALUES (...)`처럼 칸 이름 없이 넣던 코드는 칸 이름을 적어야 합니다.
-- `tests/test_migration.py`가 v3→001→002→003, v4→002→003 두 경로가 최종 `schema.sql`과 같은 모양을 만들고, 데이터를 보존하며, 새 규칙(잘못된 단계·`NLP`·`AVOID` 거부)이 작동하는지 검사합니다.
+- `tests/test_migration.py`가 v3→001→002→003→004, v4→002→003→004 두 경로가 최종 `schema.sql`과 같은 모양을 만들고, 데이터를 보존하며, 새 규칙(잘못된 단계·`NLP`·`AVOID` 거부)이 작동하는지 검사합니다.
 
 ## 알려진 한계
 

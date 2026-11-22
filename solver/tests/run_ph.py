@@ -6,7 +6,7 @@ print("→", db.set_phase(c, 1, "ROUND1", user_id=None)["label"])
 for bad, kw in [("FINAL", {}), ("COLLECTING", {}), ("엉뚱", {})]:
     try: db.set_phase(c, 1, bad, **kw); print("막히지 않음!!", bad)
     except ValueError as e: print(f"막힘({bad}):", str(e)[:70])
-print("→", db.set_phase(c, 1, "ROUND2")["label"], "→", db.set_phase(c, 1, "FINAL")["label"])
+print("→", db.set_phase(c, 1, "ROUND2")["label"], "→", db.set_phase(c, 1, "ROUND3")["label"], "→", db.set_phase(c, 1, "FINAL")["label"])
 print("되돌리기(force):", db.set_phase(c, 1, "COLLECTING", force=True)["label"])
 print("기록:", c.execute("select from_phase, to_phase from phase_log order by id").fetchall())
 try: c.execute("UPDATE term SET phase='아무거나' WHERE id=1"); print("DB가 막지 않음!!")

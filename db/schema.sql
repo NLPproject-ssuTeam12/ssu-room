@@ -26,7 +26,7 @@ CREATE TABLE term (
   id INTEGER PRIMARY KEY, year INTEGER NOT NULL, semester TEXT NOT NULL,
   grid_id INTEGER NOT NULL REFERENCES time_grid(id),
   phase TEXT NOT NULL DEFAULT 'COLLECTING'
-        CHECK (phase IN ('COLLECTING','ROUND1','ROUND2','FINAL')),   -- 지금 단계: 희망 수집 / 1차 조율 / 2차 조율 / 확정
+        CHECK (phase IN ('COLLECTING','ROUND1','ROUND2','ROUND3','FINAL')),   -- 지금 단계: 희망 수집 / 1차 조율 / 2차 조율 / 3차 조율 / 확정
   phase_changed_at TEXT,
   UNIQUE (year, semester)
 );

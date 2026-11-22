@@ -10,8 +10,8 @@ def connect(path="ssuroom.db"):
 
 
 # ---------------------------------------------------------------- 서버 단계
-PHASES = ["COLLECTING", "ROUND1", "ROUND2", "FINAL"]
-PHASE_LABELS = {"COLLECTING": "희망 수집", "ROUND1": "1차 조율", "ROUND2": "2차 조율", "FINAL": "확정"}
+PHASES = ["COLLECTING", "ROUND1", "ROUND2", "ROUND3", "FINAL"]
+PHASE_LABELS = {"COLLECTING": "희망 수집", "ROUND1": "1차 조율", "ROUND2": "2차 조율", "ROUND3": "3차 조율", "FINAL": "확정"}
 
 
 def get_phase(con, term_id):
@@ -23,7 +23,7 @@ def get_phase(con, term_id):
 
 
 def set_phase(con, term_id, to_phase, user_id=None, force=False):
-    """단계를 바꾸고 기록을 남긴다. 기본은 다음 단계로 한 칸씩만(희망 수집 → 1차 조율 → 2차 조율 → 확정).
+    """단계를 바꾸고 기록을 남긴다. 기본은 다음 단계로 한 칸씩만(희망 수집 → 1차 조율 → 2차 조율 → 3차 조율 → 확정).
     시연 중 처음으로 되돌리거나 건너뛰려면 force=True."""
     if to_phase not in PHASES:
         raise ValueError(f"단계는 {PHASES} 중 하나여야 합니다: {to_phase}")
