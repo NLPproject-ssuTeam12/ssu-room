@@ -20,7 +20,7 @@ def shape(con):
     return out, views
 
 def compare(label, con):
-    new = sqlite3.connect(":memory:"); new.executescript(open(P("schema.sql")).read())
+    new = sqlite3.connect(":memory:"); new.executescript(open(P("schema.sql"), encoding="utf-8").read())
     a, va = shape(con); b, vb = shape(new)
     diff = [t for t in b if a.get(t) != b[t]]
     print(f"  [{label}] 테이블 {len(a)}개 vs {len(b)}개, 목록 동일 {set(a) == set(b)}, 모양이 다른 테이블 {diff if diff else '없음'}, 뷰 동일 {va == vb}")
@@ -30,7 +30,7 @@ def compare(label, con):
     return not diff and set(a) == set(b) and va == vb and not fk
 
 def run(path, con):
-    con.executescript(open(path).read())
+    con.executescript(open(path, encoding="utf-8").read())
 
 def seed(con):
     q = con.execute
@@ -42,7 +42,7 @@ def seed(con):
     q("INSERT INTO course(id,term_id,department_id,name,professor_id,expected_enrollment,session_count,slots_per_session) VALUES (10,1,1,'알고리즘',2,40,2,1),(11,1,1,'객체지향',3,40,2,1)")
 
 def build_v3():
-    old = sqlite3.connect(":memory:"); old.executescript(open(P("archive","schema_v3.sql")).read()); seed(old); q = old.execute
+    old = sqlite3.connect(":memory:"); old.executescript(open(P("archive","schema_v3.sql"), encoding="utf-8").read()); seed(old); q = old.execute
     q("INSERT INTO course_response(id,round_id,course_id,lab_requirement,language,note) VALUES (100,1,10,'REQUIRE','한국어','분반 2개 부탁드립니다'),(101,1,11,'NONE',NULL,NULL)")
     q("INSERT INTO response_slot VALUES (100,1,'BLOCK'),(100,2,'PREFER'),(100,3,'AVOID')")
     q("INSERT INTO request_item(id,response_id,type,value_int,source,status,confirmed_by,confirmed_at) VALUES (1,100,'SECTION_COUNT',2,'NLP','CONFIRMED',1,'2026-11-10 09:00:00')")
@@ -84,7 +84,7 @@ for bad in ["INSERT INTO term(id,year,semester,grid_id,phase) VALUES (9,2027,'1'
     except sqlite3.IntegrityError as e: print("  새 규칙 거부 OK:", str(e)[:60])
 
 print("\n=== 경로 2: schema_v4(001까지 적용된 모양)에서 002 → 003 → 004")
-v4 = sqlite3.connect(":memory:"); v4.executescript(open(P("archive","schema_v4.sql")).read()); seed(v4)
+v4 = sqlite3.connect(":memory:"); v4.executescript(open(P("archive","schema_v4.sql"), encoding="utf-8").read()); seed(v4)
 v4.execute("INSERT INTO course_response(id,round_id,course_id,professor_id,lab_requirement,single_day_pref,note) VALUES (100,1,10,2,'PREFER','PREFER','메모')")
 v4.execute("INSERT INTO request_item(response_id,type,value_int) VALUES (100,'SECTION_COUNT',2)"); v4.commit()
 run(P("migrations","002_20261122_phase_other_request.sql"), v4)

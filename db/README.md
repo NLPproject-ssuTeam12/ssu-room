@@ -28,7 +28,7 @@ python -c "
 import sys; sys.path.insert(0, 'db')
 import db
 con = db.connect('ssuroom.db')
-con.executescript(open('db/schema.sql').read())
+con.executescript(open('db/schema.sql', encoding='utf-8').read())
 "
 python db/tests/test_migration.py    # 변경 SQL 검사 (오류 없이 '모든 통과')
 ```
