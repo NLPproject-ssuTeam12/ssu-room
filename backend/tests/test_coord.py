@@ -83,10 +83,10 @@ class KeywordReply(unittest.TestCase):
 
     def test_reject_with_days_and_slots(self):
         r = parse_reply("셋 다 어렵습니다. 화요일, 목요일 오전이면 됩니다.")
-        self.assertEqual((r.kind, r.picks, r.conditions.days, r.conditions.slots), ("거절", [], [1, 3], ["09:00", "10:30"]))
+        self.assertEqual((r.kind, r.picks, r.conditions.day_slots), ("거절", [], {1: ["09:00", "10:30"], 3: ["09:00", "10:30"]}))
         p = match_conditions(r, ALTS, round=1)
         self.assertEqual(p.action, "next")
-        self.assertIn("화·목요일, 오전", p.text)
+        self.assertIn("화·목 오전", p.text)
         self.assertEqual(match_conditions(r, ALTS, round=3).action, "decide")
 
     def test_accept(self):
@@ -103,16 +103,15 @@ class KeywordReply(unittest.TestCase):
         r = parse_reply("세 번째 안은 어렵고 늦은 오후면 좋겠습니다")
         self.assertEqual(r.picks, ["C"])   # 키워드 방식의 한계: '어렵다'고 한 안을 고른 것으로 읽음
         r = parse_reply("모두 어렵고 늦은 오후면 좋겠습니다")
-        self.assertEqual(r.conditions.slots, ["16:30"])   # 18:00은 저녁 (11/22)
+        self.assertEqual(r.conditions.day_slots, {d: ["16:30"] for d in range(5)})   # 18:00은 저녁 (11/22). 요일 없으면 다섯 요일
 
     def test_day_letters_inside_words_are_ignored(self):
         r = parse_reply("지금 일정으로는 어렵습니다. 수업은 월수 저녁이면 됩니다")
-        self.assertEqual(r.conditions.days, [0, 2])
-        self.assertEqual(r.conditions.slots, ["18:00", "19:30"])
+        self.assertEqual(r.conditions.day_slots, {0: ["18:00", "19:30"], 2: ["18:00", "19:30"]})
 
     def test_except_day(self):
-        self.assertEqual(parse_reply("목요일만 아니면 됩니다").conditions.days, [0, 1, 2, 4])
-        self.assertEqual(parse_reply("수요일은 어렵고 화, 목 오후면 됩니다").conditions.days, [1, 3])
+        self.assertEqual(parse_reply("목요일만 아니면 됩니다").conditions.day_slots, {0: [], 1: [], 2: [], 4: []})
+        self.assertEqual(list(parse_reply("수요일은 어렵고 화, 목 오후면 됩니다").conditions.day_slots), [1, 3])
 
     def test_unclear_needs_check(self):
         r = parse_reply("제안해주신 시간 괜찮습니다")   # 키워드 방식은 어느 안인지 모름 → 조교가 확인
@@ -127,6 +126,35 @@ class KeywordReply(unittest.TestCase):
         self.assertEqual((p.action, p.key), ("move", "A"))
         self.assertIn("가능 교시", p.checks[0].why)
         self.assertFalse(p.checks[0].ok)
+
+    def test_day_slots_each_day_its_own_slots(self):
+        # 화 오전 / 목 오후 (11/22 요일별 교시): 요일마다 다른 시간을 가린다
+        k = Conditions(day_slots={1: ["09:00", "10:30"], 3: ["13:30", "15:00", "16:30"]})
+        alts = [Alternative(key="A", meetings=[Meeting(day=1, start="13:30", end="14:45", room="305"),
+                                               Meeting(day=3, start="13:30", end="14:45", room="305")]),
+                Alternative(key="B", meetings=[Meeting(day=1, start="10:30", end="11:45", room="305"),
+                                               Meeting(day=3, start="15:00", end="16:15", room="305")])]
+        p = match_conditions(ReplyParse(kind="조건부", picks=["A", "B"], conditions=k), alts, round=1)
+        self.assertEqual((p.action, p.key), ("move", "B"))
+        self.assertIn("화요일 가능 교시", p.checks[0].why)
+        self.assertEqual(coord.cond_label(k), "화 오전, 목 오후")
+
+    def test_day_slots_one_day_means_that_day_included(self):
+        # 요일 하나("목요일 오후면"): 목요일 수업만 오후면 되고 다른 하루는 자유
+        a = Alternative(key="A", meetings=[Meeting(day=1, start="09:00", end="10:15", room="305"),
+                                           Meeting(day=3, start="13:30", end="14:45", room="305")])
+        self.assertTrue(coord._fits(a, Conditions(day_slots={3: ["13:30", "15:00", "16:30"]}))[0])
+        self.assertFalse(coord._fits(ALTS[1], Conditions(day_slots={2: ["13:30", "15:00", "16:30"]}))[0])   # B는 수 12:00
+
+    def test_old_shape_still_accepted(self):
+        # 옛 모양 days·slots로 들어와도 요일 × 교시로 바꾸고, 옛 코드용 days·slots도 읽힌다
+        k = Conditions(days=[1, 3], slots=["13:30"])
+        self.assertEqual(k.day_slots, {1: ["13:30"], 3: ["13:30"]})
+        self.assertEqual((k.days, k.slots), ([1, 3], ["13:30"]))
+        k2 = Conditions(slots=["16:30", "13:30", "13:30"])
+        self.assertEqual((k2.days, k2.slots), ([], ["13:30", "16:30"]))
+        self.assertEqual(Conditions(days=[2]).slots, [])
+        self.assertEqual(set(Conditions(days=[2]).model_dump()), {"day_slots", "end_before"})
 
     def test_unknown_slot_rejected(self):
         with self.assertRaises(ValueError):
@@ -148,28 +176,36 @@ class LLMPath(unittest.TestCase):
             self.assertEqual((m.method, m.fallback), ("keyword", True))
 
     def test_llm_reply_is_checked(self):
-        fake = coord._ReplyLLM(kind="조건부", picks=["B", "C"], days=[], slots=[],
-                               end_before=[{"day": 2, "time": "17:00"}])
+        fake = coord._ReplyLLM(kind="조건부", picks=["B", "C"], end_before=[{"day": 2, "time": "17:00"}])
         with mock.patch.object(coord, "generate_json", return_value=fake):
             r = parse_reply("제안해주신 B 괜찮은데 수요일은 5시 전에 끝나야 해요", alternatives=ALTS, method="llm")
         self.assertEqual((r.method, r.kind, r.picks), ("llm", "조건부", ["B", "C"]))
         self.assertEqual(r.conditions.end_before[0].time, "17:00")
 
     def test_llm_reply_contradiction(self):
-        fake = coord._ReplyLLM(kind="수용", picks=[], days=[], slots=[], end_before=[])
+        fake = coord._ReplyLLM(kind="수용", picks=[], end_before=[])
         with mock.patch.object(coord, "generate_json", return_value=fake):
             self.assertEqual(parse_reply("네", alternatives=ALTS, method="llm").kind, "확인 필요")
 
     def test_llm_days_kept_when_days_written_together(self):
         # '화목'처럼 붙여 쓴 요일은 지킨다. 요일이 없는 답장에서 만든 요일만 버린다
-        fake = coord._ReplyLLM(kind="거절", picks=[], days=[1, 3], slots=["15:00"], end_before=[])
+        fake = coord._ReplyLLM(kind="거절", picks=[], day_slots=[{"day": 1, "slots": ["15:00"]}, {"day": 3, "slots": ["15:00"]}])
         with mock.patch.object(coord, "generate_json", return_value=fake):
-            self.assertEqual(parse_reply("다 안됩니다. 화목 15시 부탁드려요", alternatives=ALTS, method="llm").conditions.days, [1, 3])
-            self.assertEqual(parse_reply("다 안됩니다. 3시로 부탁드려요", alternatives=ALTS, method="llm").conditions.days, [])
+            self.assertEqual(parse_reply("다 안됩니다. 화목 15시 부탁드려요", alternatives=ALTS, method="llm").conditions.day_slots, {1: ["15:00"], 3: ["15:00"]})
+            self.assertEqual(parse_reply("다 안됩니다. 3시로 부탁드려요", alternatives=ALTS, method="llm").conditions.day_slots,
+                             {d: ["15:00"] for d in range(5)})   # 요일은 지어낸 것 → 교시만 다섯 요일에
+
+    def test_llm_day_slots_kept_per_day(self):
+        fake = coord._ReplyLLM(kind="거절", picks=[], day_slots=[{"day": 1, "slots": ["09:00", "10:30"]},
+                                                              {"day": 3, "slots": ["13:30", "15:00"]}])
+        with mock.patch.object(coord, "generate_json", return_value=fake):
+            r = parse_reply("다 어려워요. 화요일은 오전, 목요일은 1시반이나 3시", alternatives=ALTS, method="llm")
+        self.assertEqual(r.conditions.day_slots, {1: ["09:00", "10:30"], 3: ["13:30", "15:00"]})
+        self.assertFalse(r.fallback)
 
     def test_llm_note_keeps_conditional(self):
         # 확인할 요청(계단식 강의실 등)만 있어도 조건부로 남기고, 처리안 문구에 요청을 붙인다
-        fake = coord._ReplyLLM(kind="조건부", picks=["A"], days=[], slots=[], end_before=[], note="계단식 강의실")
+        fake = coord._ReplyLLM(kind="조건부", picks=["A"], end_before=[], note="계단식 강의실")
         with mock.patch.object(coord, "generate_json", return_value=fake):
             r = parse_reply("A로 할게요. 계단식 강의실이면요", alternatives=ALTS, method="llm")
         self.assertEqual((r.kind, r.note), ("조건부", "계단식 강의실"))
@@ -178,7 +214,7 @@ class LLMPath(unittest.TestCase):
     def test_room_request_already_met_is_accept(self):
         # "강의실 그대로라면요": 고른 안이 이미 그 방이면 할 일이 없으니 수용 (모델이 note에도 적었으면 같이 지운다)
         for note in ["", "정보관 305 유지"]:
-            fake = coord._ReplyLLM(kind="조건부", picks=["A"], days=[], slots=[], end_before=[], rooms=["305"], note=note)
+            fake = coord._ReplyLLM(kind="조건부", picks=["A"], end_before=[], rooms=["305"], note=note)
             with mock.patch.object(coord, "generate_json", return_value=fake):
                 r = parse_reply("A로 할게요, 강의실이 305 그대로라면요", alternatives=ALTS, method="llm")
             self.assertEqual((r.kind, r.note), ("수용", ""))
@@ -187,7 +223,7 @@ class LLMPath(unittest.TestCase):
         # 화요일만 다른 방인 안에서 "둘 다 306으로" → 조교가 바꿔야 하니 조건부, 요청을 note에 남긴다
         mixed = [Alternative(key="A", meetings=[Meeting(day=1, start="13:30", end="14:45", room="정보관 305"),
                                                 Meeting(day=3, start="13:30", end="14:45", room="정보관 306")])]
-        fake = coord._ReplyLLM(kind="조건부", picks=["A"], days=[], slots=[], end_before=[], rooms=["306"])
+        fake = coord._ReplyLLM(kind="조건부", picks=["A"], end_before=[], rooms=["306"])
         with mock.patch.object(coord, "generate_json", return_value=fake):
             r = parse_reply("A로 할게요. 둘 다 306으로 맞춰 주세요", alternatives=mixed, method="llm")
         self.assertEqual(r.kind, "조건부")
@@ -196,13 +232,13 @@ class LLMPath(unittest.TestCase):
     def test_few_minutes_early_end_is_professor_choice(self):
         # A는 17:45 종료. "17:30에 끝낼 수 있으면"(15분 이내)은 재량 → 수용. "16:00 전"(105분)은 조건으로 남아 A가 어긋난다
         for t, want in [("17:30", ("수용", [])), ("16:00", ("조건부", ["16:00"]))]:
-            fake = coord._ReplyLLM(kind="조건부", picks=["A"], days=[], slots=[], end_before=[{"day": 2, "time": t}])
+            fake = coord._ReplyLLM(kind="조건부", picks=["A"], end_before=[{"day": 2, "time": t}])
             with mock.patch.object(coord, "generate_json", return_value=fake):
                 r = parse_reply("A로 할게요. 수요일은 일찍 끝나면 좋겠어요", alternatives=ALTS, method="llm")
             self.assertEqual((r.kind, [e.time for e in r.conditions.end_before]), want)
 
     def test_llm_reply_bad_time_falls_back(self):
-        fake = coord._ReplyLLM(kind="거절", picks=[], days=[1], slots=["오후"], end_before=[])
+        fake = coord._ReplyLLM(kind="거절", picks=[], day_slots=[{"day": 1, "slots": ["오후"]}])
         with mock.patch.object(coord, "generate_json", return_value=fake):
             r = parse_reply("화요일 오후면 됩니다", alternatives=ALTS, method="llm")
         self.assertTrue(r.fallback)
