@@ -265,9 +265,12 @@ def _from_llm(r: _ReplyLLM, choice: str | None, alts: list[Alternative], text: s
     k = Conditions(day_slots=day_slots, end_before=ebs)
     note = _room_note(r.rooms, first, r.note.strip())[:100]
     kind = r.kind
-    if kind in ("수용", "조건부"):
+    if choice in ("A", "B", "C") and kind == "확인 필요":
+        # 화면 버튼으로 안을 골랐으면 그 안을 받아들인 것 (가이드 ①). 글이 짧거나 애매해도 버튼을 따른다
+        kind = "조건부" if not k.is_empty() or note else "수용"
+    elif kind in ("수용", "조건부"):
         kind = "확인 필요" if not picks else ("조건부" if not k.is_empty() or note else "수용")
-    elif picks:           # 거절·확인 필요인데 안을 골랐다고 하면 모순
+    elif picks:           # 거절인데 안을 골랐다고 하면 모순 (버튼 A + "사실 다 안 돼요" 등)
         kind = "확인 필요"
     if choice == "none" and kind in ("수용", "조건부", "확인 필요"):
         kind = "거절"
@@ -287,10 +290,30 @@ def parse_reply(text: str, choice: str | None = None, *, alternatives: list[Alte
               .replace("<<REPLY>>", text or "(빈 답장)"))
     try:
         return _from_llm(generate_json(prompt, _ReplyLLM), choice, alts, text)
-    except (LLMUnavailable, ValueError):
+    except (LLMUnavailable, ValueError) as e:
+        reason = _fallback_reason(e)
         r = _keyword_reply(text, choice)
-        r.fallback = True
+        r.fallback, r.fallback_reason = True, reason
+        # 키워드 규칙은 거절·보류를 수용으로 잘못 읽을 때가 있다 (평가의 위험 오류). 모델이 막혀 넘어왔는데
+        # 글만 보고 수용·조건부가 나오면 확인 필요로 낮추고 추정은 note에 남긴다. 화면 버튼(A/B/C)을 눌렀으면 그대로 둔다 (11/22)
+        if r.kind in ("수용", "조건부") and not (choice and choice != "none"):
+            r = r.model_copy(update={"kind": "확인 필요", "picks": [], "conditions": Conditions(),
+                                     "note": f"AI 해석 실패({reason}). 키워드 추정: {''.join(r.picks)} {r.kind}"})
         return r
+
+
+def _fallback_reason(e: Exception) -> str:
+    s = f"{type(e).__name__} {e}"
+    for code, name in (("429", "429 요청 제한"), ("503", "503 과부하"), ("500", "500 서버 오류")):
+        if code in s:
+            return name
+    if "API_KEY" in s or "키 없" in s:
+        return "키 없음"
+    if "timeout" in s.lower():
+        return "시간 초과"
+    if isinstance(e, ValueError) or "형식" in s:
+        return "형식 오류"
+    return "호출 실패"
 
 
 # ---------------- 조건 대조 ----------------
@@ -323,7 +346,8 @@ def match_conditions(parse: ReplyParse, alternatives: list[Alternative], round: 
     """unavailable = 그사이 다른 강의가 들어가서 못 쓰는 안 (배정 엔진이 알려 준다)."""
     k = parse.conditions
     if parse.kind == "확인 필요":
-        return Proposal(action="decide", text="답장을 확실히 읽지 못했습니다. [수정]으로 직접 정해 주세요.")
+        return Proposal(action="decide", text="답장을 확실히 읽지 못했습니다. [수정]으로 직접 정해 주세요."
+                                              + (f" ({parse.note})" if parse.fallback and parse.note else ""))
     if parse.picks:
         checks = []
         for key in parse.picks:

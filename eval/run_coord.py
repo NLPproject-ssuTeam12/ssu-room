@@ -204,7 +204,7 @@ def cmd_reply(a):
                    accept_ok=(g.kind in ACCEPT) == (pred.kind in ACCEPT),
                    action_ok=(pg.action, pg.key) == (pp.action, pp.key),
                    danger=g.kind in ("거절", "확인 필요") and pred.kind in ("수용", "조건부"),
-                   fallback=pred.fallback, seconds=round(sec, 2))
+                   fallback=pred.fallback, fallback_reason=pred.fallback_reason, seconds=round(sec, 2))
         row["all_ok"] = row["kind_ok"] and row["picks_ok"] and row["cond_ok"]
         rows.append(row)
         kinds[g.kind] += 1
@@ -236,7 +236,7 @@ def cmd_reply(a):
     if wrong:
         print(f"\n틀린 문장 {len(wrong)}개")
         for r in wrong[: a.show]:
-            print(f"- [{r['id']}] {r['reply']}\n    정답 {r['gold']}\n    예측 {r['pred']}{'  (키워드로 넘어감)' if r['fallback'] else ''}")
+            print(f"- [{r['id']}] {r['reply']}\n    정답 {r['gold']}\n    예측 {r['pred']}{'  (키워드로 넘어감: ' + r['fallback_reason'] + ')' if r['fallback'] else ''}")
 
     out = pathlib.Path(a.out)
     out.mkdir(parents=True, exist_ok=True)

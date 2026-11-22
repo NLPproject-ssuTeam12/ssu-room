@@ -98,6 +98,7 @@ class ReplyParse(BaseModel):
     note: str = ""                 # 조교가 확인하거나 바꿔야 할 요청 (강의실 변경·장비·정원·교시 조정 희망). 배정 엔진은 읽지 않고 조교가 본다
     method: Literal["keyword", "llm"] = "keyword"
     fallback: bool = False         # 언어 모델이 실패해서 키워드 방식으로 대신 처리했으면 True
+    fallback_reason: str = ""      # 넘어간 이유: "503 과부하" / "429 요청 제한" / "시간 초과" / "형식 오류" / "키 없음" 등
 
 
 class MessageInput(BaseModel):

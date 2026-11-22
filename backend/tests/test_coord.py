@@ -171,9 +171,24 @@ class LLMPath(unittest.TestCase):
     def test_no_key_falls_back(self):
         with mock.patch.object(coord, "generate_json", side_effect=LLMUnavailable("키 없음")):
             r = parse_reply("A로 할게요.", alternatives=ALTS, method="llm")
-            self.assertEqual((r.method, r.fallback, r.picks), ("keyword", True, ["A"]))
+            self.assertEqual((r.method, r.fallback, r.fallback_reason), ("keyword", True, "키 없음"))
             m = write_message(inp(), method="llm")
             self.assertEqual((m.method, m.fallback), ("keyword", True))
+
+    def test_fallback_accept_becomes_check(self):
+        # 모델이 막혀 키워드로 넘어가면, 글만 보고 나온 수용·조건부는 확인 필요로 낮춘다 (거절을 수용으로 읽는 위험 오류 막기)
+        with mock.patch.object(coord, "generate_json", side_effect=LLMUnavailable("호출 실패: ServerError: 503 UNAVAILABLE")):
+            r = parse_reply("C는 괜찮은데 B도 될 것 같고 다음 주에 말씀드릴게요", alternatives=ALTS, method="llm")
+            self.assertEqual((r.kind, r.picks, r.fallback_reason), ("확인 필요", [], "503 과부하"))
+            self.assertIn("키워드 추정", r.note)
+            p = match_conditions(r, ALTS, round=1)
+            self.assertEqual(p.action, "decide")
+            self.assertIn("AI 해석 실패", p.text)
+            # 화면 버튼을 눌렀으면 글 해석이 필요 없으니 그대로 수용
+            b = parse_reply("", choice="B", alternatives=ALTS, method="llm")
+            self.assertEqual((b.kind, b.picks, b.fallback), ("수용", ["B"], True))
+            # 거절은 원래 안전한 방향이라 그대로
+            self.assertEqual(parse_reply("셋 다 어렵습니다", alternatives=ALTS, method="llm").kind, "거절")
 
     def test_llm_reply_is_checked(self):
         fake = coord._ReplyLLM(kind="조건부", picks=["B", "C"], end_before=[{"day": 2, "time": "17:00"}])
@@ -186,6 +201,16 @@ class LLMPath(unittest.TestCase):
         fake = coord._ReplyLLM(kind="수용", picks=[], end_before=[])
         with mock.patch.object(coord, "generate_json", return_value=fake):
             self.assertEqual(parse_reply("네", alternatives=ALTS, method="llm").kind, "확인 필요")
+
+    def test_llm_unsure_but_button_pressed(self):
+        # 버튼으로 안을 골랐으면 모델이 '확인 필요'라고 해도 그 안을 받아들인 것. 모델이 거절이라고 하면 모순이라 확인 필요
+        unsure = coord._ReplyLLM(kind="확인 필요", picks=[], end_before=[])
+        with mock.patch.object(coord, "generate_json", return_value=unsure):
+            r = parse_reply("넵 확인했습니다 감사합니다", choice="C", alternatives=ALTS, method="llm")
+        self.assertEqual((r.kind, r.picks), ("수용", ["C"]))
+        reject = coord._ReplyLLM(kind="거절", picks=[], end_before=[])
+        with mock.patch.object(coord, "generate_json", return_value=reject):
+            self.assertEqual(parse_reply("사실 다 안 돼요", choice="A", alternatives=ALTS, method="llm").kind, "확인 필요")
 
     def test_llm_days_kept_when_days_written_together(self):
         # '화목'처럼 붙여 쓴 요일은 지킨다. 요일이 없는 답장에서 만든 요일만 버린다
