@@ -15,7 +15,7 @@ from typing import List, Literal, Optional, Tuple, Union
 from .contracts import (
     DAYN, DAYS, STARTS, Alternative, Assignment, Block, Conditions, EndBefore, Message, MessageInput,
     PickCheck, Proposal, ReplyParse, Room, Section, Timetable, Violation, WhatIfResult, Wish,
-    alternative, dump, meetings_to_blocks, parse,
+    alternative, dump, late_penalty, meetings_to_blocks, no_long_at_1800, parse,
 )
 
 Method = Literal["keyword", "llm"]
@@ -203,11 +203,13 @@ def make_alternatives(section_id: str, conditions: Optional[Conditions] = None) 
     밀린 분반 (+ 조건) → 대안 A·B·C.
     가짜: 초안 자리에서 같은 강의실로 한 칸·두 칸 뒤, 같은 시간 다른 강의실 순으로 만들고
     조건이 있으면 맞는 것만 남긴다. 초안에서 같은 강의실을 쓰는 다른 분반과 겹치는 자리는 뺀다
-    (교수·학년 겹침은 보지 않는다)."""
+    (교수·학년 겹침은 보지 않는다).
+    시간 규칙: 18:00 시작 연강은 만들지 않는다(하드). 19:30 교시는 감점(late_penalty)이라
+    19:30을 안 쓰는 안을 먼저 고르고, 모자랄 때만 19:30 안을 넣는다."""
     d = _data()
     cur = next((a for a in d["timetable"].assignments if a.section_id == section_id), None)
-    if cur is None or not cur.blocks:
-        return []
+    if cur is None or not cur.blocks or any(b.day not in DAYS for b in cur.blocks):
+        return []   # 토요일 등 MANUAL 분반은 자동 대안 대상이 아니다
     sec = d["sections"].get(section_id, {})
     need_lab = sec.get("lab_need") == "MUST"
     size = sec.get("enrollment") or 0
@@ -240,16 +242,18 @@ def make_alternatives(section_id: str, conditions: Optional[Conditions] = None) 
         return any(a.section_id != section_id and a.room == room and _overlap(b, x)
                    for a in d["timetable"].assignments for b in a.blocks for x in blocks)
 
-    out, seen = [], set()
+    ok, seen = [], set()
     for blocks, room in cands:
         key = (tuple((b.day, b.start, b.slots) for b in blocks), room)
-        if key in seen or not _fits(blocks, conditions)[0] or room_busy(blocks, room):
+        if key in seen or not no_long_at_1800(blocks):
+            continue
+        if not _fits(blocks, conditions)[0] or room_busy(blocks, room):
             continue
         seen.add(key)
-        out.append(alternative("ABC"[len(out)], blocks, room))
-        if len(out) == 3:
-            break
-    return out
+        ok.append((blocks, room))
+    # 감점이 적은 순 (같으면 원래 순서). 19:30 안은 다른 안이 3개가 안 될 때만 들어간다
+    ok.sort(key=lambda br: late_penalty(br[0]))
+    return [alternative("ABC"[i], blocks, room) for i, (blocks, room) in enumerate(ok[:3])]
 
 
 def reassign(timetable: Timetable, section_id: str, choice: Union[Alternative, Conditions]) -> Timetable:

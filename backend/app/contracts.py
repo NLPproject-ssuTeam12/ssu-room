@@ -251,6 +251,27 @@ def section_shape(weekly_blocks: int, blocks: List[Block]) -> str:
     return "MANUAL"
 
 
+# ---------- 시간 규칙 (팀 결정 11/21) ----------
+# - 수업은 웬만하면 19:15 전에 끝낸다. 19:30 교시는 하드 규칙이 아니라 큰 감점: 다른 안이 없을 때만 쓴다.
+# - 18:00 시작 연강(18:00~20:45)은 없다 (하드).
+LATE_SLOT = "19:30"
+LATE_PENALTY = 100      # 19:30 교시를 쓰는 수업 한 번마다 깎는 점수 (가짜 함수·도우미가 같은 값을 쓴다)
+
+
+def late_penalty(blocks: List[Block]) -> int:
+    """19:30 교시를 쓰는 수업 수 × LATE_PENALTY. 0이면 늦은 교시 없음."""
+    n = 0
+    for b in blocks:
+        if b.start in STARTS and LATE_SLOT in STARTS[STARTS.index(b.start):STARTS.index(b.start) + b.slots]:
+            n += 1
+    return n * LATE_PENALTY
+
+
+def no_long_at_1800(blocks: List[Block]) -> bool:
+    """18:00 시작 연강이 없으면 True."""
+    return not any(b.slots >= 2 and b.start == "18:00" for b in blocks)
+
+
 def parse(cls, data):
     return cls.model_validate(data) if hasattr(cls, "model_validate") else cls.parse_obj(data)
 

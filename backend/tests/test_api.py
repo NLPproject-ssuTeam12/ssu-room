@@ -576,3 +576,33 @@ def test_stub_fits_uses_slots():
     assert _fits([Block(day="월", start="12:00", slots=1)], pm) == (False, "월 12:00~13:15가 가능한 교시 밖")
     assert _fits([Block(day="수", start="15:00", slots=2)], pm)[0] is True          # 15:00·16:30 둘 다 있음
     assert _fits([Block(day="수", start="16:30", slots=2)], pm)[0] is False         # 18:00 교시가 없음
+
+
+# ---------- 시간 규칙: 19:30 감점, 18:00 연강 없음 ----------
+
+def test_late_slot_helpers():
+    from backend.app.contracts import Block, LATE_PENALTY, late_penalty, no_long_at_1800
+    assert late_penalty([Block(day="월", start="18:00", slots=1)]) == 0
+    assert late_penalty([Block(day="월", start="19:30", slots=1), Block(day="수", start="19:30", slots=1)]) \
+        == 2 * LATE_PENALTY
+    assert late_penalty([Block(day="화", start="18:00", slots=2)]) == LATE_PENALTY   # 18:00 연강은 19:30 칸도 씀
+    assert no_long_at_1800([Block(day="화", start="16:30", slots=2)]) is True       # 16:30 연강은 됨
+    assert no_long_at_1800([Block(day="화", start="18:00", slots=2)]) is False
+
+
+def test_stub_alternatives_late_slot_last_and_no_long_at_1800(client):
+    from backend.app import stubs
+    from backend.app.contracts import late_penalty, meetings_to_blocks, no_long_at_1800
+    checked = late_seen = 0
+    for s in sections(client):
+        if s["shape"] == "MANUAL":
+            continue
+        pens = []
+        for alt in stubs.make_alternatives(s["id"]):
+            blocks = meetings_to_blocks(alt.meetings)[0]
+            assert no_long_at_1800(blocks), (s["id"], alt)
+            pens.append(late_penalty(blocks))
+        assert pens == sorted(pens), (s["id"], pens)      # 19:30 안은 맨 뒤 (다른 안이 없을 때만)
+        checked += 1
+        late_seen += any(pens)
+    assert checked > 50
