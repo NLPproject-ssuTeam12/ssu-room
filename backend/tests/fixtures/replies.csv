@@ -1,0 +1,6 @@
+﻿id,scenario,choice,reply,writer
+t1,s1,,A나 B 괜찮아요. 수요일은 17시 전에 끝나야 해요.,test
+t2,s1,,제안해주신 시간 괜찮습니다,test
+t3,s1,,세 번째 안은 어렵고 늦은 오후면 좋겠습니다,test
+t4,s2,,목요일만 아니면 됩니다,test
+t5,s3,B,,test
