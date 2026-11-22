@@ -60,13 +60,23 @@ def alt_label(a: Alternative) -> str:
     return f"{when} · {where}"
 
 
+def _slot_name(slots: list[str]) -> str:
+    return next((n for n, w in SLOT_WORDS.items() if w == slots), None) or "·".join(slots) + " 시작 수업"
+
+
 def cond_label(k: Conditions) -> str:
+    """예: '화·목요일', '오후', '화 오전, 목 오후', '수요일 17:00 전 종료'"""
     a = []
-    if k.days:
-        a.append("·".join(DAYN[d] for d in k.days) + "요일")
-    if k.slots:
-        name = next((n for n, w in SLOT_WORDS.items() if w == k.slots), None)
-        a.append(name or "·".join(k.slots) + " 시작 수업")
+    ds = k.day_slots
+    groups: dict[tuple, list[int]] = {}
+    for d, s in ds.items():
+        groups.setdefault(tuple(s), []).append(d)
+    if len(groups) == 1 and set(ds) == set(range(5)) and next(iter(groups)):
+        a.append(_slot_name(list(next(iter(groups)))))          # 요일 상관없이 그 교시
+    else:
+        for s, days in groups.items():
+            when = "·".join(DAYN[d] for d in days)
+            a.append(f"{when} {_slot_name(list(s))}" if s else f"{when}요일")
     for eb in k.end_before:
         a.append(f"{DAYN[eb.day]}요일 {eb.time} 전 종료")
     return ", ".join(a)
@@ -176,8 +186,10 @@ def _keyword_reply(text: str, choice: str | None) -> ReplyParse:
     if not picks:
         no_days = {DAYN.index(d) for d in _NOT_DAY.findall(t)}      # "목요일만 아니면" = 목 빼고 다 됨
         days = {DAYN.index(d) for d in _DAY.findall(t)} - no_days
-        k.days = sorted(days or (set(range(5)) - no_days if no_days else set()))
-        k.slots = next((list(w) for n, w in SLOT_WORDS.items() if n in t), [])
+        days = sorted(days or (set(range(5)) - no_days if no_days else set()))
+        slots = next((list(w) for n, w in SLOT_WORDS.items() if n in t), [])
+        # 키워드 규칙은 요일마다 다른 교시를 못 가린다 (비교 기준): 말한 요일 모두에 같은 교시
+        k.day_slots = {d: slots for d in (days or (range(5) if slots else []))}
     if picks:
         kind = "조건부" if not k.is_empty() else "수용"
     else:
@@ -190,12 +202,16 @@ class _EndBeforeLLM(BaseModel):
     time: str
 
 
+class _DaySlotsLLM(BaseModel):
+    day: int
+    slots: list[str]       # 빈 목록 = 그 요일은 아무 교시나
+
+
 class _ReplyLLM(BaseModel):
     kind: Literal["수용", "조건부", "거절", "확인 필요"]
     picks: list[Literal["A", "B", "C"]]
-    days: list[int]
-    slots: list[str]
-    end_before: list[_EndBeforeLLM]
+    day_slots: list[_DaySlotsLLM] = []
+    end_before: list[_EndBeforeLLM] = []
     rooms: list[str] = []  # 고른 안을 이 강의실에서 해 달라는 요청 (번호). 이미 그 방인지는 코드가 대안과 대조한다
     note: str = ""        # 그 밖에 조교가 확인할 요청 (장비·정원·빈 시간·다른 교시로 조정 희망). 조교에게 그대로 보여 준다
 
@@ -220,15 +236,23 @@ def _room_note(rooms: list[str], alt: Alternative | None, note: str) -> str:
 def _from_llm(r: _ReplyLLM, choice: str | None, alts: list[Alternative], text: str = "") -> ReplyParse:
     """언어 모델 답을 검사하고 ReplyParse로 바꾼다. 모양이 이상하면 ValueError."""
     keys = [a.key for a in alts]
-    if not (_DAY.search(text) or "평일" in text):   # '화목'·'수금'처럼 붙여 쓴 요일도 요일로 본다
-        r = r.model_copy(update={"days": []})   # 답장에 요일이 없는데 요일을 넣었으면 지어낸 것으로 보고 버린다
     picks = [p for p in dict.fromkeys(r.picks) if not keys or p in keys]
     if choice and choice != "none":
         picks = [choice] + [p for p in picks if p != choice]
     if choice == "none":
         picks = []
-    if any(x not in SLOTS for x in r.slots):
-        raise ValueError("교시 형식")
+    day_slots: dict[int, list[str]] = {}
+    for e in r.day_slots:
+        if not 0 <= e.day <= 4 or any(x not in SLOTS for x in e.slots):
+            raise ValueError("요일·교시 형식")
+        if e.day in day_slots and (not day_slots[e.day] or not e.slots):
+            day_slots[e.day] = []                         # 같은 요일이 두 번 나오고 한쪽이 '아무 교시나'
+        else:
+            day_slots[e.day] = sorted(set(day_slots.get(e.day, [])) | set(e.slots), key=SLOTS.index)
+    if day_slots and not (_DAY.search(text) or "평일" in text):   # '화목'·'수금'처럼 붙여 쓴 요일도 요일로 본다
+        # 답장에 요일이 없는데 요일을 골라 넣었으면 지어낸 것으로 보고, 교시만 다섯 요일에 둔다
+        slots = sorted({s for v in day_slots.values() for s in v}, key=SLOTS.index)
+        day_slots = {d: slots for d in range(5)} if slots else {}
     ebs = []
     for e in r.end_before:
         if not (0 <= e.day <= 4 and _HHMM.match(e.time)):
@@ -238,7 +262,7 @@ def _from_llm(r: _ReplyLLM, choice: str | None, alts: list[Alternative], text: s
     if first:   # "17:45 종료인데 17:30에 끝낼 수 있으면" → 교수님이 수업 안에서 정할 일. 조건으로 받으면 고른 안이 탈락한다
         ebs = [e for e in ebs if not any(m.day == e.day and 0 < _mins(m.end) - _mins(e.time) <= EARLY_END_MIN
                                          for m in first.meetings)]
-    k = Conditions(days=sorted({d for d in r.days if 0 <= d <= 4}), slots=r.slots, end_before=ebs)
+    k = Conditions(day_slots=day_slots, end_before=ebs)
     note = _room_note(r.rooms, first, r.note.strip())[:100]
     kind = r.kind
     if kind in ("수용", "조건부"):
@@ -275,16 +299,22 @@ def _fits(a: Alternative, k: Conditions) -> tuple[bool, str]:
         for m in a.meetings:
             if m.day == e.day and _mins(m.end) > _mins(e.time):
                 return False, f"{DAYN[m.day]}요일 {m.end} 종료 → {e.time} 전 종료 조건과 어긋남"
-    if k.days:
-        ds = [m.day for m in a.meetings]
-        ok = all(d in k.days for d in ds) if len(k.days) >= 2 else k.days[0] in ds
+    ds = k.day_slots
+    if ds:
+        days = [m.day for m in a.meetings]
+        if len(ds) >= 2:       # 그 요일들 안에서만
+            ok, checked = all(d in ds for d in days), a.meetings
+        else:                  # 요일 하나: 그 요일이 들어가면 되고, 다른 하루는 자유
+            (d0,) = ds
+            ok, checked = d0 in days, [m for m in a.meetings if m.day == d0]
         if not ok:
-            return False, f"{'·'.join(DAYN[d] for d in ds)}요일 → 가능 요일({cond_label(Conditions(days=k.days))})과 어긋남"
-    if k.slots:
-        for m in a.meetings:
+            return False, f"{'·'.join(DAYN[d] for d in days)}요일 → 가능한 때({cond_label(Conditions(day_slots=ds))})와 어긋남"
+        for m in checked:
+            allowed = ds[m.day]
             used = [s for s in SLOTS if _mins(m.start) <= _mins(s) < _mins(m.end)]   # 연강은 두 칸
-            if any(s not in k.slots for s in used):
-                return False, f"{DAYN[m.day]} {m.start}~{m.end} → 가능 교시({cond_label(Conditions(slots=k.slots))})와 어긋남"
+            if allowed and any(s not in allowed for s in used):
+                return False, (f"{DAYN[m.day]} {m.start}~{m.end} → {DAYN[m.day]}요일 가능 교시"
+                               f"({_slot_name(allowed)})와 어긋남")
     return True, "조건과 맞음" if not k.is_empty() else "고른 안"
 
 

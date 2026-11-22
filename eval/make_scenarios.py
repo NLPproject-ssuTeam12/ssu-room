@@ -238,11 +238,11 @@ def prev_condition(options):
     """2·3차: 지난 답장에서 받은 조건. 모든 대안이 맞는 조건 하나를 고른다 (요일 → 교시). 없으면 None."""
     days = [{m[0] for m in o} for o in options]
     if all(d == days[0] for d in days):
-        return {"days": sorted(days[0])}
+        return {"day_slots": {d: [] for d in sorted(days[0])}}          # 그 요일들, 아무 교시나
     for _, sl in PREV_SLOTS:
         used = {g for o in options for m in o for g in GRID if m[1] <= mins(g) < m[2]}
         if used <= set(sl):
-            return {"slots": sl}
+            return {"day_slots": {d: sl for d in range(5)}}             # 요일 상관없이 그 교시
     return None
 
 

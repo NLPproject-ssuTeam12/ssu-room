@@ -103,14 +103,32 @@ def parse_end(v: str) -> list[EndBefore]:
     return out
 
 
+def parse_day_slots(v: str) -> dict[int, list[str]]:
+    out: dict[int, list[str]] = {}
+    for part in filter(None, (p.strip() for p in v.split(";"))):
+        if "=" not in part:
+            raise ValueError(f"요일별 교시 형식: {part!r} (예: 화=오전; 목=13:30,15:00)")
+        d, s = part.split("=", 1)
+        days, slots = parse_days(d), parse_slots(s)
+        if not days:
+            raise ValueError(f"요일이 없음: {part!r}")
+        for day in days:
+            out[day] = slots
+    return out
+
+
 def gold_row(r: dict) -> ReplyParse:
     """라벨 CSV 한 줄 → ReplyParse. 형식이 틀리면 어느 줄인지 알려 주고 멈춘다."""
     try:
         if r["kind"] not in KINDS:
             raise ValueError(f"kind는 {KINDS} 중 하나: {r['kind']!r}")
         picks = [p for p in re.split(r"[,\s]+", r.get("picks", "").upper()) if p]
-        cond = Conditions(days=parse_days(r.get("days", "")), slots=parse_slots(r.get("slots", r.get("window", ""))),
-                          end_before=parse_end(r.get("end_before", "")))
+        if r.get("day_slots"):      # 요일마다 다른 교시: "화=오전; 목=13:30,15:00" (교시를 비우면 그 요일은 아무 교시나)
+            ds = parse_day_slots(r["day_slots"])
+        else:                       # days × slots (교시만 있으면 다섯 요일 모두)
+            days, slots = parse_days(r.get("days", "")), parse_slots(r.get("slots", r.get("window", "")))
+            ds = {d: slots for d in (days or (range(5) if slots else []))}
+        cond = Conditions(day_slots=ds, end_before=parse_end(r.get("end_before", "")))
         return ReplyParse(kind=r["kind"], picks=picks, conditions=cond)
     except Exception as e:
         sys.exit(f"라벨 형식 오류 (id={r.get('id')}): {e}")
@@ -122,8 +140,11 @@ def load_gold(path) -> dict[str, ReplyParse]:
 
 # ---------------- 비교 ----------------
 def cond_items(c: Conditions) -> set:
-    items = {("day", d) for d in c.days} | {("end", e.day, e.time) for e in c.end_before}
-    return items | {("slot", s) for s in c.slots}
+    """조건 F1을 셀 항목: (요일, 교시) 짝, 아무 교시나 되는 요일, 요일별 종료 시각. (11/22 요일별 교시로 바뀌며 짝 단위로 셈)"""
+    items = {("end", e.day, e.time) for e in c.end_before}
+    for d, slots in c.day_slots.items():
+        items |= {("slot", d, s) for s in slots} if slots else {("day", d)}
+    return items
 
 
 def prf(tp, fp, fn):
@@ -135,10 +156,11 @@ def prf(tp, fp, fn):
 def show(p: ReplyParse) -> str:
     c = p.conditions
     bits = [p.kind, "".join(p.picks) or "-"]
-    if c.days:
-        bits.append("요일 " + "".join(DAYN[d] for d in c.days))
-    if c.slots:
-        bits.append("교시 " + "·".join(c.slots))
+    groups: dict[tuple, list[int]] = {}
+    for d, s in c.day_slots.items():
+        groups.setdefault(tuple(s), []).append(d)
+    for s, days in groups.items():
+        bits.append("".join(DAYN[d] for d in days) + (" " + "·".join(s) if s else " 아무 교시"))
     bits += [f"{DAYN[e.day]} {e.time} 전" for e in c.end_before]
     return " / ".join(bits)
 
