@@ -16,34 +16,32 @@
   이때 앞 대화에서 그 과목명·분반 번호를 찾아 course·section_no에 넣는다. 못 찾으면 비워 둔다.
 - professor: "교수03"처럼 가명으로 말한 교수. 없으면 "".
 - days: 요일 목록. "월", "화", "수", "목", "금" 중에서만. ("화목" → ["화", "목"]) 말하지 않았으면 [].
-- start: 수업 시작 시각. 아래 교시 시작 시각 중 하나만 쓴다. 말하지 않았으면 "".
-  - 교시 시작 시각: 09:00, 10:30, 12:00, 13:30, 15:00, 16:30, 18:00, 19:30
-  - "1시 반" = 13:30, "3시" = 15:00, "4시 반" = 16:30, "6시" = 18:00, "7시 반" = 19:30 (오전·오후 말이 없고 1~7시면 오후)
-  - 시각 없이 때만 말하면 그 때의 첫 교시: 오전 = 09:00, 점심 = 12:00, 오후 = 13:30, 늦은 오후 = 16:30, 저녁 = 18:00
-  - 교시와 딱 맞지 않으면 가장 가까운 교시 시작 시각
+- time_text: 질문에 나온 시각 표현을 글자 그대로 옮긴다 ("1시 반", "2시", "13:30", "오후 3시", "오후", "저녁"). 말하지 않았으면 "".
+  - 교시 시작 시각(09:00, 10:30, 12:00, 13:30, 15:00, 16:30, 18:00, 19:30)으로 바꾸거나 가장 가까운 교시를 고르지 않는다. 그 판단은 프로그램이 한다.
+  - "오전", "오후", "저녁"처럼 때만 말해도 그 말을 그대로 쓴다. 시각을 지어 넣지 않는다.
 - room_no: 질문에 나온 강의실 번호 (숫자 5자리). 없으면 "".
-- building: 강의실 번호 없이 건물만 말하면 그 건물 이름 (예: "정보과학관", "문화관"). 없으면 "".
+- building: 강의실 번호 없이 질문이나 앞 대화에 건물 이름을 말했으면 그 건물 (예: "정보과학관", "문화관"). 없으면 "".
 
 질문에 없는 정보를 지어내지 않는다. 모르면 비워 둔다.
 
 ## 예시 (형식 참고용)
 앞 대화: (없음)
 질문: 컴파일러 01분반 금요일 오후로 옮겨
-{"intent": "move", "course": "컴파일러", "section_no": "01", "retake": false, "from_history": false, "professor": "", "days": ["금"], "start": "13:30", "room_no": "", "building": ""}
+{"intent": "move", "course": "컴파일러", "section_no": "01", "retake": false, "from_history": false, "professor": "", "days": ["금"], "time_text": "오후", "room_no": "", "building": ""}
 
 앞 대화:
 조교: 운영체제 3분반 어디서 해?
 도우미: 운영체제 03분반 지금 배정: 화 10:30~11:45 / 목 10:30~11:45 · 정보과학관 21303
 질문: 그거 월수 6시로 바꾸면 어때?
-{"intent": "what_if", "course": "운영체제", "section_no": "03", "retake": false, "from_history": true, "professor": "", "days": ["월", "수"], "start": "18:00", "room_no": "", "building": ""}
+{"intent": "what_if", "course": "운영체제", "section_no": "03", "retake": false, "from_history": true, "professor": "", "days": ["월", "수"], "time_text": "6시", "room_no": "", "building": ""}
 
 앞 대화: (없음)
 질문: 21501 다음 학기에 공사하면 어떻게 돼?
-{"intent": "what_if", "course": "", "section_no": "", "retake": false, "from_history": false, "professor": "", "days": [], "start": "", "room_no": "21501", "building": ""}
+{"intent": "what_if", "course": "", "section_no": "", "retake": false, "from_history": false, "professor": "", "days": [], "time_text": "", "room_no": "21501", "building": ""}
 
 앞 대화: (없음)
 질문: 오늘 학식 메뉴 뭐야
-{"intent": "out_of_scope", "course": "", "section_no": "", "retake": false, "from_history": false, "professor": "", "days": [], "start": "", "room_no": "", "building": ""}
+{"intent": "out_of_scope", "course": "", "section_no": "", "retake": false, "from_history": false, "professor": "", "days": [], "time_text": "", "room_no": "", "building": ""}
 
 ## 분반 목록 (과목명 | 분반 | 담당 교수 가명)
 <<SECTIONS>>

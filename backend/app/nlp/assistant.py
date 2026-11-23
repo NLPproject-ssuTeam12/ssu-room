@@ -82,7 +82,9 @@ _DAY_TOKEN = re.compile(
 )
 _TIME_HM = re.compile(r"(오전|오후|저녁|밤)?\s*(\d{1,2}):(\d{2})")
 _TIME_SI = re.compile(r"(오전|오후|저녁|밤)?\s*(\d{1,2})\s*시\s*(반|(\d{1,2})\s*분)?(?!\s*(전|이전|까지))")
-_TIME_WORD = {"오전": "09:00", "오후": "13:30", "저녁": "18:00", "밤": "19:30"}
+# 때를 가리키는 말 → 그 안의 교시 (긴 말 먼저). 교시가 하나면 그대로 받고, 여럿이면 되묻는다
+_TIME_WORD = {"늦은오후": ["16:30"], "오전": ["09:00", "10:30"],
+              "오후": ["13:30", "15:00", "16:30"], "저녁": ["18:00", "19:30"], "밤": ["19:30"]}
 
 
 def _norm(text: str) -> str:
@@ -98,9 +100,13 @@ def _to_hhmm(m: int) -> str:
     return f"{m // 60:02d}:{m % 60:02d}"
 
 
-def _snap(minutes: int) -> str:
-    """가장 가까운 시작 칸 (같으면 이른 쪽)."""
-    return min(STARTS, key=lambda s: (abs(_to_min(s) - minutes), _to_min(s)))
+def _choose(slots: List[str]) -> str:
+    """되묻는 말: "13:30과 15:00 중 언제로 할까요?" """
+    if len(slots) == 1:
+        return f"{slots[0]}으로 할까요?"
+    if len(slots) == 2:
+        return f"{slots[0]}과 {slots[1]} 중 언제로 할까요?"
+    return f"{', '.join(slots)} 중 언제로 할까요?"
 
 
 def _block_text(b: Block) -> str:
@@ -133,7 +139,11 @@ def _extract_days(text: str) -> List[str]:
     return days
 
 
-def _extract_time(text: str) -> Optional[str]:
+def _read_time(text: str) -> Tuple[Optional[str], Optional[str]]:
+    """시각 표현 → (교시 시작 시각, 되물을 말). 키워드·언어 모델 버전이 같이 쓴다.
+    교시 시작(09:00·10:30·…·19:30)과 딱 맞으면 그 시각. 맞지 않거나("2시") 때만 말하면("오후로")
+    가장 가까운 교시로 바꾸지 않고 되묻는다. 시각이 없으면 (None, None)."""
+    text = text or ""
     m = _TIME_HM.search(text)
     if m:
         ampm, h, mi = m.group(1), int(m.group(2)), int(m.group(3))
@@ -143,15 +153,25 @@ def _extract_time(text: str) -> Optional[str]:
             ampm, h = m.group(1), int(m.group(2))
             mi = 30 if m.group(3) == "반" else int(m.group(4) or 0)
         else:
-            for word, start in _TIME_WORD.items():
-                if word in text:
-                    return start
-            return None
+            t = re.sub(r"\s+", "", text)
+            for word, slots in _TIME_WORD.items():
+                if word in t:
+                    if len(slots) == 1:
+                        return slots[0], None
+                    name = "늦은 오후" if word == "늦은오후" else word
+                    return None, f"{name} 교시는 {_choose(slots)}"
+            return None, None
     if ampm in ("오후", "저녁", "밤") and h < 12:
         h += 12
     elif ampm is None and 1 <= h <= 7:
         h += 12           # "1시 반" = 13:30
-    return _snap(h * 60 + mi)
+    said = h * 60 + mi
+    hhmm = _to_hhmm(said)
+    if hhmm in STARTS:
+        return hhmm, None
+    before = [x for x in STARTS if _to_min(x) < said][-1:]
+    after = [x for x in STARTS if _to_min(x) > said][:1]
+    return None, f"{hhmm}은 교시 시작 시각이 아니에요. {_choose(before + after)}"
 
 
 def _match_course(norm_text: str, names: List[str]) -> Tuple[List[str], str]:
@@ -264,9 +284,11 @@ def _find_room(room_no: Optional[str], norm: str, store) -> Tuple[Optional[str],
 
 
 def _ask_back(intent: str, section_id: Optional[str], days: List[str], start: Optional[str],
-              room: Optional[str], building: Optional[str], ask: Optional[str], store) -> Optional[str]:
-    """되묻기 규칙 (키워드·언어 모델 버전 공통, 코드로 판단)."""
-    has_target = bool(days or start or room or building)
+              room: Optional[str], building: Optional[str], ask: Optional[str], store,
+              time_ask: Optional[str] = None) -> Optional[str]:
+    """되묻기 규칙 (키워드·언어 모델 버전 공통, 코드로 판단).
+    time_ask = _read_time이 낸 시각 되묻기 ("2시", "오후"처럼 교시가 정해지지 않음)."""
+    has_target = bool(days or start or room or building or time_ask)
     if not ask:
         if intent == "explain" and not section_id:
             ask = "어느 분반을 말씀하시는지 알려 주세요. (예: 알고리즘 02분반)"
@@ -280,6 +302,8 @@ def _ask_back(intent: str, section_id: Optional[str], days: List[str], start: Op
                 ask = "무엇을 바꿔 볼까요? 분반과 옮길 시간, 또는 비울 시간(요일+시각)이나 못 쓰는 강의실을 알려 주세요."
             elif section_id and not has_target:
                 ask = "어디로 옮겨 볼까요? 요일·시각이나 강의실을 알려 주세요."
+        if not ask and intent in ("move", "what_if") and time_ask:
+            ask = time_ask
         if not ask and intent in ("move", "what_if") and section_id and len(days) == 1:
             ask = _ask_pair_day(store.get_section(section_id), days[0])
     if intent == "out_of_scope":
@@ -329,14 +353,14 @@ def _read_question_keyword(text: str, history: Optional[List[dict]], store) -> A
         rest_raw = re.sub(re.escape(abbr), " ", rest_raw, flags=re.I)
     rest_raw = re.sub(r"\d{1,2}\s*분반|재수강", " ", rest_raw)
     days = _extract_days(rest_raw)
-    start = _extract_time(rest_raw)
+    start, time_ask = _read_time(rest_raw)
 
     rm = re.search(r"(?<!\d)(\d{5})(?!\d)", raw)
     room, building, room_ask = _find_room(rm.group(1) if rm else None, norm, store)
     ask = ask or room_ask
 
     # --- 의도 ---
-    has_target = bool(days or start or room or building)
+    has_target = bool(days or start or room or building or time_ask)
     has_entity = bool(section_id or cands or has_target or professor or RE_PRONOUN.search(raw))
     if RE_EXPLAIN.search(raw):
         intent = "explain"
@@ -351,7 +375,7 @@ def _read_question_keyword(text: str, history: Optional[List[dict]], store) -> A
     if intent == "what_if" and not has_entity:
         intent = "out_of_scope"
 
-    ask = _ask_back(intent, section_id, days, start, room, building, ask, store)
+    ask = _ask_back(intent, section_id, days, start, room, building, ask, store, time_ask)
     return AssistantQuery(
         intent=intent, section_id=section_id, professor=professor,
         day=days[0] if days else None, days=days, start=start,
@@ -370,7 +394,7 @@ class _AssistantLLM(BaseModel):
     from_history: bool = False  # "그 강의"처럼 앞 대화의 분반을 가리킴
     professor: str = ""         # "교수03" 같은 가명
     days: List[str] = []        # ["월", "수"]
-    start: str = ""             # 교시 시작 시각 ("13:30")
+    time_text: str = ""         # 질문에 나온 시각 표현 그대로 ("2시", "1시 반", "오후", "13:30"). 코드가 교시로 읽는다
     room_no: str = ""           # 강의실 번호 (5자리)
     building: str = ""
 
@@ -389,12 +413,34 @@ def _sections_text(store) -> str:
                      for s in rows)
 
 
+def _said_courses(texts: List[str], names: List[str]) -> set:
+    """질문·앞 대화 글에서 _match_course로 찾히는 과목들."""
+    found = set()
+    for t in texts:
+        if t:
+            found |= set(_match_course(_norm(t), names)[0])
+    return found
+
+
+def _said_building(building: str, texts: List[str]) -> Optional[str]:
+    """모델이 준 건물이 질문·앞 대화에 (별칭으로라도) 나올 때만 그 건물."""
+    b = BUILDING_ALIAS.get(_norm(building or ""))
+    if not b:
+        return None
+    aliases = [a for a, x in BUILDING_ALIAS.items() if x == b]
+    return b if any(a in _norm(t) for t in texts if t for a in aliases) else None
+
+
 def _from_llm(r: _AssistantLLM, raw: str, history: Optional[List[dict]], store) -> AssistantQuery:
-    """언어 모델 답 → AssistantQuery. 없는 과목·교시·요일·교수·강의실은 버리고, 분반 연결과 되묻기는 코드가 한다."""
+    """언어 모델 답 → AssistantQuery. 질문·앞 대화에 없는 과목·건물·강의실, 없는 요일·교수는 버리고,
+    시각 읽기·분반 연결·되묻기는 키워드 버전과 같은 코드가 한다."""
     sections = store.list_sections()
     names = sorted({s.name for s in sections})
+    texts = [raw] + [(h.get("text") or "") for h in (history or [])]
     course = (r.course or "").strip()
     cands = [course] if course in names else (_match_course(_norm(course), names)[0] if course else [])
+    said = _said_courses(texts, names)
+    cands = [c for c in cands if c in said]       # 질문·앞 대화에서 찾히지 않는 과목은 지어낸 것으로 보고 버린다
     pm = re.search(r"교수\s*0?(\d{1,2})", r.professor or "")
     professor = f"교수{int(pm.group(1)):02d}" if pm else None
     if professor and not any(s.professor == professor for s in sections):
@@ -405,18 +451,21 @@ def _from_llm(r: _AssistantLLM, raw: str, history: Optional[List[dict]], store) 
     section_id, ask = _pick_section(cands, rest, professor, None, pronoun and not cands, history, store)
 
     days = [d for d in dict.fromkeys((x or "").strip()[:1] for x in r.days) if d in DAYS]
-    start = (r.start or "").strip()
-    start = start if start in STARTS else None
+    time_text = (r.time_text or "").strip()
+    if time_text and _norm(time_text) not in _norm(raw):   # 질문에 없는 시각 표현은 버린다
+        time_text = ""
+    start, time_ask = _read_time(time_text)
     room_no = re.sub(r"\D", "", r.room_no or "")
     if room_no and room_no not in raw:      # 질문에 없는 번호는 지어낸 것으로 보고 버린다
         room_no = ""
-    room, building, room_ask = _find_room(room_no or None, _norm(r.building or ""), store)
+    building = _said_building(r.building, texts)
+    room, found_building, room_ask = _find_room(room_no or None, _norm(building or ""), store)
     ask = ask or room_ask
-    ask = _ask_back(r.intent, section_id, days, start, room, building, ask, store)
+    ask = _ask_back(r.intent, section_id, days, start, room, found_building, ask, store, time_ask)
     return AssistantQuery(
         intent=r.intent, section_id=section_id, professor=professor,
         day=days[0] if days else None, days=days, start=start,
-        room=room, building=building, ask_back=ask, method="llm",
+        room=room, building=found_building, ask_back=ask, method="llm",
     )
 
 
