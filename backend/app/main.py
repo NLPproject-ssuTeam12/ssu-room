@@ -391,11 +391,9 @@ def post_reset():
 
 @app.post("/assistant")
 def post_assistant(body: AssistantIn):
-    """조교 질문 → 의도·정보 → 배정 함수 호출 → 설명. move는 제안만 만들고 반영하지 않는다."""
-    try:
-        cmd = assistant.read_question(body.text, body.history, store, method=body.method)
-    except NotImplementedError:
-        raise HTTPException(status_code=501, detail="언어 모델(llm) 도우미는 다음 단계에서 구현합니다. method=keyword를 쓰세요.")
+    """조교 질문 → 의도·정보 → 배정 함수 호출 → 설명. move는 제안만 만들고 반영하지 않는다.
+    method="llm"이 실패하면 키워드 방식으로 대신 처리하고 command.fallback=True (fallback_reason에 이유)."""
+    cmd = assistant.read_question(body.text, body.history, store, method=body.method)
     out = assistant.run_assistant(cmd, store)
     return {"command": dump(cmd), "section_id": cmd.section_id, **out}
 
