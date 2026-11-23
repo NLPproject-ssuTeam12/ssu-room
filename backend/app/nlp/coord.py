@@ -77,8 +77,13 @@ def cond_label(k: Conditions) -> str:
         for s, days in groups.items():
             when = "·".join(DAYN[d] for d in days)
             a.append(f"{when} {_slot_name(list(s))}" if s else f"{when}요일")
+    by_time: dict[str, list[int]] = {}       # 같은 시각은 요일을 묶는다 ("매일 15:00 전 종료", "월·수요일 17:00 전 종료")
     for eb in k.end_before:
-        a.append(f"{DAYN[eb.day]}요일 {eb.time} 전 종료")
+        by_time.setdefault(eb.time, []).append(eb.day)
+    for t, days in by_time.items():
+        days = sorted(set(days))
+        when = "매일" if days == list(range(5)) else f"{'·'.join(DAYN[d] for d in days)}요일"
+        a.append(f"{when} {t} 전 종료")
     return ", ".join(a)
 
 
@@ -157,8 +162,8 @@ def write_message(inp: MessageInput, method: Method = "keyword") -> Message:
                      if inp.reveal and inp.blocker_prof and inp.blocker_course
                      else "1차 조율. 희망 시간이 다른 강의와 겹친다. 상대 교수 이름과 강의 이름은 적지 않는다 (학과 설정).")
     elif inp.prev_conditions and not inp.prev_conditions.is_empty():
-        situation = (f"{inp.round}차 조율. 지난 회신에서 받은 조건 \"{cond_label(inp.prev_conditions)}\"을 반영한 대안을 다시 보낸다. "
-                     "조건은 따옴표 안 글자 그대로 적는다. 처음 희망도 다시 적는다. 처음 희망이 왜 안 됐는지는 모른다.")
+        situation = (f"{inp.round}차 조율. 지난 회신에서 받은 조건({cond_label(inp.prev_conditions)})을 반영한 대안을 다시 보낸다. "
+                     "조건은 \"조건(…)을\"처럼 괄호 안에 글자 그대로 적는다. 처음 희망도 다시 적는다. 처음 희망이 왜 안 됐는지는 모른다.")
     else:
         situation = (f"{inp.round}차 조율. 지난 차수 이후 바뀐 시간표를 반영한 대안을 다시 보낸다. "
                      "처음 희망도 다시 적는다. 처음 희망이 왜 안 됐는지는 모른다.")

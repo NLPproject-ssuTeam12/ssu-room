@@ -139,6 +139,14 @@ class KeywordReply(unittest.TestCase):
         self.assertIn("화요일 가능 교시", p.checks[0].why)
         self.assertEqual(coord.cond_label(k), "화 오전, 목 오후")
 
+    def test_end_before_label_groups_days(self):
+        # 같은 시각이면 요일을 묶는다. 다섯 요일 모두면 "매일" (진짜 솔버 흐름 실험 11/23에서 다섯 줄로 길게 나옴)
+        every = Conditions(end_before=[{"day": d, "time": "15:00"} for d in range(5)])
+        self.assertEqual(coord.cond_label(every), "매일 15:00 전 종료")
+        two = Conditions(end_before=[{"day": 0, "time": "17:00"}, {"day": 2, "time": "17:00"}, {"day": 4, "time": "12:00"}])
+        self.assertEqual(coord.cond_label(two), "월·수요일 17:00 전 종료, 금요일 12:00 전 종료")
+        self.assertEqual(coord.cond_label(Conditions(end_before=[{"day": 2, "time": "17:00"}])), "수요일 17:00 전 종료")
+
     def test_day_slots_one_day_means_that_day_included(self):
         # 요일 하나("목요일 오후면"): 목요일 수업만 오후면 되고 다른 하루는 자유
         a = Alternative(key="A", meetings=[Meeting(day=1, start="09:00", end="10:15", room="305"),
