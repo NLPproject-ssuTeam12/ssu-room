@@ -1,6 +1,8 @@
 """서버가 배정·조율 함수를 가져오는 유일한 곳.
 
-- 배정 함수 5개: backend/app/solver/ (패키지 자체 또는 그 안의 모듈)
+- 배정 함수 5개: backend/app/solver/ (패키지 자체 또는 그 안의 모듈).
+  단, 환경변수 SSUROOM_ENGINE=solver일 때만 본다. 기본은 가짜(stubs.py)
+  (솔버 어댑터는 DB와 분반 대응표를 정해야 쓸 수 있어서, 켜기 전에는 자동으로 잡지 않는다)
 - 조율 함수 4개: backend/app/nlp/coord.py
 같은 이름의 진짜 함수가 있으면 그걸 쓰고, 없으면 stubs.py의 가짜를 쓴다.
 함수마다 따로 판단하므로 하나씩 진짜로 바꿔 끼워도 된다.
@@ -19,6 +21,7 @@ main.py와 store.py는 stubs.py를 직접 import하지 않고 이 파일만 쓴�
 import importlib
 import importlib.util
 import inspect
+import os
 import pkgutil
 import sys
 from typing import Callable, Dict, List, Optional, Tuple
@@ -51,8 +54,15 @@ def _load(name: str, failures: List[str]):
         return None
 
 
+def use_solver() -> bool:
+    """SSUROOM_ENGINE=solver 일 때만 backend/app/solver/를 쓴다."""
+    return os.environ.get("SSUROOM_ENGINE", "").strip().lower() == "solver"
+
+
 def _solver_modules(failures: List[str]) -> List[object]:
-    """solver 패키지와 그 바로 아래 모듈들. 패키지가 없으면 빈 목록."""
+    """solver 패키지와 그 바로 아래 모듈들. 패키지가 없거나 SSUROOM_ENGINE=solver가 아니면 빈 목록."""
+    if not use_solver():
+        return []
     pkg = _load(f"{_PKG}.solver", failures)
     if pkg is None:
         return []
