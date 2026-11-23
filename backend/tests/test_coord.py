@@ -268,21 +268,45 @@ class LLMPath(unittest.TestCase):
             r = parse_reply("화요일 오후면 됩니다", alternatives=ALTS, method="llm")
         self.assertTrue(r.fallback)
 
-    def test_llm_message_that_breaks_rules_is_not_sent(self):
-        i = inp()
-        bad = write_message(i).text.replace("A  월·수 16:30~17:45 · 정보관 305", "A  월·수 오후 늦게 · 정보관 305")
-        with mock.patch.object(coord, "generate_json", return_value=coord._MessageLLM(text=bad)):
-            m = write_message(i, method="llm")
-        self.assertEqual((m.method, m.fallback), ("keyword", True))
-        self.assertIn("A안이 빠지거나 바뀜", m.problems)
-        self.assertEqual(check_message(m.text, i), [])
+    def _llm(self, body, i):
+        with mock.patch.object(coord, "generate_json", return_value=coord._MessageLLM(text=body)):
+            return write_message(i, method="llm")
 
     def test_llm_message_ok(self):
+        # 언어 모델은 설명 문단만 쓰고, 인사·제목 줄·대안·마지막 문장은 틀이 붙인다
         i = inp()
-        good = write_message(i).text.replace("안녕하세요. 학과사무실입니다.", "안녕하세요. 학과사무실 조교입니다.")
-        with mock.patch.object(coord, "generate_json", return_value=coord._MessageLLM(text=good)):
-            m = write_message(i, method="llm")
+        m = self._llm("교수님께서 희망하신 월·수 15:00이 가 교수님의 자료구조 01 분반과 겹쳐\n아래 대안 가운데 가능한 안을 여쭙습니다.", i)
         self.assertEqual((m.method, m.fallback), ("llm", False))
+        lines = m.text.splitlines()
+        self.assertEqual(lines[1], "2027-1학기 객체지향프로그래밍 02 분반 시간표 1차 조율 안내드립니다.")
+        self.assertEqual(lines[3], "교수님께서 희망하신 월·수 15:00이 가 교수님의 자료구조 01 분반과 겹쳐 아래 대안 가운데 가능한 안을 여쭙습니다.")
+        self.assertEqual(check_message(m.text, i), [])
+
+    def test_llm_message_that_breaks_rules_is_not_sent(self):
+        # 사람 평가(11/23)에서 나온 모양: 이유 지어내기, 대안 잘못 설명, 입력에 없는 시각, 희망 빠짐
+        i2 = inp(round=2, prev_conditions=Conditions(day_slots={d: ["13:30", "15:00", "16:30"] for d in range(5)}))
+        cases = [
+            (i2, "처음 희망하신 월·수 15:00 시간대에 다른 과목이 배정되어, 지난 회신의 조건(오후)을 반영했습니다.", "입력에 없는 이유를 덧붙임 ('배정되')"),
+            (i2, "조건(오후)을 반영했습니다. 처음 희망하신 월·수 15:00은 다른 강의와 겹쳤습니다.", "입력에 없는 이유를 덧붙임 ('겹')"),
+            (i2, "조건(오후)을 반영했고, 처음 희망하신 월·수 15:00도 대안 C로 포함했습니다.", "설명 문단에서 대안 A·B·C를 따로 설명함"),
+            (inp(), "희망하신 월·수 15:00이 겹쳐 월·수 16:30 등을 마련했습니다.", "설명 문단에 입력에 없는 시각을 씀 (16:30)"),
+            (inp(), "희망하신 시간이 가 교수님 강의와 겹칩니다.", "본인 희망 시간이 빠지거나 바뀜"),
+            (inp(), "  ", "설명 문단이 비었음"),
+            # 2차 채점(11/23) g08: 프롬프트 예시의 자리표시를 그대로 베낌
+            (inp(), "희망하신 월·수 15:00이 (상대 교수) 교수님의 자료구조 01 분반과 겹칩니다.", "설명 문단에 자리표시가 남음"),
+            (inp(), "희망하신 월·수 15:00이 다른 강의와 겹칩니다.", "1차인데 겹친 상대 교수·강의 이름이 빠지거나 바뀜"),
+        ]
+        for i, body, why in cases:
+            m = self._llm(body, i)
+            self.assertEqual((m.method, m.fallback), ("keyword", True), body)
+            self.assertIn(why, m.problems)
+            self.assertEqual(check_message(m.text, i), [])
+
+    def test_body_check_allows_course_letters_and_round1_overlap(self):
+        i = inp(course="C프로그래밍 01", blocker_course="AI개론 02")
+        self.assertEqual(coord.check_body("희망하신 월·수 15:00이 가 교수님의 AI개론 02 분반과 겹칩니다.", i), [])
+        i2 = inp(round=2, prev_conditions=Conditions(end_before=[{"day": 2, "time": "17:00"}]))
+        self.assertEqual(coord.check_body("지난 회신에서 주신 조건(수요일 17:00 전 종료)을 반영했습니다. 처음 희망하신 시간은 월·수 15:00입니다.", i2), [])
 
 
 @unittest.skipUnless(os.getenv("GEMINI_API_KEY"), "GEMINI_API_KEY가 없어 실제 호출은 건너뜀")

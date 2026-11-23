@@ -83,51 +83,95 @@ def cond_label(k: Conditions) -> str:
 
 
 # ---------------- 조율 메시지 ----------------
-def _template(inp: MessageInput) -> str:
+# 메시지 = 인사·제목 줄(틀) + 상황 설명 문단(틀 또는 언어 모델) + 대안 목록(틀) + 마지막 문장(틀).
+# 언어 모델은 설명 문단 하나만 쓴다. 사람 평가(11/23)에서 언어 모델이 제목 줄을 "…조율"로 끊거나,
+# 입력에 없는 이유("다른 과목이 배정되어")·틀린 대안 설명을 덧붙인 것이 나와서 나머지는 틀로 고정했다.
+def _compose(inp: MessageInput, body: list[str]) -> str:
     L = [f"{inp.professor} 교수님, 안녕하세요. 학과사무실입니다.",
          f"{inp.term} {inp.course} 분반 시간표 {inp.round}차 조율 안내드립니다.", ""]
-    if inp.round == 1:
-        other = (f"{inp.blocker_prof} 교수님의 {inp.blocker_course} 분반과"
-                 if inp.reveal and inp.blocker_prof and inp.blocker_course else "다른 강의와")
-        L.append(f"희망하신 시간({inp.wish})이 {other} 겹칩니다.")
-    else:
-        if inp.prev_conditions and not inp.prev_conditions.is_empty():
-            L.append(f"지난 회신에서 주신 조건({cond_label(inp.prev_conditions)})을 반영해 대안을 다시 드립니다.")
-        else:
-            L.append("지난 차수 이후 바뀐 시간표를 반영해 대안을 다시 드립니다.")
-        L.append(f"처음 희망하신 시간: {inp.wish}")
-    L.append("")
+    L += body + [""]
     L += [f"{a.key}  {alt_label(a)}" for a in inp.alternatives]
     L += ["", CLOSING]
     return "\n".join(L)
 
 
+def _template_body(inp: MessageInput) -> list[str]:
+    if inp.round == 1:
+        other = (f"{inp.blocker_prof} 교수님의 {inp.blocker_course} 분반과"
+                 if inp.reveal and inp.blocker_prof and inp.blocker_course else "다른 강의와")
+        return [f"희망하신 시간({inp.wish})이 {other} 겹칩니다."]
+    if inp.prev_conditions and not inp.prev_conditions.is_empty():
+        first = f"지난 회신에서 주신 조건({cond_label(inp.prev_conditions)})을 반영해 대안을 다시 드립니다."
+    else:
+        first = "지난 차수 이후 바뀐 시간표를 반영해 대안을 다시 드립니다."
+    return [first, f"처음 희망하신 시간: {inp.wish}"]
+
+
+def _template(inp: MessageInput) -> str:
+    return _compose(inp, _template_body(inp))
+
+
 class _MessageLLM(BaseModel):
-    text: str
+    text: str      # 상황 설명 문단 하나
+
+
+_TIME = re.compile(r"\d{1,2}:\d{2}")
+_ALT_TALK = re.compile(r"(?<![A-Za-z])[ABC](?![A-Za-z])")
+_REASON = re.compile(r"때문|인해|사정|공사|수리|배정되|배정이\s*어려|배정하기\s*어려|사용\s*중|중복")
+_REASON_LATER = re.compile(r"겹")      # 2·3차는 처음 희망이 왜 안 됐는지 입력에 없다
+
+
+def check_body(body: str, inp: MessageInput) -> list[str]:
+    """언어 모델이 쓴 설명 문단 검사. 하나라도 걸리면 틀 문장으로 보낸다."""
+    p = []
+    if not body.strip():
+        return ["설명 문단이 비었음"]
+    if re.search(r"[(\[<]\s*상대|<<|>>", body):
+        p.append("설명 문단에 자리표시가 남음")
+    if inp.round == 1 and inp.reveal and inp.blocker_prof and inp.blocker_course:
+        if f"{inp.blocker_prof} 교수" not in body or inp.blocker_course not in body:
+            p.append("1차인데 겹친 상대 교수·강의 이름이 빠지거나 바뀜")
+    plain = body
+    for name in (inp.course, inp.blocker_course or ""):     # "C프로그래밍 01" 같은 과목 이름 속 글자는 빼고 본다
+        if name:
+            plain = plain.replace(name, "")
+    if _ALT_TALK.search(plain):
+        p.append("설명 문단에서 대안 A·B·C를 따로 설명함")
+    allowed = set(_TIME.findall(inp.wish))
+    if inp.prev_conditions:
+        allowed |= set(_TIME.findall(cond_label(inp.prev_conditions)))
+    extra = sorted(set(_TIME.findall(body)) - allowed)
+    if extra:
+        p.append(f"설명 문단에 입력에 없는 시각을 씀 ({', '.join(extra)})")
+    m = _REASON.search(body) or (_REASON_LATER.search(body) if inp.round > 1 else None)
+    if m:
+        p.append(f"입력에 없는 이유를 덧붙임 ('{m.group(0)}')")
+    return p
 
 
 def write_message(inp: MessageInput, method: Method = "keyword") -> Message:
     if method == "keyword":
         return Message(text=_template(inp), method="keyword")
     if inp.round == 1:
-        situation = (f"희망 시간이 {inp.blocker_prof} 교수님의 {inp.blocker_course} 분반과 겹친다. 상대 교수와 강의 이름을 적는다."
+        situation = (f"1차 조율. 희망 시간이 {inp.blocker_prof} 교수님의 {inp.blocker_course} 분반과 겹친다. 상대 교수와 강의 이름을 그대로 적는다."
                      if inp.reveal and inp.blocker_prof and inp.blocker_course
-                     else "희망 시간이 다른 강의와 겹친다. 상대 교수 이름과 강의 이름은 적지 않는다 (학과 설정).")
+                     else "1차 조율. 희망 시간이 다른 강의와 겹친다. 상대 교수 이름과 강의 이름은 적지 않는다 (학과 설정).")
     elif inp.prev_conditions and not inp.prev_conditions.is_empty():
-        situation = f"지난 회신의 조건({cond_label(inp.prev_conditions)})을 반영한 대안을 다시 보낸다. 처음 희망도 다시 적는다."
+        situation = (f"{inp.round}차 조율. 지난 회신에서 받은 조건 \"{cond_label(inp.prev_conditions)}\"을 반영한 대안을 다시 보낸다. "
+                     "조건은 따옴표 안 글자 그대로 적는다. 처음 희망도 다시 적는다. 처음 희망이 왜 안 됐는지는 모른다.")
     else:
-        situation = "지난 차수 이후 바뀐 시간표를 반영한 대안을 다시 보낸다. 처음 희망도 다시 적는다."
+        situation = (f"{inp.round}차 조율. 지난 차수 이후 바뀐 시간표를 반영한 대안을 다시 보낸다. "
+                     "처음 희망도 다시 적는다. 처음 희망이 왜 안 됐는지는 모른다.")
     prompt = (load_prompt("write_message")
               .replace("<<PROFESSOR>>", inp.professor).replace("<<TERM>>", inp.term)
               .replace("<<COURSE>>", inp.course).replace("<<ROUND>>", str(inp.round))
-              .replace("<<WISH>>", inp.wish).replace("<<SITUATION>>", situation)
-              .replace("<<ALTERNATIVES>>", "\n".join(f"{a.key}  {alt_label(a)}" for a in inp.alternatives))
-              .replace("<<CLOSING>>", CLOSING))
+              .replace("<<WISH>>", inp.wish).replace("<<SITUATION>>", situation))
     try:
-        text = generate_json(prompt, _MessageLLM).text.strip()
+        body = " ".join(generate_json(prompt, _MessageLLM).text.split())   # 한 문단으로
     except LLMUnavailable as e:
         return Message(text=_template(inp), method="keyword", fallback=True, problems=[str(e)])
-    problems = check_message(text, inp)
+    text = _compose(inp, [body])
+    problems = check_body(body, inp) + check_message(text, inp)
     if problems:
         return Message(text=_template(inp), method="keyword", fallback=True, problems=problems)
     return Message(text=text, method="llm")

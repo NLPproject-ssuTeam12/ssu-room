@@ -11,8 +11,9 @@
   # 두 사람 라벨 일치도 (카파)와 서로 다른 문장 목록
   python eval/run_coord.py agree eval/labels/gold_a.csv eval/labels/gold_b.csv
 
-  # 조율 메시지: 자동 검사 결과 + 사람이 점수 매길 표(CSV)
-  python eval/run_coord.py message --method llm --repeat 3
+  # 조율 메시지: 언어 모델 글 + 틀 문장(기준선)을 섞은 사람 채점표 → 채운 뒤 방식별 집계
+  python eval/run_coord.py message --method llm
+  python eval/run_coord.py message-score eval/results/message_llm_<시각>.csv
 
 파일 모양은 docs/planning/라벨링_가이드_회신.md를 본다.
 - eval/scenarios.json        가상 조율 상황 (대안 A·B·C)
@@ -25,6 +26,7 @@ import datetime as dt
 import json
 import os
 import pathlib
+import random
 import re
 import sys
 import time
@@ -34,7 +36,8 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "backend"))
 
 from app.nlp import llm  # noqa: E402
-from app.nlp.coord import SLOT_WORDS, check_message, match_conditions, parse_reply, write_message  # noqa: E402
+from app.nlp.coord import (SLOT_WORDS, alt_label, check_message, cond_label, match_conditions,  # noqa: E402
+                           parse_reply, write_message)
 from app.nlp.coord_models import (DAYN, SLOTS, Alternative, Conditions, EndBefore, MessageInput,  # noqa: E402
                                   ReplyParse)
 
@@ -282,32 +285,90 @@ def cmd_agree(a):
 
 
 # ---------------- message ----------------
+SCORE_COLS = ["내용_맞음", "지어낸말_없음", "금지내용_없음", "자연스러움_1to5", "메모"]
+
+
+def _context(s: dict, inp: MessageInput) -> dict:
+    """채점하는 사람이 메시지와 대조할 정보."""
+    if inp.blocker_prof and inp.blocker_course:
+        other = f"{inp.blocker_prof} 교수 {inp.blocker_course}"
+        other = other if inp.reveal else f"(이름 숨김: {other}. 메시지에 나오면 안 됨)"
+    else:
+        other = ""
+    prev = cond_label(inp.prev_conditions) if inp.prev_conditions and not inp.prev_conditions.is_empty() else ""
+    return dict(상황=s["id"], 받는교수=inp.professor, 과목=inp.course, 차수=inp.round, 처음희망=inp.wish,
+                겹친상대=other if inp.round == 1 else "(2차 이후라 쓰지 않아도 됨)", 지난조건=prev,
+                대안=" / ".join(f"{x.key} {alt_label(x)}" for x in inp.alternatives))
+
+
+def _write(path: pathlib.Path, rows: list[dict]):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8-sig", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=list(rows[0]))
+        w.writeheader()
+        w.writerows(rows)
+
+
 def cmd_message(a):
+    """조율 메시지 사람 평가표를 만든다.
+    llm이면 상황마다 언어 모델 글(repeat번)과 틀 문장(기준선) 하나를 함께 넣고 섞는다. 채점표에는 방식을 적지 않는다.
+    - eval/results/message_llm_<시각>.csv : 평가번호 ↔ 방식, 자동 검사 결과 (채점이 끝날 때까지 보지 않는다)
+    - eval/labels/message_scores.csv      : 사람이 채우는 채점표 (이미 있으면 덮어쓰지 않는다)"""
     if a.method == "llm":
         os.environ.setdefault("LLM_RETRIES", "3")
     rows = []
     for s in load_scenarios().values():
         inp = scenario_input(s)
-        for k in range(a.repeat if a.method == "llm" else 1):
+        tries = [("llm", k + 1) for k in range(a.repeat)] if a.method == "llm" else []
+        if a.method == "keyword" or not a.no_baseline:
+            tries.append(("keyword", 1))
+        for method, k in tries:
             t0 = time.time()
-            m = write_message(inp, method=a.method)
-            rows.append(dict(scenario=s["id"], try_no=k + 1, method=m.method, fallback=m.fallback,
+            m = write_message(inp, method=method)
+            rows.append(dict(**_context(s, inp), want=method, try_no=k, method=m.method, fallback=m.fallback,
                              auto_problems=" | ".join(m.problems) or "", recheck=" | ".join(check_message(m.text, inp)) or "통과",
-                             seconds=round(time.time() - t0, 2), text=m.text,
-                             대안_그대로="", 희망_그대로="", 지어낸말_없음="", 금지내용_없음="", 자연스러움_1to5="", 메모=""))
-    n = len(rows)
-    print(json.dumps({"method": a.method, "메시지 수": n,
-                      "언어 모델 글 사용": sum(r["method"] == "llm" for r in rows),
-                      "검사에 걸려 틀 문장으로 대신": sum(r["fallback"] for r in rows)}, ensure_ascii=False, indent=1))
-    out = pathlib.Path(a.out)
-    out.mkdir(parents=True, exist_ok=True)
-    path = out / f"message_{a.method}_{dt.datetime.now().strftime('%Y%m%d-%H%M')}.csv"
-    with open(path, "w", encoding="utf-8-sig", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=list(rows[0]))
-        w.writeheader()
-        w.writerows(rows)
-    print(f"저장: {path}  (빈 칸은 사람이 1/0으로 채운다)")
+                             seconds=round(time.time() - t0, 2), 메시지=m.text))
+    random.Random(a.seed).shuffle(rows)
+    for i, r in enumerate(rows, 1):
+        r["평가번호"] = f"g{i:02d}"
+    ctx_cols = ["상황", "받는교수", "과목", "차수", "처음희망", "겹친상대", "지난조건", "대안"]
+    sheet = [{"평가번호": r["평가번호"], **{c: r[c] for c in ctx_cols}, "메시지": r["메시지"], **{c: "" for c in SCORE_COLS}}
+             for r in sorted(rows, key=lambda r: r["평가번호"])]
+    llm_rows = [r for r in rows if r["want"] == "llm"]
+    print(json.dumps({"method": a.method, "메시지 수": len(rows),
+                      "언어 모델로 쓴 것": len(llm_rows),
+                      "그중 검사에 걸리거나 실패해 틀 문장으로 대신": sum(r["fallback"] for r in llm_rows)}, ensure_ascii=False, indent=1))
+    key = pathlib.Path(a.out) / f"message_{a.method}_{dt.datetime.now().strftime('%Y%m%d-%H%M')}.csv"
+    _write(key, [{"평가번호": r["평가번호"], **{k: v for k, v in r.items() if k != "평가번호"}} for r in sorted(rows, key=lambda r: r["평가번호"])])
+    print(f"저장: {key}  (평가번호 ↔ 방식. 채점이 끝날 때까지 열지 않는다)")
+    scores = pathlib.Path(a.sheet)
+    if scores.exists():
+        print(f"{scores}가 이미 있어 채점표는 덮어쓰지 않았다")
+    else:
+        _write(scores, sheet)
+        print(f"채점표: {scores}  (빈 칸을 사람이 채운다. 기준: docs/planning/메시지_사람평가.md)")
     return rows
+
+
+def cmd_message_score(a):
+    """채운 채점표와 평가번호 파일을 합쳐 방식별로 센다."""
+    key = {r["평가번호"]: r for r in read_csv(a.key)}
+    by = {}
+    for r in read_csv(a.scores):
+        k = key.get(r["평가번호"])
+        if not k or not str(r.get("자연스러움_1to5", "")).strip():
+            continue
+        name = "언어 모델" if k["want"] == "llm" and k["method"] == "llm" else \
+               "언어 모델 실패 → 틀 문장" if k["want"] == "llm" else "틀 문장 (기준선)"
+        by.setdefault(name, []).append(r)
+    out = {}
+    for name, rs in by.items():
+        n = len(rs)
+        out[name] = {"개수": n, **{c: round(sum(int(r[c] or 0) for r in rs) / n, 3) for c in SCORE_COLS[:3]},
+                     "자연스러움 평균": round(sum(float(r["자연스러움_1to5"]) for r in rs) / n, 2),
+                     "문제 있던 번호": [r["평가번호"] for r in rs if "0" in (r["내용_맞음"], r["지어낸말_없음"], r["금지내용_없음"])]}
+    print(json.dumps(out, ensure_ascii=False, indent=1))
+    return out
 
 
 def main(argv=None):
@@ -329,9 +390,16 @@ def main(argv=None):
     m = sub.add_parser("message", help="조율 메시지 자동 검사 + 사람 평가표")
     m.add_argument("--method", choices=["keyword", "llm"], required=True)
     m.add_argument("--repeat", type=int, default=1, help="상황마다 몇 번 쓸지 (llm)")
+    m.add_argument("--no-baseline", action="store_true", help="llm일 때 틀 문장(기준선)을 섞지 않는다")
+    m.add_argument("--seed", type=int, default=12, help="섞는 순서")
     m.add_argument("--out", default=str(EVAL / "results"))
+    m.add_argument("--sheet", default=str(EVAL / "labels" / "message_scores.csv"))
+    ms = sub.add_parser("message-score", help="채운 메시지 채점표를 방식별로 센다")
+    ms.add_argument("key", help="eval/results/message_llm_<시각>.csv")
+    ms.add_argument("--scores", default=str(EVAL / "labels" / "message_scores.csv"))
     a = ap.parse_args(argv)
-    return {"reply": cmd_reply, "agree": cmd_agree, "message": cmd_message}[a.cmd](a)
+    return {"reply": cmd_reply, "agree": cmd_agree, "message": cmd_message,
+            "message-score": cmd_message_score}[a.cmd](a)
 
 
 if __name__ == "__main__":
