@@ -54,7 +54,7 @@ COLLECT ──POST /draft──▶ DRAFT ──POST /rounds/next──▶ ROUND 
 | `GET /settings` `POST /settings` | ✓ | ✓ | ✓ | ✓ |
 | `POST /assistant` | ✓ | ✓ | ✓ | ✓ |
 | `POST /assistant/apply` | | ✓ | ✓ | |
-| `GET /export.xlsx` | 501 (다음 단계) | | | |
+| `GET /export.xlsx` | | | | ✓ |
 
 `GET /coord`는 COLLECT에서 빈 목록 `[]`이다.
 
@@ -760,10 +760,17 @@ STUB: `reassign`·`check_rules`(문하윤).
 | 409 | FINAL | `시간표가 확정(FINAL)되어 적용할 수 없습니다.` |
 | 409 | 제안 뒤 시간표가 바뀜(다른 결정·적용) | `제안을 만든 뒤 시간표가 바뀌었습니다. 도우미에게 다시 물어봐 주세요.` |
 
-### 다음 단계에서 구현 (지금은 501)
-| 엔드포인트 | 하는 일 | 지금 응답 |
-|---|---|---|
-| `GET /export.xlsx` | 엑셀 내보내기 | 501 `엑셀 내보내기는 다음 단계에서 구현합니다.` |
+### `GET /export.xlsx`
+확정(FINAL) 시간표를 엑셀 파일로 내려받는다. FINAL 단계에서만. 함수: `backend/app/export.py`의 `timetable_rows`(시간표 → 행 목록), `write_xlsx`(행 목록 → 파일).
+
+- 응답 200: `application/vnd.openxmlformats-officedocument.spreadsheetml.sheet`, 파일 이름 `ssuroom_timetable.xlsx`.
+- 시트 `확정 시간표`:
+  - 1행: `가상/가명 데이터, SAP 실제 양식 아님(제안 양식). 교수 이름은 가명이다.`
+  - 2행 열 이름: `과목 코드`, `과목명`, `분반`, `교수`, `요일·시간`, `강의실`
+  - 3행부터 분반마다 한 행, 과목 코드 순. **MANUAL 분반도 들어간다.**
+  - `분반` = 과목 코드 끝 두 자리(+ 재수강 표시). `교수` = 가명(없으면 `담당 미정`). `요일·시간` = `화 10:30~11:45 / 목 10:30~11:45` (칸이 없으면 `미배정`). `강의실`이 없으면 `미정`.
+- 409: FINAL 전. `확정(FINAL)한 뒤에 내보낼 수 있습니다. 지금 단계: ROUND`
+- 지금은 서버 메모리의 시간표를 쓴다. 하윤 DB로 옮기면 `timetable_rows`만 바꾼다(`v_schedule`).
 
 ---
 
