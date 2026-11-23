@@ -14,7 +14,7 @@
 - 데이터 묶음: 환경변수 `DATA_SET` (기본 `real`) → `data/private/<DATA_SET>/` 의 JSON을 읽는다.
   `real`은 `python backend/tools/import_real.py --src <원본 폴더>` 로 만든다. 이 폴더는 커밋하지 않는다.
 - 상태는 서버 메모리에만 있다. 서버를 다시 켜거나 `POST /reset` 하면 처음으로 돌아간다. (DB는 나중에)
-- 테스트: `python -m pytest backend/tests -q`
+- 테스트: `python -m pytest backend/tests -q` (backend/ 안에서는 `python -m pytest tests -q`)
 
 ## 데이터 안내 (화면에 표시할 것)
 
