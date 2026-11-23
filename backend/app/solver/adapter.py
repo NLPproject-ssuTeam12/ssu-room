@@ -16,7 +16,7 @@ from typing import Dict, Iterable, List, Optional, Tuple, Union
 
 from ..contracts import (
     DAYS, Alternative, Assignment, Block, Conditions, Meeting, Room, Section, Timetable, Wish, conditions_json, dump,
-    parse,
+    parse, set_place,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -106,20 +106,19 @@ class SectionMap:
 def assignments_from_db(start: Dict[Tuple[int, int, int], Tuple[int, int]], ks: Dict[Tuple[int, int, int], int],
                         slots: SlotIndex, rooms: RoomIndex, sections: SectionMap) -> Dict[str, Assignment]:
     """솔버 배정 {(과목, 분반, 회차): (시작 칸, 강의실)} + {키: 칸 수} → 서버 분반 id별 Assignment.
-    서버 Assignment는 강의실이 하나라 첫 회차(요일 순)의 강의실을 쓰고, 회차마다 다르면 reason에 적는다.
+    회차마다 강의실은 Block.room에 그대로 넣는다 (Assignment.room = 첫 회차(요일 순)의 강의실, 대표 강의실).
     대응표에 없는 분반은 건너뛴다."""
     per: Dict[str, List[Tuple[Block, str]]] = {}
     for (cid, sec, _ss), (sid_slot, room_id) in start.items():
         sid = sections.sid_of.get((cid, sec))
         if sid is None:
             continue
-        per.setdefault(sid, []).append((slots.block(sid_slot, ks[(cid, sec, _ss)]), rooms.name_of[room_id]))
+        b = slots.block(sid_slot, ks[(cid, sec, _ss)])
+        per.setdefault(sid, []).append(b.model_copy(update={"room": rooms.name_of[room_id]}))
     out = {}
-    for sid, items in per.items():
-        items.sort(key=lambda br: (DAYS.index(br[0].day), br[0].start))
-        names = list(dict.fromkeys(r for _, r in items))
-        out[sid] = Assignment(section_id=sid, blocks=[b for b, _ in items], room=names[0], status="DONE",
-                              reason=None if len(names) == 1 else f"회차마다 강의실이 다름: {', '.join(names)}")
+    for sid, blocks in per.items():
+        blocks.sort(key=lambda b: (DAYS.index(b.day), b.start))
+        out[sid] = Assignment(section_id=sid, blocks=blocks, room=blocks[0].room, status="DONE")
     return out
 
 
@@ -231,15 +230,15 @@ class SolverAdapter:
             if not alts:
                 return tt
             choice = alts[0]
-        blocks, room = [], None
+        blocks = []
         for m in choice.meetings:
             sid = self.slots.id_of[(DAYS[m.day], m.start)]
             k = next(n for n in range(1, 4) if self.slots.end(sid, n) == m.end)
-            blocks.append(Block(day=DAYS[m.day], start=m.start, slots=k))
-            room = room or m.room
+            blocks.append(Block(day=DAYS[m.day], start=m.start, slots=k, room=m.room))   # 수업마다 강의실 유지
         for a in tt.assignments:
             if a.section_id == section_id:
-                a.blocks, a.room, a.status, a.reason = blocks, room, "DONE", None
+                set_place(a, blocks)
+                a.status, a.reason = "DONE", None
         return tt
 
 

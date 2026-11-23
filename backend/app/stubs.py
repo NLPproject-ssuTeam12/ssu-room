@@ -15,7 +15,8 @@ from typing import List, Literal, Optional, Tuple, Union
 from .contracts import (
     DAYN, DAYS, STARTS, Alternative, Assignment, Block, Conditions, EndBefore, Message, MessageInput,
     PickCheck, Proposal, ReplyParse, Room, Section, Timetable, Violation, WhatIfResult, Wish,
-    alternative, as_day_slots, dump, late_penalty, meetings_to_blocks, no_long_at_1800, parse,
+    alternative, as_day_slots, block_room, dump, late_penalty, meetings_to_blocks, no_long_at_1800, parse,
+    set_place, set_room,
 )
 
 Method = Literal["keyword", "llm"]
@@ -81,16 +82,17 @@ def _data() -> dict:
 
 def check_rules(timetable: Timetable) -> List[Violation]:
     """STUB: 담당 문하윤
-    배정 전체 → 하드 규칙 위반 목록. 가짜는 '강의실 겹침'만 본다."""
+    배정 전체 → 하드 규칙 위반 목록. 가짜는 '강의실 겹침'만 본다 (수업마다 그 수업의 강의실로)."""
     out = []
-    items = [(a, b) for a in timetable.assignments if a.room for b in a.blocks]
-    for i, (a1, b1) in enumerate(items):
-        for a2, b2 in items[i + 1:]:
-            if a1.section_id != a2.section_id and a1.room == a2.room and _overlap(b1, b2):
+    items = [(a, b, block_room(a, b)) for a in timetable.assignments for b in a.blocks]
+    items = [x for x in items if x[2]]
+    for i, (a1, b1, r1) in enumerate(items):
+        for a2, b2, r2 in items[i + 1:]:
+            if a1.section_id != a2.section_id and r1 == r2 and _overlap(b1, b2):
                 out.append(Violation(
                     rule="강의실 겹침",
                     section_ids=[a1.section_id, a2.section_id],
-                    detail=f"{a1.room} {_block_text(b1)} / {_block_text(b2)}",
+                    detail=f"{r1} {_block_text(b1)} / {_block_text(b2)}",
                 ))
     return out
 
@@ -127,7 +129,7 @@ def make_draft(sections: List[Section], wishes: List[Wish], rooms: List[Room]) -
         for a in tt.assignments:
             for b in a.blocks:
                 for c in _cells(b):
-                    busy.setdefault((a.room, c), a.section_id)
+                    busy.setdefault((block_room(a, b), c), a.section_id)
         picked = {sid for sid, _ in candidates}
         for a in tt.assignments:
             if len(candidates) >= 3:
@@ -137,7 +139,7 @@ def make_draft(sections: List[Section], wishes: List[Wish], rooms: List[Room]) -
                 continue
             used = {c for b in a.blocks for c in _cells(b)}
             for c, v in sorted(w.cells.items()):
-                other = busy.get((a.room, c))
+                other = busy.get((a.room, c))   # 대표 강의실 기준 (가짜 값)
                 if v == "PREFER" and c not in used and other and other != a.section_id:
                     other_name = sec[other].name if other in sec else other
                     candidates.append((a.section_id,
@@ -160,12 +162,13 @@ def _shift(blocks: List[Block], step: int) -> Optional[List[Block]]:
         j = STARTS.index(b.start) + step
         if j < 0 or j + b.slots > len(STARTS):
             return None
-        out.append(Block(day=b.day, start=STARTS[j], slots=b.slots))
+        out.append(Block(day=b.day, start=STARTS[j], slots=b.slots, room=b.room))
     return out
 
 
 def _move_day(blocks: List[Block], step: int) -> List[Block]:
-    moved = [Block(day=DAYS[(DAYS.index(b.day) + step) % 5], start=b.start, slots=b.slots) for b in blocks]
+    moved = [Block(day=DAYS[(DAYS.index(b.day) + step) % 5], start=b.start, slots=b.slots, room=b.room)
+             for b in blocks]
     return sorted(moved, key=lambda b: DAYS.index(b.day))   # 요일 순 (월→금)
 
 
@@ -212,7 +215,7 @@ def _slot_starts(b: Block) -> List[str]:
 def make_alternatives(section_id: str, conditions: Optional[Conditions] = None) -> List[Alternative]:
     """STUB: 담당 문하윤
     밀린 분반 (+ 조건) → 대안 A·B·C.
-    가짜: 초안 자리에서 같은 강의실로 한 칸·두 칸 뒤, 같은 시간 다른 강의실 순으로 만들고
+    가짜: 초안 자리에서 같은 강의실(수업마다 지금 강의실)로 한 칸·두 칸 뒤, 같은 시간 다른 강의실 순으로 만들고
     조건이 있으면 맞는 것만 남긴다. 초안에서 같은 강의실을 쓰는 다른 분반과 겹치는 자리는 뺀다
     (교수·학년 겹침은 보지 않는다).
     시간 규칙: 18:00 시작 연강은 만들지 않는다(하드). 19:30 교시는 감점(late_penalty)이라
@@ -238,24 +241,25 @@ def make_alternatives(section_id: str, conditions: Optional[Conditions] = None) 
         if blocks:
             cands.extend((blocks, r) for r in rooms)
 
-    add(_shift(cur.blocks, 1), [cur.room])
-    add(_shift(cur.blocks, 2), [cur.room])
+    same = [None]   # None = 수업마다 지금 강의실 그대로 (Block.room)
+    add(_shift(cur.blocks, 1), same)
+    add(_shift(cur.blocks, 2), same)
     add(cur.blocks, other_ids)
     for step in (-1, -2, 3, 4):
-        add(_shift(cur.blocks, step), [cur.room])
+        add(_shift(cur.blocks, step), same)
     for step in (1, 2, -1, -2):
         add(_shift(cur.blocks, step), other_ids)
     for dstep in (1, 2, 3, 4):
         for step in (0, 1, -1):
-            add(_shift(_move_day(cur.blocks, dstep), step), [cur.room] + other_ids)
+            add(_shift(_move_day(cur.blocks, dstep), step), same + other_ids)
 
     def room_busy(blocks: List[Block], room: Optional[str]) -> bool:
-        return any(a.section_id != section_id and a.room == room and _overlap(b, x)
+        return any(a.section_id != section_id and block_room(a, b) == (room or x.room) and _overlap(b, x)
                    for a in d["timetable"].assignments for b in a.blocks for x in blocks)
 
     ok, seen = [], set()
     for blocks, room in cands:
-        key = (tuple((b.day, b.start, b.slots) for b in blocks), room)
+        key = (tuple((b.day, b.start, b.slots, room or b.room) for b in blocks),)
         if key in seen or not no_long_at_1800(blocks):
             continue
         if not _fits(blocks, conditions)[0] or room_busy(blocks, room):
@@ -276,10 +280,11 @@ def reassign(timetable: Timetable, section_id: str, choice: Union[Alternative, C
         if not alts:
             return tt
         choice = alts[0]
-    blocks, room = meetings_to_blocks(choice.meetings)
+    blocks, _ = meetings_to_blocks(choice.meetings)
     for a in tt.assignments:
         if a.section_id == section_id:
-            a.blocks, a.room, a.status, a.reason = blocks, room, "DONE", None
+            set_place(a, blocks)   # 수업마다 강의실 유지
+            a.status, a.reason = "DONE", None
     return tt
 
 
@@ -295,7 +300,8 @@ def what_if(timetable: Timetable, change: dict) -> dict:
     kind = change.get("kind", "move")
     changed: List[str] = []
     if kind == "room_off":
-        changed = [a.section_id for a in tt.assignments if a.room == change.get("room")]
+        changed = [a.section_id for a in tt.assignments
+                   if any(block_room(a, b) == change.get("room") for b in a.blocks)]
     elif kind == "free":
         probe = Block(day=change["day"], start=change["start"], slots=1)
         changed = [a.section_id for a in tt.assignments if any(_overlap(b, probe) for b in a.blocks)]
@@ -305,12 +311,14 @@ def what_if(timetable: Timetable, change: dict) -> dict:
         if target is not None and target.blocks:
             first = target.blocks[0]
             target.blocks[0] = Block(day=change.get("day", first.day), start=change.get("start", first.start),
-                                     slots=first.slots)
+                                     slots=first.slots, room=first.room)
             if change.get("room"):
-                target.room = change["room"]
+                set_room(target, change["room"])
+            moved = target.blocks[0]
             changed = [sid] + [a.section_id for a in tt.assignments
-                               if a.section_id != sid and a.room == target.room
-                               and any(_overlap(b, target.blocks[0]) for b in a.blocks)]
+                               if a.section_id != sid
+                               and any(block_room(a, b) == block_room(target, moved) and _overlap(b, moved)
+                                       for b in a.blocks)]
     return dump(WhatIfResult(changed=changed, violations=len(check_rules(tt))))
 
 

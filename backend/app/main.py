@@ -18,7 +18,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from . import engine, export
-from .contracts import Alternative, Key, Timetable, Wish, fix_conditions, dump, meetings_to_blocks, parse
+from .contracts import Alternative, Key, Timetable, Wish, fix_conditions, dump, meetings_to_blocks, parse, set_place
 from .nlp import assistant
 from .store import MAX_ROUND, store
 
@@ -129,10 +129,10 @@ def _coord_out(item: dict) -> dict:
 def _with_alternative(tt: Timetable, sid: str, alt: Alternative) -> Timetable:
     """그 분반만 대안 자리로 바꾼 사본 (다른 분반은 그대로). 반영하지 않는다."""
     out = parse(Timetable, dump(tt))
-    blocks, room = meetings_to_blocks(alt.meetings)
+    blocks, _ = meetings_to_blocks(alt.meetings)
     for a in out.assignments:
         if a.section_id == sid:
-            a.blocks, a.room = blocks, room
+            set_place(a, blocks)   # 수업마다 강의실 유지
     return out
 
 

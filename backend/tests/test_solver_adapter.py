@@ -84,23 +84,33 @@ def test_draft_to_blocks_matches_db(adapter):
     # DB 뷰(v_schedule)에서 바로 읽은 값과 변환 결과가 같아야 한다
     rows = adapter.con.execute("""SELECT course_id, section_no, day, start_time, end_time, building, room_no
                                   FROM v_schedule WHERE timetable_id=?""", (adapter.timetable_id,)).fetchall()
-    want, want_rooms = {}, {}
+    want = {}
     for cid, sec, day, st, en, b, no in rows:
-        want.setdefault(SECTIONS[(cid, sec)], set()).add((day, st, en))
-        want_rooms.setdefault(SECTIONS[(cid, sec)], set()).add(f"{b} {no}")
+        want.setdefault(SECTIONS[(cid, sec)], set()).add((day, st, en, f"{b} {no}"))
     for sid, a in by_id.items():
-        assert {(b.day, b.start, _end(b.start, b.slots)) for b in a.blocks} == want[sid], sid
+        # 수업(회차)마다 시각과 강의실이 DB와 같다. 대표 강의실 = 첫 수업의 강의실
+        assert {(b.day, b.start, _end(b.start, b.slots), b.room) for b in a.blocks} == want[sid], sid
         assert all(b.start in STARTS for b in a.blocks)
-        # 서버 Assignment는 강의실이 하나: 첫 회차의 강의실. 회차마다 다르면 reason에 모두 적는다
-        assert a.room in want_rooms[sid]
-        if len(want_rooms[sid]) > 1:
-            assert a.reason and all(r in a.reason for r in want_rooms[sid]), sid
+        assert a.room == a.blocks[0].room and a.reason is None
     # 모양: 주 2회 = 1칸×2, 주 1회 연강(MUST) = 2칸×1, 실습실이 필요한 분반은 실습실
     assert sorted(b.slots for b in by_id["S1-01"].blocks) == [1, 1]
     assert [b.slots for b in by_id["S4-01"].blocks] == [2]
     assert by_id["S2-02"].room == "정보과학관 21501"
     # 불가 칸에는 놓지 않는다
     assert not any((b.day, b.start) in {("월", "09:00"), ("수", "09:00")} for b in by_id["S1-01"].blocks)
+
+
+def test_rooms_differ_per_meeting_go_to_block_room(adapter):
+    """솔버가 한 분반의 두 회차를 다른 강의실에 놓은 경우 (예: 화 문화관 03407, 목 정보과학관 21304)."""
+    from backend.app.solver.adapter import assignments_from_db
+    sl, rm = adapter.slots, adapter.rooms
+    tue, thu = sl.id_of[("화", "13:30")], sl.id_of[("목", "13:30")]
+    start = {(1, 1, 1): (thu, rm.id_of["정보과학관 21304"]), (1, 1, 0): (tue, rm.id_of["문화관 03407"])}
+    ks = {(1, 1, 0): 1, (1, 1, 1): 1}
+    a = assignments_from_db(start, ks, sl, rm, adapter.sections)["S1-01"]
+    assert [(b.day, b.start, b.room) for b in a.blocks] == [("화", "13:30", "문화관 03407"),
+                                                            ("목", "13:30", "정보과학관 21304")]
+    assert a.room == "문화관 03407" and a.reason is None
 
 
 def test_unplaced_becomes_coord(adapter, monkeypatch):
