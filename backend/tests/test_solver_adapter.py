@@ -225,8 +225,21 @@ def test_engine_uses_adapter_when_asked(reload_engine, adapter):
     assert (src["make_draft"], src["make_alternatives"], src["reassign"]) == (mod, mod, mod)
     assert src["check_rules"] == "stub" and src["what_if"] == "stub"      # 솔버에 없는 함수는 가짜
     assert engine.load_warnings() == []
+    reload_engine.setenv("SSUROOM_DB", str(Path(__file__).parent / "없는파일.db"))   # 시드가 없을 때
     with pytest.raises(RuntimeError, match="configure"):
         engine.make_draft([], [], [])
     ad.configure(adapter)
     tt, delayed = engine.make_draft([], [], [])
     assert {a.section_id for a in tt.assignments} == set(SECTIONS.values())
+
+
+def test_options_that_only_swap_sessions_are_one(adapter):
+    """솔버가 회차 번호만 바꾼 안(1회차 월·2회차 수 ↔ 1회차 수·2회차 월)을 따로 내면 하나로 본다."""
+    sl, rm = adapter.slots, adapter.rooms
+    mon, wed, tue = sl.id_of[("월", "12:00")], sl.id_of[("수", "10:30")], sl.id_of[("화", "12:00")]
+    r = rm.id_of["정보과학관 21303"]
+    ks = {(1, 1): 1, (1, 2): 1}
+    a = {"placements": {(1, 1): (wed, r), (1, 2): (mon, r)}, "ks": ks}
+    b = {"placements": {(1, 1): (mon, r), (1, 2): (wed, r)}, "ks": ks}
+    c = {"placements": {(1, 1): (tue, r), (1, 2): (wed, r)}, "ks": ks}
+    assert ad.unique_options([a, b, c], 1, sl, rm) == [a, c]
