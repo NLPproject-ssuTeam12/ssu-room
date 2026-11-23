@@ -12,15 +12,17 @@ import logging
 import os
 from typing import List, Literal, Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Response
 from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-from . import engine
+from . import engine, export
 from .contracts import Alternative, Key, Timetable, Wish, fix_conditions, dump, meetings_to_blocks, parse
 from .nlp import assistant
 from .store import MAX_ROUND, store
+
+XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 log = logging.getLogger("uvicorn.error")
 
@@ -426,9 +428,15 @@ def post_assistant_apply(body: ApplyIn):
     return {"decision": rec, "summary": prop["summary"], "violations": len(engine.check_rules(tt))}
 
 
-# ---------- 다음 단계에서 구현 ----------
+# ---------- 엑셀 내보내기 ----------
 
 
 @app.get("/export.xlsx")
 def get_export():
-    raise HTTPException(status_code=501, detail="엑셀 내보내기는 다음 단계에서 구현합니다.")
+    """확정(FINAL) 시간표를 엑셀로. MANUAL 분반 포함. 가상/가명 데이터, SAP 실제 양식이 아닌 제안 양식."""
+    if store.stage != "FINAL" or store.timetable is None:
+        raise _conflict(f"확정(FINAL)한 뒤에 내보낼 수 있습니다. 지금 단계: {store.stage}")
+    data = export.write_xlsx(export.timetable_rows(_normalize(parse(Timetable, dump(store.timetable))),
+                                                   store.list_sections()))
+    return Response(content=data, media_type=XLSX,
+                    headers={"Content-Disposition": 'attachment; filename="ssuroom_timetable.xlsx"'})

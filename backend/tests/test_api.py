@@ -698,3 +698,57 @@ def test_stub_alternatives_late_slot_last_and_no_long_at_1800(client):
         checked += 1
         late_seen += any(pens)
     assert checked > 50
+
+
+# ---------- 엑셀 내보내기 ----------
+
+def test_export_needs_final(client):
+    assert client.get("/export.xlsx").status_code == 409          # COLLECT
+    start_round(client)
+    r = client.get("/export.xlsx")
+    assert r.status_code == 409 and "FINAL" in r.json()["detail"]  # ROUND
+
+
+def test_export_xlsx_opens_with_columns_and_rows(client):
+    import io
+
+    from openpyxl import load_workbook
+
+    from backend.app.export import COLUMNS, NOTICE
+    start_round(client)
+    assert client.post("/finalize").status_code == 200
+    r = client.get("/export.xlsx")
+    assert r.status_code == 200, r.text
+    assert r.headers["content-type"].startswith("application/vnd.openxmlformats-officedocument.spreadsheetml")
+    assert "ssuroom_timetable.xlsx" in r.headers["content-disposition"]
+    ws = load_workbook(io.BytesIO(r.content)).active
+    rows = list(ws.iter_rows(values_only=True))
+    assert rows[0][0] == NOTICE and "가상/가명" in rows[0][0] and "SAP 실제 양식 아님" in rows[0][0]
+    assert list(rows[1]) == COLUMNS
+    data = rows[2:]
+    tt = client.get("/timetable").json()["assignments"]
+    assert len(data) == len(tt) == len(sections(client))            # 분반마다 한 행, MANUAL 포함
+    manual = {s["code"] for s in sections(client) if s["shape"] == "MANUAL"}
+    assert manual and manual <= {row[0] for row in data}
+    for row in data:
+        assert row[3] is None or ALIAS.match(row[3]) or row[3] == "담당 미정"   # 교수는 가명
+        assert row[4]                                                          # 요일·시간 칸이 비지 않음
+
+
+def test_export_rows_function():
+    from backend.app.contracts import Assignment, Block, Section, Timetable
+    from backend.app.export import timetable_rows
+    secs = [Section(id="X-02", code="2150000002", name="가상과목", weekly_blocks=2, professor="교수01"),
+            Section(id="Y-01", code="2150000101", name="다른과목", division="(공통-재수강)", weekly_blocks=2)]
+    tt = Timetable(assignments=[
+        Assignment(section_id="X-02", blocks=[Block(day="목", start="13:30", slots=1),
+                                              Block(day="화", start="13:30", slots=1)], room="문화관 03407"),
+        Assignment(section_id="Y-01", blocks=[], status="COORD"),
+        Assignment(section_id="없는분반", blocks=[]),
+    ])
+    assert timetable_rows(tt, secs) == [
+        {"과목 코드": "2150000002", "과목명": "가상과목", "분반": "02", "교수": "교수01",
+         "요일·시간": "화 13:30~14:45 / 목 13:30~14:45", "강의실": "문화관 03407"},
+        {"과목 코드": "2150000101", "과목명": "다른과목", "분반": "01 (공통-재수강)", "교수": "담당 미정",
+         "요일·시간": "미배정", "강의실": "미정"},
+    ]
