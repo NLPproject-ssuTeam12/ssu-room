@@ -19,8 +19,12 @@ def shape(con):
     views = {n: norm_sql(s) for n, s in con.execute("select name, sql from sqlite_master where type='view'")}
     return out, views
 
-def compare(label, con):
-    new = sqlite3.connect(":memory:"); new.executescript(open(P("schema.sql"), encoding="utf-8").read())
+V8 = P("archive", "schema_v8.sql")      # 005까지 적용한 모양 (006 전)
+M6 = P("migrations", "006_20261124_section.sql")
+
+def compare(label, con, target=None):
+    """con 이 target(기본: 최종 schema.sql)과 같은 모양인지"""
+    new = sqlite3.connect(":memory:"); new.executescript(open(target or P("schema.sql"), encoding="utf-8").read())
     a, va = shape(con); b, vb = shape(new)
     diff = [t for t in b if a.get(t) != b[t]]
     print(f"  [{label}] 테이블 {len(a)}개 vs {len(b)}개, 목록 동일 {set(a) == set(b)}, 모양이 다른 테이블 {diff if diff else '없음'}, 뷰 동일 {va == vb}")
@@ -59,7 +63,7 @@ def build_v3():
 def counts(con, tabs): return {t: con.execute(f"select count(*) from {t}").fetchone()[0] for t in tabs}
 KEEP = ("response_slot", "proposal", "reply_interpretation", "assignment", "course", "term")
 
-print("=== 경로 1: schema_v3 → 001 → 002 → 003 → 004 → 005")
+print("=== 경로 1: schema_v3 → 001 → 002 → 003 → 004 → 005 (→ schema_v8) → 006")
 old = build_v3(); before = counts(old, KEEP); before["response_slot"] -= 1   # AVOID 1개는 003에서 지워지는 게 정상
 run(P("migrations","001_20261121_feedback.sql"), old)
 run(P("migrations","002_20261122_phase_other_request.sql"), old)
@@ -67,7 +71,7 @@ run(P("migrations","003_20261122_lab_binary_no_avoid.sql"), old)
 old.execute("UPDATE term SET phase='ROUND2', phase_changed_at='2026-11-22 10:00:00' WHERE id=1"); old.commit()   # 004 전에 진행 중이던 학기
 run(P("migrations","004_20261122_phase_round3.sql"), old)
 run(P("migrations","005_20261124_reply.sql"), old)
-ok1 = compare("001~005 적용 후", old)
+ok1 = compare("001~005 적용 후 = schema_v8", old, V8)
 print("  행 수 보존:", before == counts(old, KEEP), "| 응답 수:", old.execute("select count(*) from course_response").fetchone()[0])
 print("  기타 요청 옮김:", old.execute("select id, response_id, body, status from other_request").fetchall())
 print("  prefer_only:", old.execute("select id, prefer_only from course_response order by id").fetchall())
@@ -83,8 +87,10 @@ for bad in ["INSERT INTO term(id,year,semester,grid_id,phase) VALUES (9,2027,'1'
             "INSERT INTO response_slot VALUES (101,1,'AVOID')"]:
     try: old.execute(bad); print("  거부 안 됨!!", bad[:60])
     except sqlite3.IntegrityError as e: print("  새 규칙 거부 OK:", str(e)[:60])
+run(M6, old)
+ok1 = compare("001~006 적용 후", old) and ok1
 
-print("\n=== 경로 2: schema_v4(001까지 적용된 모양)에서 002 → 003 → 004 → 005")
+print("\n=== 경로 2: schema_v4(001까지 적용된 모양)에서 002 → 003 → 004 → 005 → 006")
 v4 = sqlite3.connect(":memory:"); v4.executescript(open(P("archive","schema_v4.sql"), encoding="utf-8").read()); seed(v4)
 v4.execute("INSERT INTO course_response(id,round_id,course_id,professor_id,lab_requirement,single_day_pref,note) VALUES (100,1,10,2,'PREFER','PREFER','메모')")
 v4.execute("INSERT INTO request_item(response_id,type,value_int) VALUES (100,'SECTION_COUNT',2)"); v4.commit()
@@ -92,9 +98,11 @@ run(P("migrations","002_20261122_phase_other_request.sql"), v4)
 run(P("migrations","003_20261122_lab_binary_no_avoid.sql"), v4)
 run(P("migrations","004_20261122_phase_round3.sql"), v4)
 run(P("migrations","005_20261124_reply.sql"), v4)
-ok2 = compare("v4 + 002~005", v4)
+ok2 = compare("v4 + 002~005 = schema_v8", v4, V8)
 print("  응답:", v4.execute("select id, professor_id, lab_requirement, single_day_pref, prefer_only from course_response").fetchall(), "| 기타 요청:", v4.execute("select body, status from other_request").fetchall())
-print("\n=== 경로 3: schema_v7(004까지 적용된 모양)에서 005")
+run(M6, v4)
+ok2 = compare("v4 + 002~006", v4) and ok2
+print("\n=== 경로 3: schema_v7(004까지 적용된 모양)에서 005 → 006")
 def build_v7():
     v7 = sqlite3.connect(":memory:"); v7.executescript(open(P("archive","schema_v7.sql"), encoding="utf-8").read()); seed(v7); q = v7.execute
     q("INSERT INTO solver_run(id,round_id,status) VALUES (1,1,'OPTIMAL')")
@@ -109,7 +117,7 @@ def build_v7():
 
 v7 = build_v7(); before7 = counts(v7, ("proposal", "proposal_option", "message", "reply_interpretation"))
 run(P("migrations","005_20261124_reply.sql"), v7)
-ok3 = compare("v7 + 005", v7)
+ok3 = compare("v7 + 005 = schema_v8", v7, V8)
 keep3 = before7 == counts(v7, ("proposal", "proposal_option", "message", "reply_interpretation"))
 print("  행 수 보존:", keep3)
 st = v7.execute("select id, course_id, section_no, reason, status from proposal order by id").fetchall()
@@ -140,6 +148,9 @@ for bad in ["UPDATE proposal SET status='WAITING' WHERE id=1",
     try: v7.execute(bad); print("  거부 안 됨!!", bad[:60]); ok3 = False
     except sqlite3.IntegrityError as e: print("  새 규칙 거부 OK:", str(e)[:60])
 
+run(M6, v7)
+ok3 = compare("v7 + 005 + 006", v7) and ok3
+
 print("\n=== 경로 4: 목록 밖 status 가 있으면 005 가 멈추고 데이터는 그대로")
 v7b = build_v7(); v7b.execute("UPDATE proposal SET status='DONE' WHERE id=3"); v7b.commit()
 try:
@@ -153,4 +164,49 @@ except sqlite3.IntegrityError as e:
           "| 분반 status 없음:", "status" not in tcols)
     ok4 = left == [(1, "WAITING"), (2, None), (3, "DONE")] and "reply_to_id" not in cols and "status" not in tcols
 
-print("\n결과:", "모두 통과" if ok1 and ok2 and ok3 and ok4 else "실패")
+print("\n=== 경로 5: schema_v8(005까지 적용된 모양)에서 006 — 분반 인원, 삭제된 칸, 희망 건물 하나")
+def build_v8():
+    v8 = sqlite3.connect(":memory:"); v8.executescript(open(V8, encoding="utf-8").read()); seed(v8); q = v8.execute
+    q("INSERT INTO building VALUES (2,'건물2'),(3,'건물3')")
+    q("INSERT INTO user(id,role,name,department_id,password_hash) VALUES (4,'PROF','교수4',1,'x'),(5,'PROF','교수5',1,'x')")
+    # 과목 10(40명): 분반 2개 지정 → 20명씩 / 11(40명): 분반 행 없음 → 1분반 40명 생성
+    # 12(인원 없음): 행 만들지 않음 / 13(45명): 분반 2개 → 23명씩(올림)
+    q("""INSERT INTO course(id,term_id,department_id,name,professor_id,expected_enrollment,session_count,slots_per_session)
+         VALUES (12,1,1,'인원 미정',2,NULL,2,1),(13,1,1,'자료구조',4,45,2,1)""")
+    q("INSERT INTO course_section VALUES (10,1,2),(10,2,3),(13,1,4),(13,2,5)")
+    q("""INSERT INTO course_response(id,round_id,course_id,professor_id,lab_requirement,single_day_pref,prefer_only,language)
+         VALUES (100,1,10,2,1,'MUST',1,'영어'),(101,1,11,3,0,'NONE',0,NULL)""")
+    q("INSERT INTO response_slot VALUES (100,1,'PREFER'),(100,2,'BLOCK')")
+    q("INSERT INTO request_item(response_id,type,value_int) VALUES (100,'SECTION_COUNT',2)")
+    # 교수2: 1순위 건물2, 2순위 건물1 → 건물2 / 교수3: 2순위만 건물3 → 건물3 / 교수4: 1순위 둘(건물3, 건물1) → 번호 작은 건물1
+    q("INSERT INTO professor_building_pref VALUES (2,1,2),(2,2,1),(3,3,2),(4,3,1),(4,1,1)")
+    v8.commit(); return v8
+
+v8 = build_v8(); keep8 = ("course", "course_response", "response_slot", "request_item", "user", "building")
+before8 = counts(v8, keep8)
+run(M6, v8)
+ok5 = compare("v8 + 006", v8)
+same = before8 == counts(v8, keep8); print("  행 수 보존(과목·응답·칸·요청):", same)
+secs8 = v8.execute("select course_id, section_no, professor_id, enrollment from course_section order by 1,2").fetchall()
+print("  분반 인원:", secs8)
+want8 = [(10, 1, 2, 20), (10, 2, 3, 20), (11, 1, 3, 40), (13, 1, 4, 23), (13, 2, 5, 23)]
+bld8 = v8.execute("select professor_id, building_id from professor_building_pref order by 1").fetchall()
+print("  희망 건물(교수당 하나):", bld8)
+cr8 = v8.execute("select id, lab_requirement, single_day_pref from course_response order by id").fetchall()
+print("  응답(실습실·연강 그대로):", cr8)
+cols8 = {t: [r[1] for r in v8.execute(f"pragma table_info({t})")] for t in ("course", "course_response")}
+gone = "expected_enrollment" not in cols8["course"] and not {"prefer_only", "language"} & set(cols8["course_response"])
+print("  삭제된 칸 없음:", gone)
+ok5 = ok5 and same and secs8 == want8 and bld8 == [(2, 2), (3, 3), (4, 1)] and cr8 == [(100, 1, "MUST"), (101, 0, "NONE")] and gone
+for bad in ["UPDATE course_section SET enrollment=0 WHERE course_id=10 AND section_no=1",
+            "INSERT INTO professor_building_pref VALUES (2,3)",
+            "INSERT INTO professor_building_pref(professor_id) VALUES (5)",
+            "INSERT INTO professor_building_pref VALUES (5,99)"]:
+    try: v8.execute(bad); print("  거부 안 됨!!", bad[:60]); ok5 = False
+    except sqlite3.IntegrityError as e: print("  새 규칙 거부 OK:", str(e)[:60])
+for bad in ["INSERT INTO course(id,term_id,name,professor_id,expected_enrollment) VALUES (20,1,'x',2,30)",
+            "UPDATE course_response SET prefer_only=1", "UPDATE course_response SET language='한국어'"]:
+    try: v8.execute(bad); print("  없앤 칸에 써짐!!", bad[:60]); ok5 = False
+    except sqlite3.OperationalError as e: print("  없앤 칸 OK:", str(e)[:60])
+
+print("\n결과:", "모두 통과" if ok1 and ok2 and ok3 and ok4 and ok5 else "실패")

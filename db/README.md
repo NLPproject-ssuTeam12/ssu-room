@@ -14,6 +14,7 @@ SSU:room의 SQLite 스키마, 변경 SQL, 연결·단계 관리 함수입니다.
 | `migrations/002_20261122_phase_other_request.sql` | 001까지 적용한 DB → 단계 관리, 선호 시간 외 불가, 기타 요청 재설계 |
 | `migrations/003_20261122_lab_binary_no_avoid.sql` | 002까지 적용한 DB → `AVOID` 제거, 실습실 0/1 |
 | `migrations/004_20261122_phase_round3.sql` | 003까지 적용한 DB → 단계에 `ROUND3`(3차 조율) 추가 |
+| `migrations/006_20261124_section.sql` | 005까지 적용한 DB → `course_section.enrollment` 추가, `course.expected_enrollment`·`course_response.prefer_only`·`language` 삭제, 희망 건물 교수당 하나 |
 | `migrations/005_20261124_reply.sql` | 004까지 적용한 DB → `message.reply_to_id`, `proposal.prev_proposal_id`, `timetable_section.status` 추가, `proposal.status` 값 6개로 고정(`WAITING`→`OPEN`) |
 | `docs/c1.png` `c2.png` `c3.png` | ER 다이어그램 (원본 `c1.mmd` `c2.mmd` `c3.mmd`) |
 | `tests/test_migration.py` | 변경 SQL 검사 |
@@ -46,9 +47,10 @@ python db/tests/test_reply.py        # 조율 회신 함수 검사 (pytest 로�
 | **분반 연강** | 두 분반을 맡을 때 **가반이 끝나자마자 나반** | `request_item` `SECTION_PAIR` = `BACK_TO_BACK` |
 | **교차** | 분반 연강을 엇갈려서 (가반 월1·목2 / 나반 월2·목1) | `SECTION_PAIR` = `CROSS` |
 | **실습실** | 1 쓴다(실습실만 배정) / 0 안 쓴다 | `course_response.lab_requirement` |
-| **선호 시간 외 불가** | 희망으로 칠한 칸 밖에서는 수업하기 어려움 | `course_response.prefer_only` (0/1) |
 | **칠한 칸** | 희망 `PREFER` / 불가 `BLOCK`. 칠하지 않은 칸은 상관없음 | `response_slot.kind` |
-| **분반 담당 교수** | 분반마다 교수가 다를 수 있음. `course_section`에 행이 있으면 그 교수, 없으면 `course.professor_id` | `course_section` (조교 입력) |
+| **분반** | 오프라인 회의에서 정해진 분반. 분반 하나당 한 행: 번호(1부터 빈틈없이)·담당 교수·수강 인원. 행이 없는 과목은 `course.professor_id`의 1분반 | `course_section` (조교 입력, 인원은 교수가 정함) |
+| **분반 수강 인원** | 강의실 정원보다 많으면 그 강의실은 배정 후보에서 제외(하드). NULL = 아직 모름 | `course_section.enrollment` |
+| **희망 건물** | 교수당 하나. 그 밖의 건물은 솔버 벌점 | `professor_building_pref` |
 | **서버 단계** | `COLLECTING` 희망 수집 → `ROUND1` 1차 조율 → `ROUND2` 2차 조율 → `ROUND3` 3차 조율 → `FINAL` 확정 | `term.phase`, `phase_log` |
 | **기타 요청** | 교수가 자연어로 쓴 글. AI 없이 조교가 읽고 "확인함"을 누른다 | `other_request` |
 | **조율 안건** | 밀린 분반 하나의 조율. 대안 A·B·C와 메시지·답장이 여기에 붙는다 | `proposal` (`section_no` = 분반) |
@@ -69,7 +71,7 @@ db.confirm_other_request(con, other_request_id, user_id, memo=None)
 ```
 
 - 기타 요청 흐름: 교수 원문(`other_request.body`, `PENDING`) → 조교가 읽고 필요하면 `request_item`(`source='TA'`, `other_request_id`)을 직접 입력 → "확인함"(`CONFIRMED`). 응답당 하나.
-- `request_item`은 솔버가 쓰는 구조화 요청(분반 수 `SECTION_COUNT`, 분반 연강·교차 `SECTION_PAIR`)만 담는다. `source`는 `FORM`(화면 항목) 또는 `TA`(조교 입력).
+- `request_item`은 솔버가 쓰는 구조화 요청(분반 연강·교차 `SECTION_PAIR`)을 담는다. 분반 수 `SECTION_COUNT`는 11/24부터 솔버가 읽지 않는다(분반은 `course_section`). `source`는 `FORM`(화면 항목) 또는 `TA`(조교 입력).
 
 ## 조율 회신 (`db.py`, 11/24)
 
@@ -151,7 +153,7 @@ db.carried_conditions(con, new_id)                                  # -> dict | 
 | 11/21 | 담당 교수를 과목마다 → **분반마다** | 반영 | `course_section`, `course_response.professor_id`, 뷰 |
 | 11/21 | 주 1회 연강 3단계 | 반영 | `course_response.single_day_pref` (MUST/PREFER/NONE) |
 | 11/21 → 11/22 | 실습실 3단계 → **0/1** | 반영 | `course_response.lab_requirement` (INTEGER 0/1). 003이 MUST·PREFER→1, NONE→0으로 옮김 |
-| 11/22 | "선호 시간을 제외하면 수업하기 어렵다" 버튼 | 반영 | `course_response.prefer_only` |
+| 11/22 | "선호 시간을 제외하면 수업하기 어렵다" 버튼 | 11/24 삭제 | `course_response.prefer_only` (006에서 없앰) |
 | 11/22 | 서버 단계 관리 (3차 조율 `ROUND3` 포함) | 반영 | `term.phase`, `phase_log`, `db.get_phase` `db.set_phase`. 004가 `ROUND3`를 추가 |
 | 11/22 | 기타 요청은 AI 없이 조교가 확인 | 반영 | `other_request`, `request_item` 재설계. `note`와 `source='NLP'`는 없앰 |
 | 11/22 | 시간표 칠하기에서 `AVOID` 제거 | 반영 | `response_slot.kind` = `PREFER`/`BLOCK` |
@@ -162,6 +164,11 @@ db.carried_conditions(con, new_id)                                  # -> dict | 
 | 11/24 | 서버 `NEXT` 상태 (조건을 들고 다음 차수로) | 반영 | `proposal.status` `NEXT`, `db.decide_reply(..., proposal_action='next')` (005) |
 | 11/24 | 다음 차수에는 새 안건 (같은 안건을 되돌리지 않음) | 반영 | `proposal.prev_proposal_id` (005), `db.open_next_proposal`, `db.carried_conditions` |
 | 11/24 | 분반이 안 풀렸는지는 배정 상태로 판단 | 반영 | `timetable_section.status` `DONE/COORD/MANUAL` (005), README 점검 쿼리. 서버가 쓰기 전까지는 모두 `DONE` |
+| 11/24 | 선호 시간 외 불가 삭제 | 반영 | `course_response.prefer_only` 삭제 (006) |
+| 11/24 | 분반은 오프라인 회의에서 정해진 상태로 시작 → 분반별로 저장 | 반영 | `course_section` 한 행 = 분반 하나 (006). 솔버는 `SECTION_COUNT`를 읽지 않음 |
+| 11/24 | 희망 건물은 순위 없이 하나, 그 밖은 벌점 | 반영 | `professor_building_pref` 교수당 한 행, `rank` 삭제 (006) |
+| 11/24 | 분반마다 교수가 수강 인원을 정함, 정원보다 많으면 그 강의실 제외 | 반영 | `course_section.enrollment`, `course.expected_enrollment` 삭제 (006). 솔버 하드 규칙 |
+| 11/24 | 강의 언어 삭제 | 반영 | `course_response.language` 삭제 (006) |
 | 11/24 | `message.kind`·`channel` 값 CHECK | 하지 않음 | ER 그림에 적힌 값(`NOTICE/REMINDER/ALTERNATIVE/REPLY`, `APP/EMAIL/SMS`)만 문서로 둠. 이번에는 건너뛰기로 결정 |
 
 ### 반영하지 않은 피드백 (결정 필요)
@@ -170,10 +177,7 @@ db.carried_conditions(con, new_id)                                  # -> dict | 
 
 | 지적 | 현재 DB | 필요한 결정 |
 |---|---|---|
-| 분반별 인원 | 과목 전체 예상 인원만 있음 | 분반 인원을 입력으로 받을지 |
 | 강의실 (선택) | 칸 없음 | 특정 강의실 희망을 받을지 |
-| 건물 선호 | 교수 단위로 저장, 화면은 분반마다 받음 | 어느 단위로 통일할지 |
-| 칸 단위 "꼭" | `prefer_only`는 분반 단위 한 번 | 분반 단위로 충분한지 |
 
 ## 기존 DB 바꾸기
 
@@ -186,6 +190,7 @@ sqlite3 ssuroom.db < db/migrations/002_20261122_phase_other_request.sql # 001까
 sqlite3 ssuroom.db < db/migrations/003_20261122_lab_binary_no_avoid.sql # 002까지 된 DB
 sqlite3 ssuroom.db < db/migrations/004_20261122_phase_round3.sql        # 003까지 된 DB
 sqlite3 -bail ssuroom.db < db/migrations/005_20261124_reply.sql        # 004까지 된 DB (-bail 필수)
+sqlite3 -bail ssuroom.db < db/migrations/006_20261124_section.sql      # 005까지 된 DB (SQLite 3.35 이상)
 ```
 
 - **001**: 기존 응답의 `professor_id`는 그 과목의 담당 교수로, `single_day_pref`는 `NONE`으로 채웁니다(그때는 묻지 않았던 질문). `REQUIRE`는 `MUST`로, 한글 label은 영어 코드로 바꿉니다.
@@ -193,9 +198,10 @@ sqlite3 -bail ssuroom.db < db/migrations/005_20261124_reply.sql        # 004까�
 - **003**: `AVOID` 칸은 지워집니다(= 상관없음). 실습실은 MUST·PREFER → 1, NONE → 0.
 - **004**: `term` 테이블을 다시 만들어 `phase`에 `ROUND3`를 추가합니다. 학기 행과 지금 단계는 그대로 옮깁니다.
 - **005**: `message`에 `reply_to_id`(기존 행은 NULL), `timetable_section`에 `status`(기존 행은 `DONE`)를 더하고, `proposal`을 다시 만들어 `status`를 6개 값으로 고정하고 `prev_proposal_id`(기존 행은 NULL, `UNIQUE`)를 더합니다. `WAITING`(옛 기본값)과 NULL은 `OPEN`으로 옮기고, 그 밖의 값이 있으면 **멈춥니다**(조용히 바꾸지 않음). 실행 전에 확인하는 SELECT가 파일 위 주석에 있습니다. `-bail` 없이 실행하면 sqlite3가 오류 뒤에도 다음 줄을 실행해 옛 `proposal`을 지울 수 있으니 꼭 붙입니다.
+- **006**: `course_section`에 `enrollment`를 더하고 `course.expected_enrollment`의 값을 옮깁니다(분반 행이 있으면 인원 ÷ 분반 수 올림, 없으면 1분반 행을 만들어 그대로. 인원이 없으면 행을 만들지 않음). `course.expected_enrollment`, `course_response.prefer_only`·`language`는 지웁니다(`DROP COLUMN`이라 SQLite 3.35 이상). `professor_building_pref`는 교수당 한 행으로 다시 만들고 가장 높은 순위 건물 하나만 남깁니다. **예전에 교수 요청(`SECTION_COUNT`)으로 분반이 여러 개였던 과목은 실행 뒤 조교가 `course_section`에 분반을 직접 넣어야 합니다** (확인 SELECT는 파일 주석).
 - 마지막 `PRAGMA foreign_key_check`가 아무것도 출력하지 않아야 정상입니다. 두 번 실행하면 오류가 납니다.
-- **주의**: `term` 칸이 늘어서 `INSERT INTO term VALUES (...)`처럼 칸 이름 없이 넣던 코드는 칸 이름을 적어야 합니다. `message`·`timetable_section`도 005로 칸이 하나씩 늘었습니다(`solver_core.py`의 `timetable_section` INSERT는 칸 이름을 적도록 고쳤습니다).
-- `tests/test_migration.py`가 v3→001→…→005, v4→002→…→005, v7→005 세 경로가 최종 `schema.sql`과 같은 모양을 만들고, 데이터를 보존하며, 새 규칙(잘못된 단계·`NLP`·`AVOID`·`WAITING`·없는 `reply_to_id`·중복·없는 `prev_proposal_id`·잘못된 분반 `status` 거부, `NEXT` 허용)이 작동하는지, 목록 밖 `status`가 있으면 005가 멈추고 되돌릴 수 있는지 검사합니다.
+- **주의**: `term` 칸이 늘어서 `INSERT INTO term VALUES (...)`처럼 칸 이름 없이 넣던 코드는 칸 이름을 적어야 합니다. `message`·`timetable_section`도 005로 칸이 하나씩 늘었습니다(`solver_core.py`, `solver/tests/run_n3.py`의 `timetable_section` INSERT는 칸 이름을 적도록 고쳤습니다). 006으로 `course_section`은 칸이 늘고 `course`·`course_response`·`professor_building_pref`는 칸이 줄었습니다.
+- `tests/test_migration.py`가 v3→001→…→006, v4→002→…→006, v7→005→006, v8→006 경로가 (005 뒤에는 `archive/schema_v8.sql`, 006 뒤에는) 최종 `schema.sql`과 같은 모양을 만들고, 데이터를 보존하며, 새 규칙(잘못된 단계·`NLP`·`AVOID`·`WAITING`·없는 `reply_to_id`·중복·없는 `prev_proposal_id`·잘못된 분반 `status` 거부, `NEXT` 허용)이 작동하는지, 목록 밖 `status`가 있으면 005가 멈추고 되돌릴 수 있는지 검사합니다.
 
 ## 알려진 한계
 
@@ -206,5 +212,5 @@ sqlite3 -bail ssuroom.db < db/migrations/005_20261124_reply.sql        # 004까�
 - `NEXT`와 다음 차수 안건은 DB 함수로만 있습니다. 서버가 [확인] 때 `proposal_action`·`conditions`를, 다음 차수를 열 때(`/rounds/next`) `open_next_proposal`을 불러야 기록됩니다. 안건을 차수마다 자동으로 여는 일은 DB가 하지 않습니다.
 - `timetable_section.status`는 서버가 쓰기 전까지 모든 행이 `DONE`입니다(005가 기존 행을 `DONE`으로 채움). 그동안은 점검 쿼리가 `NEXT` 안건을 모두 어긋남으로 보여 줄 수 있습니다.
 - `carried_conditions`는 한 단계만 봅니다. 1차 조건을 3차까지 들고 가려면 2차 [확인] 때 서버가 조건을 다시 넘겨야 합니다.
-- `professor_owns(..., section_no=None)`은 `course.professor_id`가 그 교수면, `course_section`이 모든 분반을 다른 교수로 지정했어도 `True`입니다(분반 수는 풀이 결과에서 생겨 DB만으로는 모름).
+- `professor_owns(..., section_no=None)`은 `course.professor_id`가 그 교수면, `course_section`이 모든 분반을 다른 교수로 지정했어도 `True`입니다(`course_section`이 모든 분반을 담지 않을 수 있어서).
 - `message.kind`·`channel`에는 CHECK가 없습니다. 답장은 `REPLY`, 그 밖의 것은 모두 조율 메시지로 봅니다.

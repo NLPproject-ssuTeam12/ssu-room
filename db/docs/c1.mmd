@@ -75,7 +75,6 @@ erDiagram
         text name
         text category "전공필수 등"
         text target_year
-        int expected_enrollment
         int session_count
         int slots_per_session
     }
@@ -83,6 +82,7 @@ erDiagram
         int course_id PK
         int section_no PK
         int professor_id FK "분반별 담당 교수"
+        int enrollment "분반 수강 인원 (교수가 정함)"
     }
     rule_config {
         int id PK
