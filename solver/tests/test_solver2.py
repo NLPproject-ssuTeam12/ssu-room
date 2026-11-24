@@ -66,6 +66,7 @@ def verify(c, tt, label=""):
         if not ok and WRONG_LOG is not None: WRONG_LOG.append((cid, sec, ns))
         wrong += (not ok)
     res["single_day_shape"] = wrong
+    res["major_required"] = major_required_violations(c, tt)
     bad = {k: v for k, v in res.items() if v}
     print(f"  [검증{label}] 위반:", bad if bad else "없음")
     return not bad
@@ -84,3 +85,28 @@ def pair_check(c, tt, modes):
 
 def snapshot(c, tt):
     return {(a,b,cc):(d,e) for a,b,cc,d,e in c.execute("select course_id,section_no,session_no,min(slot_id),min(room_id) from assignment where timetable_id=? group by 1,2,3",(tt,))}
+
+
+def major_required_violations(c, tt):
+    """같은 학과·학년의 서로 다른 전공필수 과목 A·B 검사.
+    한쪽이라도 분반이 하나면 어떤 분반도 겹치면 안 됨. 둘 다 둘 이상이면 분반마다 안 겹치는 상대 분반이 하나 이상 있어야 함."""
+    slots = {}                                   # (과목, 분반) -> 칸 집합
+    for cid, sec, sid in c.execute("SELECT course_id, section_no, slot_id FROM assignment WHERE timetable_id=?", (tt,)):
+        slots.setdefault((cid, sec), set()).add(sid)
+    groups = {}
+    for cid, dept, yr in c.execute("SELECT id, department_id, target_year FROM course WHERE category='전공필수' AND target_year IS NOT NULL"):
+        groups.setdefault((dept, yr), []).append(cid)
+    nsec = dict(c.execute("SELECT course_id, COUNT(*) FROM course_section GROUP BY course_id").fetchall())
+    bad = 0
+    for ids in groups.values():
+        for i, a in enumerate(ids):
+            for b in ids[i + 1:]:
+                na, nb = max(nsec.get(a, 1), 1), max(nsec.get(b, 1), 1)
+                A = {s: slots.get((a, s), set()) for s in range(1, na + 1)}
+                B = {s: slots.get((b, s), set()) for s in range(1, nb + 1)}
+                if na == 1 or nb == 1:
+                    bad += sum(1 for x in A.values() for y in B.values() if x & y)
+                else:
+                    bad += sum(1 for x in A.values() if all(x & y for y in B.values()))
+                    bad += sum(1 for y in B.values() if all(x & y for x in A.values()))
+    return bad

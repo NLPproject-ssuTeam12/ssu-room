@@ -20,8 +20,11 @@ DB(schema.sql)에서 입력을 읽어 초안 시간표를 만들고 같은 DB에
         NONE   1칸씩 두 번(이틀)으로만 배정   ※ 주당 2칸짜리 수업에만 적용. '선호'(PREFER)는 11/24에 없앰
     분반 연강/교차 = 한 교수가 한 과목의 두 분반을 맡을 때 가반 끝나자마자 나반
         (교수 응답 course_response.section_pair: BACK_TO_BACK / CROSS. 그 교수의 그 과목 분반이 정확히 둘일 때)
-  필수과목: 같은 학과·같은 학년의 교양필수와 전공필수는 겹치지 않는다(하드). 학년이 다르면(예: 2학년 전필↔1학년 교필) 겹쳐도 되고,
-        교양필수끼리·전공필수끼리도 겹쳐도 된다(11/24). 교수가 같으면 교수 겹침 규칙이 따로 막는다.
+  필수과목(같은 학과·같은 학년끼리만, 학년이 다르면 겹쳐도 됨. 11/24):
+        교양필수 ↔ 전공필수는 겹치지 않는다(하드). 교양필수끼리는 겹쳐도 된다.
+        서로 다른 전공필수 과목 A·B는 겹치지 않는다(하드). 다만 둘 다 분반이 둘 이상이면 일부 겹쳐도 된다:
+            A의 분반마다 안 겹치는 B 분반이 하나 이상, B의 분반마다 안 겹치는 A 분반이 하나 이상 있어야 한다(모든 학생이 둘 다 들을 수 있게).
+        같은 과목의 분반끼리는 겹쳐도 된다(교수가 같으면 교수 겹침 규칙이 막는다).
   채플: 학년별 채플 칸(chapel_slot)에는 그 학년 전공필수를 놓지 않는다(하드).
   시간: 19:30 교시는 큰 감점(late), 18:00 이후 시작하는 연속 2칸 이상 수업은 놓지 않는다(하드).
   실습실: 1(쓴다 → 실습실만 배정) / 0(안 쓴다 → 실습실 쓰면 약한 벌점). 희망 칸: PREFER(희망)/BLOCK(불가), 칠하지 않으면 상관없음
@@ -266,7 +269,8 @@ def _solve_model(con, term_id, round_id, W, time_limit, workers, prev, prevk, fr
     m = cp_model.CpModel()
     x, cost = {}, {}
     occ_room, occ_prof = defaultdict(list), defaultdict(list)
-    occ_req = defaultdict(list)                 # (학과, 학년, 칸, 교필/전필) -> 변수들
+    occ_req = defaultdict(lambda: defaultdict(list))   # (학과, 학년, 칸, 교필/전필) -> 변수들
+    maj_sec = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))   # (학과, 학년) -> 전필 과목 -> (분반, 칸) -> 변수들
     day_use = defaultdict(list)
     unplaced = {}                               # (과목,분반,회차,칸수) -> 못 놓음 변수
     day_idx = {d: i for i, d in enumerate(by_day)}
@@ -386,7 +390,9 @@ def _solve_model(con, term_id, round_id, W, time_limit, workers, prev, prevk, fr
                                     occ_room[(cl["id"], sid)].append(var)
                                     occ_prof[(sd["prof"], sid)].append(var)
                                     if c["cat"] in (MAJOR_REQUIRED, GENERAL_REQUIRED) and c["year"]:
-                                        occ_req[(c["dept"], str(c["year"]), sid, c["cat"])].append(var)
+                                        occ_req[(c["dept"], str(c["year"]), sid)][c["cat"]].append(var)
+                                        if c["cat"] == MAJOR_REQUIRED:
+                                            maj_sec[(c["dept"], str(c["year"]))][cid][(sec, sid)].append(var)
                                 day_use[(cid, sec, day)].append(var)
                     un = m.NewBoolVar(f"un{skey}")
                     unplaced[skey] = un
@@ -402,18 +408,36 @@ def _solve_model(con, term_id, round_id, W, time_limit, workers, prev, prevk, fr
         if len(vs) > 1: m.Add(sum(vs) <= 1)              # 같은 교수 동시 수업 불가
     for vs in day_use.values():
         if len(vs) > 1: m.Add(sum(vs) <= 1)              # 같은 분반은 하루 한 번
-    for (dept, yr, sid, cat), gvs in list(occ_req.items()):   # 같은 학과·학년 교양필수 ↔ 전공필수 겹침 불가
-        if cat != GENERAL_REQUIRED:
-            continue
-        jvs = occ_req.get((dept, yr, sid, MAJOR_REQUIRED))
-        if not jvs:
-            continue
-        bg, bj = m.NewBoolVar(f"gen{dept}_{yr}_{sid}"), m.NewBoolVar(f"maj{dept}_{yr}_{sid}")
-        for v in gvs:
-            m.AddImplication(v, bg)
-        for v in jvs:
-            m.AddImplication(v, bj)
-        m.Add(bg + bj <= 1)
+    def _any(vs, name):                          # vs 중 하나라도 1이면 1 (겹침 금지 제약에만 쓰므로 한 방향이면 충분)
+        b = m.NewBoolVar(name)
+        for v in vs:
+            m.AddImplication(v, b)
+        return b
+    for (dept, yr, sid), by_cat in occ_req.items():   # 같은 학과·학년 교양필수 ↔ 전공필수 불가
+        maj, gen = by_cat.get(MAJOR_REQUIRED), by_cat.get(GENERAL_REQUIRED)
+        if maj and gen:
+            m.Add(_any(gen, f"gen{dept}_{yr}_{sid}") + _any(maj, f"maj{dept}_{yr}_{sid}") <= 1)
+    for (dept, yr), by_course in maj_sec.items():     # 같은 학과·학년의 서로 다른 전공필수 과목
+        ids = sorted(by_course)
+        for i, a in enumerate(ids):
+            for b in ids[i + 1:]:
+                na, nb = courses[a]["sections"], courses[b]["sections"]
+                ov = {}                                  # (A 분반, B 분반) -> 겹침(1이면 겹칠 수 있음)
+                for sa in range(1, na + 1):
+                    for sb in range(1, nb + 1):
+                        ov[(sa, sb)] = o = m.NewBoolVar(f"ov{a}_{sa}_{b}_{sb}")
+                        for (s1, sid), va in by_course[a].items():
+                            vb = by_course[b].get((sb, sid)) if s1 == sa else None
+                            if vb:                       # 한 분반은 한 칸에 많아야 한 번 → 합이 0/1
+                                m.Add(sum(va) + sum(vb) - 1 <= o)
+                if na == 1 or nb == 1:                   # 한쪽이라도 분반 하나 → 전혀 겹치지 않음
+                    for o in ov.values():
+                        m.Add(o == 0)
+                else:                                    # 분반마다 안 겹치는 상대 분반이 하나 이상
+                    for sa in range(1, na + 1):
+                        m.Add(sum(ov[(sa, sb)] for sb in range(1, nb + 1)) <= nb - 1)
+                    for sb in range(1, nb + 1):
+                        m.Add(sum(ov[(sa, sb)] for sa in range(1, na + 1)) <= na - 1)
     if cond_single_day is not None:
         if cond_day_vars:
             m.Add(sum(cond_day_vars) >= 1)               # 요일이 하나면 그 요일이 들어간 안
@@ -599,7 +623,7 @@ def alternatives(con, term_id, round_id, timetable_id, course_id, section_no=Non
                                          연강(2칸)은 두 교시가 모두 들어 있어야 함. 비어 있으면({}) 요일·교시 조건 없음.
                                          안에서 days/slot_ids로 바뀐다. end_before는 그대로 쓴다.}
     1단계: 다른 수업은 그대로 두고 대상만 새로 놓는다.
-    2단계(모자라면): 같은 교수의 다른 수업과, 대상과 겹칠 수 없는 같은 학년 교필↔전필까지 움직일 수 있게 하고, 움직인 수업을 함께 알려 준다.
+    2단계(모자라면): 같은 교수의 다른 수업과, 대상과 겹칠 수 없는 같은 학년 필수과목(교필↔전필, 분반 하나인 전필↔전필)까지 움직일 수 있게 하고, 움직인 수업을 함께 알려 준다.
     같은 분반 칸 집합이 같은 안(회차 순서만 다른 안)은 하나로 본다.
     반환: [dict(stage, placements{(분반,회차):(시작칸,강의실)}, ks{(분반,회차):칸 수}, moves[(키,이전,이후)], objective)]"""
     W = {**DEFAULT_WEIGHTS, **(weights or {})}
@@ -614,11 +638,13 @@ def alternatives(con, term_id, round_id, timetable_id, course_id, section_no=Non
     req = {MAJOR_REQUIRED: GENERAL_REQUIRED, GENERAL_REQUIRED: MAJOR_REQUIRED}
     for (cid, sec), sd in secs.items():
         c = courses[cid]
-        if sd["prof"] in t_profs or (target["cat"] in req and c["cat"] == req[target["cat"]]   # 겹칠 수 없는 같은 학년 교필↔전필
-                                     and c["dept"] == target["dept"] and c["year"] and str(c["year"]) == str(target["year"])):
+        same_cohort = c["dept"] == target["dept"] and c["year"] and str(c["year"]) == str(target["year"]) and cid != course_id
+        blocks = (target["cat"] in req and c["cat"] == req[target["cat"]]) or (   # 겹칠 수 없는 같은 학년 교필↔전필
+            target["cat"] == c["cat"] == MAJOR_REQUIRED)                          # 다른 전필 과목
+        if sd["prof"] in t_profs or (same_cohort and blocks):
             expanded.add((cid, sec))
     stages = [("다른 수업은 그대로", t_secs),
-              ("같은 교수·같은 학년 교필↔전필 일부 이동", expanded)]
+              ("같은 교수·같은 학년 필수과목 일부 이동", expanded)]
     results = []
     forbid = []
     cur = {k: v[0] for k, v in prev.items() if (k[0], k[1]) in t_secs}
