@@ -4,10 +4,12 @@ DB(schema.sql)에서 입력을 읽어 초안 시간표를 만들고 같은 DB에
 
 모델
   결정변수 x[세션, 시작칸, 강의실묶음] = 1  → 이 수업 회차가 그 칸에서 시작해 그 묶음의 강의실 하나를 쓴다
-  세션 = (과목, 분반번호, 회차번호). 분반 수는 교수들이 요청한 값을 교수별로 더한 것이다(솔버는 바꾸지 않는다).
-    예) 가 2개 + 나 2개 요청 → 분반 4개 (1·2=가, 3·4=나). 응답이 없는 교수는 1개. 조교가 course_section 으로 지정한
-    번호는 그대로 두고, 남은 개수를 빈 번호에 순서대로 채운다.
-  분반마다 담당 교수가 다를 수 있다(course_section). 교수 겹침·응답(불가 시간·실습실·연강)은 분반의 교수 기준.
+  세션 = (과목, 분반번호, 회차번호). 분반은 오프라인 회의에서 정해져 조교가 course_section 에 한 행씩 넣는다
+    (번호·담당 교수·수강 인원). 솔버는 분반 수를 바꾸지 않는다. 번호는 1부터 빈틈없이. 행이 없는 과목은
+    course.professor_id 가 맡는 1분반 하나로 본다.
+  분반마다 담당 교수가 다를 수 있다. 교수 겹침·응답(불가 시간·실습실·연강)은 분반의 교수 기준.
+  수강 인원(course_section.enrollment)이 강의실 정원보다 많으면 그 강의실은 후보에서 뺀다(하드). 인원이 비어 있으면 검사하지 않는다.
+  희망 건물: 교수당 하나(professor_building_pref). 그 밖의 건물에 배정하면 벌점.
   강의실묶음 = 건물·정원·실습실 여부·전용 학과가 모두 같은 강의실들. 묶음 안의 방은 서로 구별할 필요가
               없으므로 변수를 줄이고(대칭 제거), 풀이 뒤에 실제 호실을 따로 배정한다.
   못 놓은 세션은 unplaced 변수로 큰 벌점을 주고 남긴다 → "못 맞춘 과목" 목록이 됨(2차 조율의 입력)
@@ -19,7 +21,6 @@ DB(schema.sql)에서 입력을 읽어 초안 시간표를 만들고 같은 DB에
         PREFER 솔버가 고르되, 하루에 몰면 보너스   ※ 주당 2칸짜리 수업에만 적용
     분반 연강/교차 = 두 분반을 맡을 때 가반 끝나자마자 나반 (request_item SECTION_PAIR: BACK_TO_BACK / CROSS)
   실습실: 1(쓴다 → 실습실만 배정) / 0(안 쓴다 → 실습실 쓰면 약한 벌점). 희망 칸: PREFER(희망)/BLOCK(불가), 칠하지 않으면 상관없음
-  선호 시간 외 불가(course_response.prefer_only=1): 그 분반은 '희망' 칸 안에서만 배정. 희망 칸이 없으면 적용하지 않고 지원불가 안내.
 
 공개 함수
   solve(...)          전체 풀이 또는 일부 과목·분반만 다시 풀기(free_courses)
@@ -28,7 +29,6 @@ DB(schema.sql)에서 입력을 읽어 초안 시간표를 만들고 같은 DB에
   finalize(...)       시간표를 FINAL로 확정 (다음 해의 건물·강의실 기본값이 됨)
 """
 import json
-import math
 from collections import defaultdict
 
 from ortools.sat.python import cp_model
@@ -41,7 +41,7 @@ DAYS = ["월", "화", "수", "목", "금", "토", "일"]   # 조율 쪽 days 번
 DEFAULT_WEIGHTS = {
     "unplaced": 100000,   # 못 놓음
     "prefer": 10,         # 교수가 희망한 칸 (보너스)
-    "building_rank": 3,   # 희망 건물 순위당 벌점 (1순위 3점, 2순위 6점, 목록 밖은 꼴찌 순위+1)
+    "building_other": 50, # 교수가 고른 희망 건물이 아닌 건물이면 큰 벌점 (11/24: 하드는 아님. 유지 30 + 희망 칸 2칸 20 과 같은 크기)
     "lab_waste": 5,       # 실습실을 안 쓴다고 답한 수업(0)이 실습실 사용
     "single_day_prefer": 12,  # 주 1회 연강 '선호'인데 이틀로 나눴을 때 벌점(= 하루에 몰면 보너스)
     "keep": 30,           # 이전 배정을 그대로 두면 보너스 (최소 변경)
@@ -51,7 +51,7 @@ DEFAULT_WEIGHTS = {
 
 # ---------------------------------------------------------------- 입력
 def load_history(con, term_id):
-    """전년도 같은 학기의 FINAL 시간표에서 교수별 건물 순위와 (교수, 과목명)별 강의실을 뽑는다.
+    """전년도 같은 학기의 FINAL 시간표에서 교수별로 가장 많이 쓴 건물과 (교수, 과목명)별 강의실을 뽑는다.
     없으면 빈 값 → 아무 가정도 하지 않는다."""
     empty = ({}, {})
     row = con.execute("""SELECT tt.id FROM term t
@@ -71,15 +71,15 @@ def load_history(con, term_id):
         hist_room[(prof, name)].add(room)
         bld_count[prof][bld] += 1
     hist_bld = {}
-    for prof, cnt in bld_count.items():          # 많이 쓴 건물이 1순위
-        order = sorted(cnt, key=lambda b: -cnt[b])
-        hist_bld[prof] = {b: i + 1 for i, b in enumerate(order)}
+    for prof, cnt in bld_count.items():          # 가장 많이 쓴 건물 하나 (같으면 번호가 작은 건물)
+        hist_bld[prof] = min(cnt, key=lambda b: (-cnt[b], b))
     return hist_bld, dict(hist_room)
 
 
 def load_input(con, term_id, round_id):
     """-> by_day, courses, secs, rooms, pref, slot_info
-    secs[(과목, 분반)] = 그 분반의 담당 교수와 그 교수의 응답(불가·희망 칸, 실습실, 연강)"""
+    secs[(과목, 분반)] = 그 분반의 담당 교수, 수강 인원과 그 교수의 응답(불가·희망 칸, 실습실, 연강)
+    pref[교수] = 희망 건물 id (하나)"""
     q = con.execute
     slots = q("""SELECT ts.id, ts.day, ts.period_no, ts.start_time, ts.end_time FROM time_slot ts
                  JOIN term t ON t.grid_id = ts.grid_id WHERE t.id=?
@@ -90,54 +90,35 @@ def load_input(con, term_id, round_id):
         by_day[day].append((p, sid))
         slot_info[sid] = (day, p, st, en)
     courses = {}
-    for (cid, name, prof, dept, cat, yr, enr, sc, sps) in q(
+    for (cid, name, prof, dept, cat, yr, sc, sps) in q(
             """SELECT id, name, professor_id, department_id, category, target_year,
-                      expected_enrollment, session_count, slots_per_session
+                      session_count, slots_per_session
                FROM course WHERE term_id=?""", (term_id,)):
         courses[cid] = dict(id=cid, name=name, prof=prof, dept=dept, cat=cat, year=yr,
-                            enroll=enr or 0, sessions=sc, k=sps, sections=1, pair=None)
-    section_prof = {(c, s): p for c, s, p in q("SELECT course_id, section_no, professor_id FROM course_section")
-                    if c in courses}
+                            sessions=sc, k=sps, sections=1, pair=None)
     resp = {}                                   # (과목, 교수) -> 응답
-    for rid, cid, prof, lab, single_day, prefer_only in q(
-            """SELECT id, course_id, professor_id, lab_requirement, single_day_pref, prefer_only
+    for rid, cid, prof, lab, single_day in q(
+            """SELECT id, course_id, professor_id, lab_requirement, single_day_pref
                FROM course_response WHERE round_id=?""", (round_id,)):
         if cid not in courses:
             continue
-        r = dict(lab=lab, single_day=single_day, prefer_only=bool(prefer_only),
-                 block=set(), prefer=set(), id=rid)
+        r = dict(lab=lab, single_day=single_day, block=set(), prefer=set(), id=rid)
         for sid, kind in q("SELECT slot_id, kind FROM response_slot WHERE response_id=?", (rid,)):
             r[{"BLOCK": "block", "PREFER": "prefer"}[kind]].add(sid)
         resp[(cid, prof)] = r
-    # 분반 수와 분반별 담당 교수
-    #   - 각 교수가 요청한 분반 수(SECTION_COUNT, 없으면 조교가 지정한 분반 수, 최소 1)를 교수별로 구해 합산한다.
-    #     (가 교수 2개 + 나 교수 2개 = 4개)
-    #   - 교수 순서: 기본 담당 교수 → 조교가 지정한 교수(분반 번호 순) → 그 외 응답한 교수(번호 순)
-    #   - 조교가 course_section에 적은 분반은 그 번호·그 교수로 먼저 확정하고, 남은 개수를 빈 번호에 순서대로 채운다.
-    asked = {}                                   # (과목, 교수) -> 요청한 분반 수
-    for cid, prof, n in q("""SELECT r.course_id, r.professor_id, MAX(i.value_int) FROM request_item i
-                          JOIN course_response r ON r.id=i.response_id
-                          WHERE r.round_id=? AND i.type='SECTION_COUNT' GROUP BY r.course_id, r.professor_id""", (round_id,)):
-        if n:
-            asked[(cid, prof)] = n
+    # 분반: 조교가 course_section 에 넣은 행 그대로 (오프라인 회의에서 정한 분반 수·담당 교수·수강 인원).
+    #   행이 없는 과목은 course.professor_id 가 맡는 1분반 하나 (인원 미정). 번호는 1부터 빈틈없어야 한다.
+    given = defaultdict(dict)                    # 과목 -> {분반: (교수, 인원)}
+    for cid, sec, prof, enr in q("SELECT course_id, section_no, professor_id, enrollment FROM course_section"):
+        if cid in courses:
+            given[cid][sec] = (prof, enr)
     for c in courses.values():
-        cid = c["id"]
-        explicit = {sec: p for (cc, sec), p in section_prof.items() if cc == cid}
-        involved = [c["prof"]]
-        for sec in sorted(explicit):
-            if explicit[sec] not in involved:
-                involved.append(explicit[sec])
-        for (cc, p) in sorted(resp):
-            if cc == cid and p not in involved:
-                involved.append(p)
-        remaining = []                           # 조교가 지정하지 않은 만큼 (요청 분반 수 - 지정한 수)
-        for p in involved:
-            own = sum(1 for v in explicit.values() if v == p)
-            remaining += [p] * max(max(asked.get((cid, p), 0), own, 1) - own, 0)
-        n_sec = max(max(explicit, default=0), len(explicit) + len(remaining))
-        fill = iter(remaining)                   # 지정 안 된 번호에 순서대로
-        c["sections"] = n_sec
-        c["section_prof"] = {sec: explicit.get(sec) or next(fill, c["prof"]) for sec in range(1, n_sec + 1)}
+        rows = given.get(c["id"]) or {1: (c["prof"], None)}
+        if sorted(rows) != list(range(1, len(rows) + 1)):
+            raise ValueError(f"과목 {c['id']}({c['name']})의 분반 번호는 1부터 빈틈없어야 합니다: {sorted(rows)}")
+        c["sections"] = len(rows)
+        c["section_prof"] = {sec: p for sec, (p, _) in rows.items()}
+        c["section_enroll"] = {sec: e for sec, (_, e) in rows.items()}
     for cid, mode in q("""SELECT r.course_id, i.value_text FROM request_item i
                        JOIN course_response r ON r.id=i.response_id
                        WHERE r.round_id=? AND i.type='SECTION_PAIR'""", (round_id,)):
@@ -149,17 +130,14 @@ def load_input(con, term_id, round_id):
             prof = c["section_prof"][sec]
             r = resp.get((c["id"], prof))
             secs[(c["id"], sec)] = dict(
-                prof=prof, responded=r is not None,
+                prof=prof, responded=r is not None, enroll=c["section_enroll"][sec],
                 lab=r["lab"] if r else None, single_day=r["single_day"] if r else None,
-                prefer_only=r["prefer_only"] if r else False,
                 block=r["block"] if r else set(), prefer=r["prefer"] if r else set(),
                 )
     rooms = {rid: dict(id=rid, bld=b, cap=cap, lab=lab or 0, dept=rd)
              for rid, b, cap, lab, rd in q(
                  "SELECT id, building_id, capacity, is_lab, reserved_department_id FROM room")}
-    pref = defaultdict(dict)                   # professor -> {building: rank}
-    for p, b, r in q("SELECT professor_id, building_id, rank FROM professor_building_pref"):
-        pref[p][b] = r
+    pref = {p: b for p, b in q("SELECT professor_id, building_id FROM professor_building_pref")}   # 교수 -> 희망 건물
     return by_day, courses, secs, rooms, pref, slot_info
 
 
@@ -304,16 +282,11 @@ def _solve_model(con, term_id, round_id, W, time_limit, workers, prev, prevk, fr
 
     for c in courses.values():
         n = c["sections"]
-        enroll_per = math.ceil(c["enroll"] / n) if c["enroll"] else 0
         for sec in range(1, n + 1):
             sd = secs[(c["id"], sec)]
             cid = c["id"]
             if c["pair"] and sd["single_day"] in ("MUST", "PREFER"):
                 unsupported.append((cid, "주 1회 연강 응답과 분반 연강·교차 요청을 함께 받으면 분반 요청을 우선하고 주 1회 연강 응답은 무시"))
-            if sd["prefer_only"] and not sd["prefer"]:
-                msg = (cid, "'선호 시간 외 불가'를 골랐는데 희망 칸이 없어 이 제한은 적용하지 않음")
-                if msg not in unsupported:
-                    unsupported.append(msg)
             structs = _structures(c, sd)
             ps = sorted((ss, prevk[(cid, sec, ss)]) for ss in prev_by_sec.get((cid, sec), {}))
             matched = next((st for st in structs if sorted(st) == ps), None) if ps else None
@@ -327,7 +300,7 @@ def _solve_model(con, term_id, round_id, W, time_limit, workers, prev, prevk, fr
                 cost[("choice", cid, sec)] = (choice, -W["single_day_prefer"])
                 if prev and matched is not None:
                     m.AddHint(choice, 1 if structs.index(matched) == 0 else 0)   # 이전 구성도 출발점으로
-            bp = pref.get(sd["prof"]) or (hist_bld.get(sd["prof"]) if not sd["responded"] else None)
+            bp = pref.get(sd["prof"]) or (hist_bld.get(sd["prof"]) if not sd["responded"] else None)   # 희망 건물 하나
             hroom = hist_room.get((sd["prof"], c["name"]), set()) if not sd["responded"] else set()
             use_cond = bool(cond) and (cid, sec) in (cond_sections or ()) and not frozen
 
@@ -348,8 +321,6 @@ def _solve_model(con, term_id, round_id, W, time_limit, workers, prev, prevk, fr
                             covered = [sid for _, sid in chunk]
                             if not frozen and sd["block"] & set(covered):
                                 continue                    # 절대 불가 칸
-                            if not frozen and sd["prefer_only"] and sd["prefer"] and not set(covered) <= sd["prefer"]:
-                                continue                    # '선호 시간 외에는 어려움': 희망 칸 안에서만
                             if use_cond:                    # 조율 쪽이 넘긴 조건
                                 if allowed_days is not None and day not in allowed_days:
                                     continue
@@ -367,8 +338,8 @@ def _solve_model(con, term_id, round_id, W, time_limit, workers, prev, prevk, fr
                                     if not (covered[0] == fslot and cl["id"] == fclass):
                                         continue
                                 else:
-                                    if cl["cap"] is not None and enroll_per and cl["cap"] < enroll_per:
-                                        continue
+                                    if cl["cap"] is not None and sd["enroll"] and cl["cap"] < sd["enroll"]:
+                                        continue            # 분반 수강 인원 > 강의실 정원: 후보에서 뺌 (하드)
                                     if sd["lab"] == 1 and not cl["lab"]:
                                         continue
                                     if cl["dept"] is not None and cl["dept"] != c["dept"]:
@@ -383,8 +354,8 @@ def _solve_model(con, term_id, round_id, W, time_limit, workers, prev, prevk, fr
                                 w = 0                       # 고정된 세션은 상수라 0
                                 if not frozen:
                                     w -= W["prefer"] * len(sd["prefer"] & set(covered))
-                                    if bp:
-                                        w += W["building_rank"] * (bp[cl["bld"]] if cl["bld"] in bp else max(bp.values()) + 1)
+                                    if bp is not None and cl["bld"] != bp:
+                                        w += W["building_other"]     # 희망 건물이 아니면 벌점
                                     if cl["lab"] and sd["lab"] == 0:
                                         w += W["lab_waste"]          # 미회신(None)에는 가정하지 않음
                                     if hroom and hroom & set(cl["rooms"]):
@@ -557,7 +528,7 @@ def _persist(con, out, term_id, round_id, W, time_limit, previous_timetable_id, 
         n = c["sections"]
         for sec in range(1, n + 1):
             con.execute("INSERT INTO timetable_section(timetable_id, course_id, section_no, planned_enrollment) VALUES (?,?,?,?)",
-                        (tt, c["id"], sec, math.ceil(c["enroll"] / n) if c["enroll"] else None))
+                        (tt, c["id"], sec, out["secs"][(c["id"], sec)]["enroll"]))
     sorted_days = {d: sorted(p) for d, p in by_day.items()}
     for key, (start, room_id) in out["placements"].items():
         for sid in _covered(start, out["ks"][key], sorted_days):

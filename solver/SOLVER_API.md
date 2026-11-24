@@ -100,7 +100,8 @@ dict(stage="다른 수업은 그대로" | "같은 교수·같은 학년 필수�
 
 | 항목 | 값 |
 |---|---|
-| 선호 시간 외 불가 `course_response.prefer_only` | `1` 희망 칸 안에서만 / `0` 아니면 |
+| 분반 수강 인원 `course_section.enrollment` | 정수(>0) 또는 NULL(미정). 정원이 더 작은 강의실은 후보에서 뺌 |
+| 희망 건물 `professor_building_pref.building_id` | 교수당 하나. 그 밖의 건물은 벌점(`building_other`) |
 | 실습실 `course_response.lab_requirement` | `1` 쓴다(실습실만 배정) / `0` 안 쓴다 (필수 입력) |
 | 칠한 칸 `response_slot.kind` | `PREFER` 희망 / `BLOCK` 불가. 칠하지 않은 칸은 상관없음 |
 | 주 1회 연강 `course_response.single_day_pref` | `MUST` 하루에 연속 2칸 / `PREFER` 가능하면 하루에 / `NONE` 1칸씩 이틀 (필수 입력) |
@@ -118,27 +119,21 @@ dict(stage="다른 수업은 그대로" | "같은 교수·같은 학년 필수�
 
 ## 4. 분반별 담당 교수
 
-- `course_section(course_id, section_no, professor_id)`에 행이 있으면 그 분반은 그 교수가, 없으면 `course.professor_id`가 맡는다.
+- `course_section(course_id, section_no, professor_id, enrollment)` 한 행이 분반 하나다. 그 교수가 맡고, `enrollment`가 그 분반 수강 인원이다. 과목에 행이 없으면 `course.professor_id`의 1분반 하나로 본다.
 - 교수 겹침 검사, 불가 시간·실습실·연강 응답은 **분반의 담당 교수 기준**이다.
   응답(`course_response`)도 교수별로 받는다: `UNIQUE (round_id, course_id, professor_id)`.
 - 같은 과목의 분반을 다른 교수가 맡으면, 그 교수의 응답이 없을 때 그 분반은 미회신으로 본다.
 - `v_schedule`, `v_professor_conflict` 뷰도 분반 담당 교수를 따른다.
 
-## 5. 분반 수와 교수 배정
+## 5. 분반 수, 수강 인원, 희망 건물 (11/24)
 
-- 분반 수 = 과목에 관련된 교수별 요청(`SECTION_COUNT`)의 합. 가 2 + 나 2 → 4개 (1·2=가, 3·4=나).
-- 관련된 교수 = `course.professor_id`, `course_section`에 적힌 교수, 그 과목에 응답한 다른 교수 (이 순서).
-- 교수별 개수 = max(요청 개수, 조교가 `course_section`에 지정한 행 수, 1). 지정한 번호는 그대로 두고, 남은 개수를 빈 번호에 순서대로 채운다.
+- 분반은 오프라인 회의에서 정해진 상태로 시작한다. 분반 수 = 그 과목의 `course_section` 행 수. 번호는 1부터 빈틈없어야 하고, 아니면 `load_input`이 `ValueError`를 낸다. 교수 요청 `SECTION_COUNT`는 읽지 않는다.
 - 두 교수가 같은 시간대에 수업해도 된다(다른 강의실이면). 교수 겹침은 분반 담당 교수 기준으로만 막는다.
+- 수강 인원: `enrollment`보다 정원이 작은 강의실은 그 분반의 후보에서 뺀다(필수). NULL이면 검사하지 않는다. 시간표의 `timetable_section.planned_enrollment`에 그 값을 그대로 적는다.
+- 희망 건물: 교수당 하나. 다른 건물에 놓으면 `building_other`(기본 50, 큰 벌점) 벌점. 응답 없는 교수는 전년 확정본에서 가장 많이 쓴 건물을 희망 건물로 본다.
+- "선호 시간 외 불가"(`prefer_only`)와 강의 언어(`language`)는 없앴다(006).
 
-## 6. 선호 시간 외 불가 (`course_response.prefer_only = 1`)
-
-- 그 분반이 차지하는 모든 칸이 응답의 `PREFER` 칸 안에 있어야 한다(필수 조건). 2칸 연속 수업은 두 칸 모두.
-- `PREFER` 칸이 하나도 없으면 적용하지 않고 `r['unsupported']`에 한 번 알린다.
-- 대안 생성(`make_alternatives`)에도 같이 적용된다.
-- 못 놓이면 `unplaced`에 나온다. 분반 연강/교차와 겹치면 정말 불가능한 경우가 있다(같은 요일에 인접한 희망 칸이 없을 때).
-
-## 7. 서버 단계와 기타 요청 (`db.py`)
+## 6. 서버 단계와 기타 요청 (`db.py`)
 
 ```python
 db.get_phase(con, term_id)                    # ('ROUND1', '1차 조율')
@@ -149,9 +144,9 @@ db.confirm_other_request(con, other_request_id, user_id, memo=None)
 
 - 단계: `COLLECTING` 희망 수집 → `ROUND1` 1차 조율 → `ROUND2` 2차 조율 → `ROUND3` 3차 조율 → `FINAL` 확정.
 - 기타 요청은 AI를 거치지 않는다. 교수 원문(`other_request.body`, `PENDING`) → 조교가 읽고 필요하면 `request_item`(`source='TA'`, `other_request_id`)을 직접 입력 → "확인함"(`CONFIRMED`).
-- 솔버가 읽는 `request_item` 종류는 `SECTION_COUNT`, `SECTION_PAIR`뿐이다. 그 밖의 요청은 조교가 보고 판단한다.
+- 솔버가 읽는 `request_item` 종류는 `SECTION_PAIR`뿐이다(11/24부터 `SECTION_COUNT`는 읽지 않음). 그 밖의 요청은 조교가 보고 판단한다.
 
-## 8. 알려진 한계
+## 7. 알려진 한계
 
 - 분반 연강·교차(`SECTION_PAIR`)는 분반이 정확히 2개이고 1회 한 칸일 때만 지원. 이때 주 1회 연강 응답은 무시된다(`unsupported`에 표시).
 - 풀이 시간: 조건이 빡빡한 분반 연강·교차 과목이 있으면 30초 안에는 일부가 못 놓일 수 있다. 60~90초를 권장.

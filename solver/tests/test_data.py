@@ -28,19 +28,23 @@ def build(seed=1, n_courses=70, n_prof=30):
     for cid in range(1, n_courses+1):
         prof = rnd.randint(1, n_prof)
         cat = rnd.choice(['전공필수','전공선택','전공선택','교양선택'])
-        c.execute("INSERT INTO course(id,term_id,department_id,name,professor_id,category,target_year,expected_enrollment,session_count,slots_per_session) VALUES (?,?,?,?,?,?,?,?,?,?)",
-                  (cid,1,1,f'과목{cid}',prof,cat,str(rnd.randint(1,4)),rnd.randint(25,90),2,1))
+        yr, enr = str(rnd.randint(1,4)), rnd.randint(25,90)     # 과목 전체 인원 (분반으로 나눈다)
+        c.execute("INSERT INTO course(id,term_id,department_id,name,professor_id,category,target_year,session_count,slots_per_session) VALUES (?,?,?,?,?,?,?,?,?)",
+                  (cid,1,1,f'과목{cid}',prof,cat,yr,2,1))
         lab = rnd.choices([1,0,None],[0.20,0.40,0.40])[0]
         single_day = rnd.choices(['MUST','PREFER','NONE'],[0.15,0.25,0.60])[0]
-        if lab is None: continue   # 미회신 교수: 응답 행 없음
+        if lab is None:            # 미회신 교수: 응답 행 없음, 분반 1개
+            c.execute("INSERT INTO course_section VALUES (?,?,?,?)", (cid, 1, prof, enr)); continue
         rid_resp += 1
         c.execute("INSERT INTO course_response(id,round_id,course_id,professor_id,lab_requirement,single_day_pref) VALUES (?,?,?,?,?,?)",
                   (rid_resp,1,cid,prof,lab,single_day))
         slots = [r[0] for r in c.execute("SELECT id FROM time_slot")]
         for sid in rnd.sample(slots, 6): c.execute("INSERT OR IGNORE INTO response_slot VALUES (?,?,?)",(rid_resp,sid,'BLOCK'))
         for sid in rnd.sample(slots, 4): c.execute("INSERT OR IGNORE INTO response_slot VALUES (?,?,?)",(rid_resp,sid,'PREFER'))
-        if rnd.random() < 0.3: c.execute("INSERT INTO request_item(response_id,type,value_int) VALUES (?,?,?)",(rid_resp,'SECTION_COUNT',2))
+        n_sec = 2 if rnd.random() < 0.3 else 1   # 분반 수 (오프라인 회의에서 정해 조교가 입력)
+        for s in range(1, n_sec+1):
+            c.execute("INSERT INTO course_section VALUES (?,?,?,?)", (cid, s, prof, -(-enr // n_sec)))
     for p in range(1,n_prof+1):
-        c.execute("INSERT INTO professor_building_pref VALUES (?,?,1)",(p,rnd.randint(1,4)))
+        c.execute("INSERT INTO professor_building_pref VALUES (?,?)",(p,rnd.randint(1,4)))   # 희망 건물 하나
     c.commit(); return c
 

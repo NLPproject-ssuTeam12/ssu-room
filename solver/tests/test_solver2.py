@@ -3,8 +3,8 @@ from test_data import build, SCHEMA_PATH   # 경로 설정은 test_data가 한�
 import solver_core as sc
 
 def add_pairs(c):
-    two = [r[0] for r in c.execute("""SELECT cr.course_id FROM request_item i JOIN course_response cr ON cr.id=i.response_id
-                                       WHERE i.type='SECTION_COUNT' AND i.value_int=2 ORDER BY cr.course_id LIMIT 4""")]
+    two = [r[0] for r in c.execute("""SELECT cs.course_id FROM course_section cs JOIN course_response cr ON cr.course_id=cs.course_id
+                                       GROUP BY cs.course_id HAVING COUNT(DISTINCT cs.section_no)=2 ORDER BY cs.course_id LIMIT 4""")]
     modes = dict(zip(two, ['CROSS', 'CROSS', 'BACK_TO_BACK', 'CROSS']))
     for cid, mode in modes.items():
         c.execute("INSERT INTO request_item(response_id,type,value_text) SELECT id,'SECTION_PAIR',? FROM course_response WHERE course_id=?", (mode, cid))
@@ -15,15 +15,13 @@ def add_pairs(c):
 def add_section_profs(c, n=4):
     """2분반 과목 일부에서 2분반을 다른 교수가 맡게 한다(그 교수는 아직 응답 없음)."""
     rows = c.execute("""SELECT c.id, c.professor_id FROM course c JOIN course_response cr ON cr.course_id=c.id
-                         JOIN request_item i ON i.response_id=cr.id AND i.type='SECTION_COUNT'
-                         WHERE c.id NOT IN (SELECT cr2.course_id FROM course_response cr2 JOIN request_item i2 ON i2.response_id=cr2.id AND i2.type='SECTION_PAIR')
+                         WHERE (SELECT COUNT(*) FROM course_section s WHERE s.course_id=c.id)=2
+                           AND c.id NOT IN (SELECT cr2.course_id FROM course_response cr2 JOIN request_item i2 ON i2.response_id=cr2.id AND i2.type='SECTION_PAIR')
                          ORDER BY c.id LIMIT ?""", (n,)).fetchall()
     out = {}
     for cid, prof in rows:
         other = prof % 30 + 1
-        c.execute("DELETE FROM request_item WHERE type='SECTION_COUNT' AND response_id IN (SELECT id FROM course_response WHERE course_id=?)", (cid,))  # 분반 수는 조교 지정으로
-        c.execute("INSERT INTO course_section VALUES (?,?,?)", (cid, 1, prof))
-        c.execute("INSERT INTO course_section VALUES (?,?,?)", (cid, 2, other))
+        c.execute("UPDATE course_section SET professor_id=? WHERE course_id=? AND section_no=2", (other, cid))
         out[cid] = other
     c.commit(); return out
 
@@ -35,17 +33,12 @@ def verify(c, tt, label=""):
         block=q("""SELECT COUNT(*) FROM assignment a JOIN course c0 ON c0.id=a.course_id
                    JOIN course_response cr ON cr.course_id=a.course_id AND cr.professor_id=COALESCE((SELECT professor_id FROM course_section WHERE course_id=a.course_id AND section_no=a.section_no), c0.professor_id)
                    JOIN response_slot rs ON rs.response_id=cr.id AND rs.slot_id=a.slot_id AND rs.kind='BLOCK' WHERE a.timetable_id=?""", tt),
-        capacity=q("""SELECT COUNT(*) FROM assignment a JOIN timetable_section s ON s.timetable_id=a.timetable_id AND s.course_id=a.course_id AND s.section_no=a.section_no
-                      JOIN room r ON r.id=a.room_id WHERE a.timetable_id=? AND s.planned_enrollment>r.capacity""", tt),
+        capacity=q("""SELECT COUNT(*) FROM assignment a JOIN course_section s ON s.course_id=a.course_id AND s.section_no=a.section_no
+                      JOIN room r ON r.id=a.room_id WHERE a.timetable_id=? AND s.enrollment>r.capacity""", tt),   # 분반 인원 > 정원
         lab_req=q("""SELECT COUNT(*) FROM assignment a JOIN course c0 ON c0.id=a.course_id
                      JOIN course_response cr ON cr.course_id=a.course_id AND cr.professor_id=COALESCE((SELECT professor_id FROM course_section WHERE course_id=a.course_id AND section_no=a.section_no), c0.professor_id)
                      JOIN room r ON r.id=a.room_id
                      WHERE a.timetable_id=? AND cr.lab_requirement=1 AND r.is_lab=0""", tt),
-        prefer_only=q("""SELECT COUNT(*) FROM assignment a JOIN course c0 ON c0.id=a.course_id
-                     JOIN course_response cr ON cr.course_id=a.course_id AND cr.professor_id=COALESCE((SELECT professor_id FROM course_section WHERE course_id=a.course_id AND section_no=a.section_no), c0.professor_id)
-                     WHERE a.timetable_id=? AND cr.prefer_only=1
-                       AND EXISTS (SELECT 1 FROM response_slot p WHERE p.response_id=cr.id AND p.kind='PREFER')
-                       AND a.slot_id NOT IN (SELECT slot_id FROM response_slot WHERE response_id=cr.id AND kind='PREFER')""", tt),
         same_day=q("""SELECT COUNT(*) FROM (SELECT a.course_id,a.section_no,ts.day,COUNT(DISTINCT a.session_no) n FROM assignment a
                       JOIN time_slot ts ON ts.id=a.slot_id WHERE a.timetable_id=? GROUP BY 1,2,3 HAVING n>1)""", tt),
         cohort=q("""SELECT COUNT(*) FROM (SELECT c.department_id,c.target_year,a.slot_id,COUNT(DISTINCT a.course_id) n FROM assignment a
@@ -83,13 +76,3 @@ def pair_check(c, tt, modes):
 
 def snapshot(c, tt):
     return {(a,b,cc):(d,e) for a,b,cc,d,e in c.execute("select course_id,section_no,session_no,min(slot_id),min(room_id) from assignment where timetable_id=? group by 1,2,3",(tt,))}
-
-def add_prefer_only(c, n=6):
-    """희망 칸이 서로 다른 이틀 이상에 걸쳐 있는 응답 n개에 '선호 시간 외 불가'를 켠다."""
-    ids = []
-    for rid, in c.execute("select id from course_response order by id").fetchall():
-        days = {d for d, in c.execute("select ts.day from response_slot rs join time_slot ts on ts.id=rs.slot_id where rs.response_id=? and rs.kind='PREFER'", (rid,))}
-        if len(days) >= 2: ids.append(rid)
-        if len(ids) == n: break
-    for rid in ids: c.execute("UPDATE course_response SET prefer_only=1 WHERE id=?", (rid,))
-    c.commit(); return ids
