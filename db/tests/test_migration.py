@@ -59,14 +59,15 @@ def build_v3():
 def counts(con, tabs): return {t: con.execute(f"select count(*) from {t}").fetchone()[0] for t in tabs}
 KEEP = ("response_slot", "proposal", "reply_interpretation", "assignment", "course", "term")
 
-print("=== 경로 1: schema_v3 → 001 → 002 → 003 → 004")
+print("=== 경로 1: schema_v3 → 001 → 002 → 003 → 004 → 005")
 old = build_v3(); before = counts(old, KEEP); before["response_slot"] -= 1   # AVOID 1개는 003에서 지워지는 게 정상
 run(P("migrations","001_20261121_feedback.sql"), old)
 run(P("migrations","002_20261122_phase_other_request.sql"), old)
 run(P("migrations","003_20261122_lab_binary_no_avoid.sql"), old)
 old.execute("UPDATE term SET phase='ROUND2', phase_changed_at='2026-11-22 10:00:00' WHERE id=1"); old.commit()   # 004 전에 진행 중이던 학기
 run(P("migrations","004_20261122_phase_round3.sql"), old)
-ok1 = compare("001~004 적용 후", old)
+run(P("migrations","005_20261124_reply.sql"), old)
+ok1 = compare("001~005 적용 후", old)
 print("  행 수 보존:", before == counts(old, KEEP), "| 응답 수:", old.execute("select count(*) from course_response").fetchone()[0])
 print("  기타 요청 옮김:", old.execute("select id, response_id, body, status from other_request").fetchall())
 print("  prefer_only:", old.execute("select id, prefer_only from course_response order by id").fetchall())
@@ -83,13 +84,57 @@ for bad in ["INSERT INTO term(id,year,semester,grid_id,phase) VALUES (9,2027,'1'
     try: old.execute(bad); print("  거부 안 됨!!", bad[:60])
     except sqlite3.IntegrityError as e: print("  새 규칙 거부 OK:", str(e)[:60])
 
-print("\n=== 경로 2: schema_v4(001까지 적용된 모양)에서 002 → 003 → 004")
+print("\n=== 경로 2: schema_v4(001까지 적용된 모양)에서 002 → 003 → 004 → 005")
 v4 = sqlite3.connect(":memory:"); v4.executescript(open(P("archive","schema_v4.sql"), encoding="utf-8").read()); seed(v4)
 v4.execute("INSERT INTO course_response(id,round_id,course_id,professor_id,lab_requirement,single_day_pref,note) VALUES (100,1,10,2,'PREFER','PREFER','메모')")
 v4.execute("INSERT INTO request_item(response_id,type,value_int) VALUES (100,'SECTION_COUNT',2)"); v4.commit()
 run(P("migrations","002_20261122_phase_other_request.sql"), v4)
 run(P("migrations","003_20261122_lab_binary_no_avoid.sql"), v4)
 run(P("migrations","004_20261122_phase_round3.sql"), v4)
-ok2 = compare("v4 + 002~004", v4)
+run(P("migrations","005_20261124_reply.sql"), v4)
+ok2 = compare("v4 + 002~005", v4)
 print("  응답:", v4.execute("select id, professor_id, lab_requirement, single_day_pref, prefer_only from course_response").fetchall(), "| 기타 요청:", v4.execute("select body, status from other_request").fetchall())
-print("\n결과:", "모두 통과" if ok1 and ok2 else "실패")
+print("\n=== 경로 3: schema_v7(004까지 적용된 모양)에서 005")
+def build_v7():
+    v7 = sqlite3.connect(":memory:"); v7.executescript(open(P("archive","schema_v7.sql"), encoding="utf-8").read()); seed(v7); q = v7.execute
+    q("INSERT INTO solver_run(id,round_id,status) VALUES (1,1,'OPTIMAL')")
+    q("INSERT INTO timetable(id,term_id,round_id,kind,solver_run_id) VALUES (1,1,1,'DRAFT',1)")
+    q("INSERT INTO proposal(id,round_id,timetable_id,course_id,section_no,reason) VALUES (1,1,1,10,1,'겹침')")   # 옛 기본값 WAITING
+    q("INSERT INTO proposal(id,round_id,timetable_id,course_id,section_no,reason,status) VALUES (2,1,1,11,NULL,NULL,NULL),(3,1,1,11,2,'이유','SENT')")
+    q("INSERT INTO proposal_option(id,proposal_id,option_no,source) VALUES (1,1,1,'SOLVER'),(2,1,2,'SOLVER'),(3,3,1,'SOLVER')")
+    q("INSERT INTO message(id,round_id,proposal_id,sender_id,receiver_id,kind,channel,body) VALUES (1,1,1,1,2,'ALTERNATIVE','APP','조율 안내'),(2,1,1,2,1,'REPLY','APP','A안 좋아요')")
+    q("INSERT INTO reply_interpretation(message_id,label,chosen_option_id) VALUES (2,'ACCEPT',1)")
+    v7.commit(); return v7
+
+v7 = build_v7(); before7 = counts(v7, ("proposal", "proposal_option", "message", "reply_interpretation"))
+run(P("migrations","005_20261124_reply.sql"), v7)
+ok3 = compare("v7 + 005", v7)
+keep3 = before7 == counts(v7, ("proposal", "proposal_option", "message", "reply_interpretation"))
+print("  행 수 보존:", keep3)
+st = v7.execute("select id, course_id, section_no, reason, status from proposal order by id").fetchall()
+print("  안건 상태(WAITING·NULL→OPEN, SENT 그대로):", st)
+ok3 = ok3 and keep3 and [r[4] for r in st] == ["OPEN", "OPEN", "SENT"] and st[0][1:4] == (10, 1, "겹침")
+print("  메시지 reply_to_id(기존 행은 NULL):", v7.execute("select id, reply_to_id from message order by id").fetchall())
+v7.execute("UPDATE message SET reply_to_id=1 WHERE id=2"); v7.commit()
+print("  reply_to_id 연결:", v7.execute("select m.id, t.kind from message m join message t on t.id=m.reply_to_id").fetchall())
+v7.execute("INSERT INTO proposal(id,round_id,timetable_id,course_id) VALUES (4,1,1,10)")
+d = v7.execute("select status from proposal where id=4").fetchone()[0]; print("  새 기본값:", d); ok3 = ok3 and d == "OPEN"
+for bad in ["UPDATE proposal SET status='WAITING' WHERE id=1",
+            "UPDATE proposal SET status='NEXT' WHERE id=1",
+            "UPDATE proposal SET status=NULL WHERE id=1",
+            "INSERT INTO message(round_id,proposal_id,sender_id,receiver_id,kind,reply_to_id) VALUES (1,1,2,1,'REPLY',999)"]:
+    try: v7.execute(bad); print("  거부 안 됨!!", bad[:60]); ok3 = False
+    except sqlite3.IntegrityError as e: print("  새 규칙 거부 OK:", str(e)[:60])
+
+print("\n=== 경로 4: 목록 밖 status 가 있으면 005 가 멈추고 데이터는 그대로")
+v7b = build_v7(); v7b.execute("UPDATE proposal SET status='DONE' WHERE id=3"); v7b.commit()
+try:
+    run(P("migrations","005_20261124_reply.sql"), v7b); print("  멈추지 않음!!"); ok4 = False
+except sqlite3.IntegrityError as e:
+    v7b.rollback(); v7b.execute("PRAGMA foreign_keys = ON")
+    left = v7b.execute("select id, status from proposal order by id").fetchall()
+    cols = [r[1] for r in v7b.execute("pragma table_info(message)")]
+    print("  멈춤 OK:", str(e)[:60], "| 되돌린 뒤 안건:", left, "| reply_to_id 없음:", "reply_to_id" not in cols)
+    ok4 = left == [(1, "WAITING"), (2, None), (3, "DONE")] and "reply_to_id" not in cols
+
+print("\n결과:", "모두 통과" if ok1 and ok2 and ok3 and ok4 else "실패")

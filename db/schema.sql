@@ -174,7 +174,9 @@ CREATE TABLE proposal (
   timetable_id INTEGER NOT NULL REFERENCES timetable(id),
   course_id INTEGER NOT NULL REFERENCES course(id),
   section_no INTEGER,                                  -- 어느 분반의 조율인지 (NULL = 과목 전체)
-  reason TEXT, status TEXT DEFAULT 'WAITING'
+  reason TEXT,
+  status TEXT NOT NULL DEFAULT 'OPEN'
+         CHECK (status IN ('OPEN','SENT','PROPOSED','RESOLVED','KEPT'))   -- 보내기 전 / 답 기다림 / 조교 확인 대기 / 반영됨 / 현재대로 유지
 );
 CREATE TABLE proposal_option (
   id INTEGER PRIMARY KEY,
@@ -196,7 +198,8 @@ CREATE TABLE message (
   sender_id INTEGER REFERENCES user(id),
   receiver_id INTEGER NOT NULL REFERENCES user(id),
   kind TEXT NOT NULL, channel TEXT,
-  body TEXT, sent_at TEXT, delivery_status TEXT
+  body TEXT, sent_at TEXT, delivery_status TEXT,
+  reply_to_id INTEGER REFERENCES message(id)            -- 교수 답장(REPLY)이 답하는 조율 메시지
 );
 CREATE TABLE reply_interpretation (
   message_id INTEGER PRIMARY KEY REFERENCES message(id),
