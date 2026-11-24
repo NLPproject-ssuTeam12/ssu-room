@@ -178,6 +178,7 @@ def build_v8():
          VALUES (100,1,10,2,1,'MUST',1,'영어'),(101,1,11,3,0,'NONE',0,NULL)""")
     q("INSERT INTO response_slot VALUES (100,1,'PREFER'),(100,2,'BLOCK')")
     q("INSERT INTO request_item(response_id,type,value_int) VALUES (100,'SECTION_COUNT',2)")
+    q("INSERT INTO request_item(response_id,type,value_text) VALUES (100,'SECTION_PAIR','BACK_TO_BACK'),(100,'SECTION_PAIR','CROSS'),(101,'SECTION_PAIR','이상한 값')")
     # 교수2: 1순위 건물2, 2순위 건물1 → 건물2 / 교수3: 2순위만 건물3 → 건물3 / 교수4: 1순위 둘(건물3, 건물1) → 번호 작은 건물1
     q("INSERT INTO professor_building_pref VALUES (2,1,2),(2,2,1),(3,3,2),(4,3,1),(4,1,1)")
     v8.commit(); return v8
@@ -192,16 +193,19 @@ print("  분반 인원:", secs8)
 want8 = [(10, 1, 2, 20), (10, 2, 3, 20), (11, 1, 3, 40), (13, 1, 4, 23), (13, 2, 5, 23)]
 bld8 = v8.execute("select professor_id, building_id from professor_building_pref order by 1").fetchall()
 print("  희망 건물(교수당 하나):", bld8)
-cr8 = v8.execute("select id, lab_requirement, single_day_pref from course_response order by id").fetchall()
-print("  응답(실습실·연강 그대로):", cr8)
+cr8 = v8.execute("select id, lab_requirement, single_day_pref, section_pair from course_response order by id").fetchall()
+print("  응답(실습실·연강 그대로, 분반 연강·교차 옮김: 최근 값, 이상한 값은 NONE):", cr8)
 cols8 = {t: [r[1] for r in v8.execute(f"pragma table_info({t})")] for t in ("course", "course_response")}
 gone = "expected_enrollment" not in cols8["course"] and not {"prefer_only", "language"} & set(cols8["course_response"])
 print("  삭제된 칸 없음:", gone)
-ok5 = ok5 and same and secs8 == want8 and bld8 == [(2, 2), (3, 3), (4, 1)] and cr8 == [(100, 1, "MUST"), (101, 0, "NONE")] and gone
+ok5 = ok5 and same and secs8 == want8 and bld8 == [(2, 2), (3, 3), (4, 1)] and cr8 == [(100, 1, "MUST", "CROSS"), (101, 0, "NONE", "NONE")] and gone
 for bad in ["UPDATE course_section SET enrollment=0 WHERE course_id=10 AND section_no=1",
             "INSERT INTO professor_building_pref VALUES (2,3)",
             "INSERT INTO professor_building_pref(professor_id) VALUES (5)",
-            "INSERT INTO professor_building_pref VALUES (5,99)"]:
+            "INSERT INTO professor_building_pref VALUES (5,99)",
+            "UPDATE course_response SET section_pair='BOTH' WHERE id=100",
+            "INSERT INTO chapel_slot VALUES (1,'1',999)",
+            "INSERT INTO chapel_slot VALUES (1,'1',1),(1,'1',1)"]:
     try: v8.execute(bad); print("  거부 안 됨!!", bad[:60]); ok5 = False
     except sqlite3.IntegrityError as e: print("  새 규칙 거부 OK:", str(e)[:60])
 for bad in ["INSERT INTO course(id,term_id,name,professor_id,expected_enrollment) VALUES (20,1,'x',2,30)",

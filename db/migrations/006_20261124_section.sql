@@ -1,4 +1,4 @@
--- 변경 SQL 006 (2026-11-24, 분반·건물·수강 인원 피드백)
+-- 변경 SQL 006 (2026-11-24, 분반·건물·수강 인원·분반 연강·채플 피드백)
 -- 대상: 005까지 적용한 DB (archive/schema_v8.sql 모양)  →  현재 schema.sql 과 같은 모양
 --
 -- 바뀌는 것
@@ -12,6 +12,9 @@
 --   4. course_response.language(강의 언어) 삭제.
 --   5. professor_building_pref: 건물 순위(rank) 대신 교수당 희망 건물 하나 (professor_id 가 기본키).
 --      그 밖의 건물에 배정하면 솔버가 벌점을 준다.
+--   6. course_response.section_pair 추가 (NONE / BACK_TO_BACK / CROSS, 기본 NONE): 두 분반 연강·교차를 교수 입력 칸으로 받는다.
+--      이 교수가 이 과목 분반을 정확히 둘 맡을 때 적용. 솔버는 request_item SECTION_PAIR 를 더 읽지 않는다.
+--   7. chapel_slot 추가 (학기, 학년, 칸): 학년별 채플 칸. 그 학년 전공필수는 그 칸에 놓지 않는다(솔버 하드 규칙).
 --
 -- 기존 데이터 처리
 --   - 분반 행이 있는 과목: 각 분반 enrollment = 과목 예상 인원 ÷ 분반 수 (올림). 예전 솔버가 쓰던 값과 같다.
@@ -24,6 +27,9 @@
 --   - 건물: 교수마다 가장 높은 순위(rank 가 가장 작은) 건물 하나만 남긴다. 같은 순위가 여럿이면 번호가 작은 건물.
 --     2순위 이하는 버린다.
 --   - prefer_only, language 값은 버린다.
+--   - request_item 의 SECTION_PAIR(BACK_TO_BACK / CROSS)는 그 응답의 section_pair 로 옮긴다. 행은 지우지 않는다(기록).
+--     한 응답에 둘 이상이면 가장 최근(id 가 큰) 것. 그 밖의 값은 옮기지 않는다(NONE).
+--   - chapel_slot 은 비어 있다. 조교가 학년별 채플 칸을 넣는다.
 --
 -- 실행 방법 (SQLite 3.35 이상, DROP COLUMN 때문): 파일 전체를 한 번에, 실행 전에 DB 파일 복사. 두 번 실행하면 오류가 난다.
 --   sqlite3 -bail ssuroom.db < db/migrations/006_20261124_section.sql
@@ -51,6 +57,25 @@ ALTER TABLE course DROP COLUMN expected_enrollment;
 -- 3·4. 선호 시간 외 불가, 강의 언어 삭제
 ALTER TABLE course_response DROP COLUMN prefer_only;
 ALTER TABLE course_response DROP COLUMN language;
+
+-- 6. 두 분반 연강·교차를 교수 응답 칸으로
+ALTER TABLE course_response ADD COLUMN section_pair TEXT NOT NULL DEFAULT 'NONE'
+      CHECK (section_pair IN ('NONE','BACK_TO_BACK','CROSS'));   -- 상관없음 / 연강(가반 바로 뒤 나반) / 교차
+UPDATE course_response
+SET section_pair = (SELECT i.value_text FROM request_item i
+                    WHERE i.response_id = course_response.id AND i.type = 'SECTION_PAIR'
+                      AND i.value_text IN ('BACK_TO_BACK','CROSS')
+                    ORDER BY i.id DESC LIMIT 1)
+WHERE EXISTS (SELECT 1 FROM request_item i WHERE i.response_id = course_response.id AND i.type = 'SECTION_PAIR'
+                AND i.value_text IN ('BACK_TO_BACK','CROSS'));
+
+-- 7. 학년별 채플 칸
+CREATE TABLE chapel_slot (                   -- 학년별 채플 칸 (조교 입력). 그 학년 전공필수는 이 칸에 놓지 않는다
+  term_id INTEGER NOT NULL REFERENCES term(id),
+  target_year TEXT NOT NULL,                           -- course.target_year 와 같은 값 (예: '1')
+  slot_id INTEGER NOT NULL REFERENCES time_slot(id),
+  PRIMARY KEY (term_id, target_year, slot_id)
+);
 
 -- 5. 희망 건물: 교수당 하나
 CREATE TABLE professor_building_pref_new (       -- 교수가 고른 희망 건물 하나. 그 밖의 건물은 솔버 벌점

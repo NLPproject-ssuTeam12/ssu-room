@@ -12,6 +12,8 @@ erDiagram
     other_request ||--o{ request_item : "보고 만든 항목"
     user ||--o| professor_building_pref : "희망 건물 하나"
     building ||--o{ professor_building_pref : "건물"
+    term ||--o{ chapel_slot : "채플 칸"
+    time_slot ||--o{ chapel_slot : "칸"
     term { int id PK }
     user { int id PK }
     course { int id PK }
@@ -37,6 +39,7 @@ erDiagram
         int professor_id FK "분반 담당 교수별 응답"
         int lab_requirement "1 쓴다 0 안 쓴다 필수 입력"
         text single_day_pref "MUST PREFER NONE 주1회 연강(분반 내)"
+        text section_pair "NONE BACK_TO_BACK CROSS 두 분반 연강·교차"
     }
     response_slot {
         int response_id PK
@@ -62,6 +65,11 @@ erDiagram
         text params_json
         text source "FORM TA"
         int created_by FK
+    }
+    chapel_slot {
+        int term_id PK
+        text target_year PK "그 학년 전공필수는 이 칸 금지"
+        int slot_id PK
     }
     professor_building_pref {
         int professor_id PK

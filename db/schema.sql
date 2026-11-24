@@ -94,6 +94,8 @@ CREATE TABLE course_response (                -- 교수가 과목별로 낸 응�
   professor_id INTEGER NOT NULL REFERENCES user(id),   -- 응답한 교수 (분반마다 교수가 다를 수 있어 교수별로 받음)
   lab_requirement INTEGER NOT NULL CHECK (lab_requirement IN (0,1)),      -- 실습실: 1=쓴다(실습실만 배정) / 0=안 쓴다 (사이트에서 필수 입력)
   single_day_pref TEXT NOT NULL CHECK (single_day_pref IN ('MUST','PREFER','NONE')),    -- 주 1회 연강(한 분반이 하루에 2칸 이어서): 무조건/선호/필요 없음
+  section_pair TEXT NOT NULL DEFAULT 'NONE'
+         CHECK (section_pair IN ('NONE','BACK_TO_BACK','CROSS')),   -- 이 교수가 이 과목 두 분반을 맡을 때: 상관없음 / 연강(가반 바로 뒤 나반) / 교차
   submitted_at TEXT,
   UNIQUE (round_id, course_id, professor_id)
 );
@@ -120,6 +122,12 @@ CREATE TABLE request_item (                   -- 솔버가 쓰는 구조화된 �
   params_json TEXT,                                    -- 요일·교시 등 상세 조건
   source TEXT NOT NULL DEFAULT 'TA' CHECK (source IN ('FORM','TA')),   -- 화면 항목 / 조교 입력
   created_by INTEGER REFERENCES user(id), created_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE chapel_slot (                   -- 학년별 채플 칸 (조교 입력). 그 학년 전공필수는 이 칸에 놓지 않는다
+  term_id INTEGER NOT NULL REFERENCES term(id),
+  target_year TEXT NOT NULL,                           -- course.target_year 와 같은 값 (예: '1')
+  slot_id INTEGER NOT NULL REFERENCES time_slot(id),
+  PRIMARY KEY (term_id, target_year, slot_id)
 );
 CREATE TABLE professor_building_pref (       -- 교수가 고른 희망 건물 하나. 그 밖의 건물은 솔버 벌점
   professor_id INTEGER PRIMARY KEY REFERENCES user(id),
