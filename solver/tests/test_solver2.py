@@ -44,6 +44,10 @@ def verify(c, tt, label=""):
         chapel=q("""SELECT COUNT(*) FROM assignment a JOIN course c ON c.id=a.course_id JOIN timetable t ON t.id=a.timetable_id
                     JOIN chapel_slot ch ON ch.term_id=t.term_id AND ch.target_year=c.target_year AND ch.slot_id=a.slot_id
                     WHERE a.timetable_id=? AND c.category='전공필수'""", tt),          # 전공필수가 그 학년 채플 칸에
+        gen_major=q("""SELECT COUNT(*) FROM assignment a JOIN course g ON g.id=a.course_id AND g.category='교양필수'
+                    JOIN assignment b ON b.timetable_id=a.timetable_id AND b.slot_id=a.slot_id
+                    JOIN course j ON j.id=b.course_id AND j.category='전공필수'
+                    WHERE a.timetable_id=? AND g.target_year=j.target_year AND g.department_id IS j.department_id""", tt),   # 같은 학년 교필↔전필 겹침
         late_long=q("""SELECT COUNT(*) FROM (SELECT a.course_id,a.section_no,a.session_no,COUNT(*) n,MIN(ts.start_time) st FROM assignment a
                     JOIN time_slot ts ON ts.id=a.slot_id WHERE a.timetable_id=? GROUP BY 1,2,3) WHERE n>=2 AND st>='18:00'""", tt))   # 18:00 이후 시작 연강
     # 연강 응답대로 구성되었나: MUST=연속 2칸 한 번, NONE=1칸씩 두 번. 미응답은 원래 입력 구성

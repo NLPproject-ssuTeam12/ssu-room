@@ -3,6 +3,7 @@
   ③ 18:00 이후 시작 연강 금지                       ④ 19:30 교시는 큰 감점
   ⑤ 분반 연강·교차는 교수 응답 칸(section_pair)으로, 그 교수의 두 분반(3·4번이어도)에
   ⑥ 대안에 회차 순서만 바뀐 같은 안이 나오지 않음
+  ⑦ 같은 학년 교양필수↔전공필수는 겹치지 않음, 학년이 다르면(2학년 전필↔1학년 교필) 겹쳐도 됨
 기준 시간표를 한 번 풀고, 시험용 과목(가상)만 free_courses 로 다시 푼다.
   python solver/tests/run_rules.py"""
 import sys
@@ -20,7 +21,7 @@ ALL = set(SL.values())
 NEXT = [900]
 
 def new_course(cat="전공선택", year="1", sessions=2, sections=((None, 30),), single="NONE", pair="NONE",
-               ok_slots=None, prefer=(), lab=0):
+               ok_slots=None, prefer=(), lab=0, dept=1):
     """시험용 과목(가상). sections=((교수 또는 None=새 교수, 인원), ...). 응답은 분반 교수마다 하나.
     ok_slots 를 주면 그 밖의 칸은 모두 불가(BLOCK)."""
     NEXT[0] += 1; cid = NEXT[0]; profs = []
@@ -31,7 +32,7 @@ def new_course(cat="전공선택", year="1", sessions=2, sections=((None, 30),),
         profs.append(p)
         if sec == 1:
             c.execute("INSERT INTO course(id,term_id,department_id,name,professor_id,category,target_year,session_count,slots_per_session) VALUES (?,?,?,?,?,?,?,?,?)",
-                      (cid, 1, 1, f"시험과목{cid}", p, cat, year, sessions, 1))
+                      (cid, 1, dept, f"시험과목{cid}", p, cat, year, sessions, 1))
         c.execute("INSERT INTO course_section VALUES (?,?,?,?)", (cid, sec, p, enr))
     for p in dict.fromkeys(profs):
         NEXT[0] += 1; rid = NEXT[0]
@@ -99,6 +100,27 @@ pos = {(s, ss): (d, per) for s, ss, d, per in c.execute("""SELECT a.section_no, 
         JOIN time_slot ts ON ts.id=a.slot_id WHERE a.timetable_id=? AND a.course_id=?""", (t, pc))}
 adj = all(pos[(3, ss)][0] == pos[(4, ss)][0] and abs(pos[(3, ss)][1] - pos[(4, ss)][1]) == 1 for ss in (1, 2)) if len(pos) == 8 else False
 report("⑤ 3·4반 같은 요일 바로 붙은 교시", adj, f"({ {k: v for k, v in sorted(pos.items()) if k[0] >= 3} })")
+
+# ⑦ 교필↔전필: 두 칸만 되는 1학년 교필 + 1학년 전필 → 같은 칸에 함께 못 놓음 (한쪽은 못 놓음)
+#              1학년 교필 + 2학년 전필 → 둘 다 같은 칸에 놓임
+# 시험 과목은 가상 학과 2에 둔다 (규칙은 같은 학과 안에서만 → 기준 시간표의 학과 1 필수과목과 섞이지 않음). 경우마다 다른 칸
+c.execute("INSERT INTO department VALUES (2,'가상학과','가상대학')"); c.commit()
+t7a, t7b, t7c = [("화", "13:30"), ("목", "13:30")], [("화", "15:00"), ("목", "15:00")], [("월", "15:00"), ("수", "15:00")]
+g1 = new_course("교양필수", "1", ok_slots=t7a, dept=2); j1 = new_course("전공필수", "1", ok_slots=t7a, dept=2)
+r, t = resolve([g1, j1])
+cg, cj = cells(t, g1), cells(t, j1)
+both = {x[2:] for x in cg} & {x[2:] for x in cj}
+report("⑦ 같은 학년 교필↔전필은 같은 칸에 못 놓임", not both and len(cg) + len(cj) == 2,
+       f"(교필 {[x[2:] for x in cg]}, 전필 {[x[2:] for x in cj]}, 못 놓은 회차 {len([k for k in r['unplaced'] if k[0] in (g1, j1)])})")
+report("⑦ 검증 위반 없음", verify(c, t))
+g2 = new_course("교양필수", "1", ok_slots=t7b, dept=2); j2 = new_course("전공필수", "2", ok_slots=t7b, dept=2)
+r, t = resolve([g2, j2])
+cg, cj = cells(t, g2), cells(t, j2)
+report("⑦ 1학년 교필 ↔ 2학년 전필은 같은 칸에 놓여도 됨", len(cg) == 2 and len(cj) == 2 and {x[2:] for x in cg} == {x[2:] for x in cj},
+       f"(교필 {[x[2:] for x in cg]}, 전필 {[x[2:] for x in cj]})")
+g3 = new_course("교양필수", "1", ok_slots=t7c, dept=2); g4 = new_course("교양필수", "1", ok_slots=t7c, dept=2)
+r, t = resolve([g3, g4])
+report("⑦ 교필끼리는 겹쳐도 됨", len(cells(t, g3)) == 2 and len(cells(t, g4)) == 2)
 
 # ⑥ 대안 중복 없음: 주 2회 과목 여러 개에서 대안 3개씩, 분반별 (요일, 시작) 집합이 서로 달라야 함
 info = {sid: (d, st) for sid, d, st in c.execute("SELECT id, day, start_time FROM time_slot")}
