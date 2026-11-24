@@ -556,7 +556,7 @@ def _persist(con, out, term_id, round_id, W, time_limit, previous_timetable_id, 
     for c in courses.values():
         n = c["sections"]
         for sec in range(1, n + 1):
-            con.execute("INSERT INTO timetable_section VALUES (?,?,?,?)",
+            con.execute("INSERT INTO timetable_section(timetable_id, course_id, section_no, planned_enrollment) VALUES (?,?,?,?)",
                         (tt, c["id"], sec, math.ceil(c["enroll"] / n) if c["enroll"] else None))
     sorted_days = {d: sorted(p) for d, p in by_day.items()}
     for key, (start, room_id) in out["placements"].items():

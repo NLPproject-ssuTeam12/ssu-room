@@ -2,6 +2,7 @@
 교수 답장 → 해석 저장 → 조교 [확인]/[수정]으로 조건 저장(decide_reply) → confirmed_conditions 로 읽기
 → alternatives(condition=...)에 그대로 넘기기 → 대안이 조건을 지키는지.
 조건이 없으면 confirmed_conditions 는 None 이고, None 을 넘기면 조건 없이 만든 대안과 같아야 한다.
+다음 차수: 1차에서 처리안 'next'로 [확인] → open_next_proposal(2차) → carried_conditions 를 alternatives 에 넘긴다.
   python solver/tests/run_cc.py"""
 import copy, sys
 from test_solver2 import *          # build, verify, sc (경로 설정은 test_data가 한다)
@@ -86,7 +87,7 @@ pid, prof = open_proposal(cid)
 m = hdb.add_reply(c, pid, prof, "화요일이나 목요일이면 됩니다. 화요일은 오전만요. (가상 답장)")
 cond1 = {"day_slots": {"1": ["09:00", "10:30"], "3": []}, "end_before": []}
 hdb.save_interpretation(c, m, "CONDITIONAL", {"conditions": cond1}, model_name="test")
-hdb.decide_reply(c, m, TA, "CONFIRM", conditions=cond1)
+hdb.decide_reply(c, m, TA, "CONFIRM", conditions=cond1, proposal_action="move")
 got = hdb.confirmed_conditions(c, pid); sent = copy.deepcopy(got)
 a = sc.alternatives(c, 1, 1, tt, cid, condition=got, n=3, time_limit=10)
 cs = cells_of(a); good = got == cond1 and len(a) > 0 and all(satisfies(cond1, row) for row in cs) and got == sent
@@ -125,6 +126,26 @@ hdb.save_interpretation(c, m4, "CONDITIONAL", {"conditions": {"day_slots": {"3":
 good4 = hdb.confirmed_conditions(c, pid4) is None
 print(f"[결정 전] confirmed_conditions=None {'OK' if good4 else '다름!!'}")
 results.append(good4)
+
+# 5) 다음 차수: 1차 [확인](next) → 2차 새 안건 → 이어받은 조건으로 대안
+c.execute("INSERT INTO round(id,term_id,round_no,deadline_at,status) VALUES (2,1,2,'2026-11-27','OPEN')"); c.commit()
+pid5, _ = open_proposal(cid)
+m5 = hdb.add_reply(c, pid5, prof, "이번 안은 다 어렵고, 목요일이면 됩니다. 17시 전에 끝나야 해요. (가상 답장)")
+cond5 = {"day_slots": {"3": []}, "end_before": [{"day": 3, "time": "17:00"}]}
+hdb.save_interpretation(c, m5, "CONDITIONAL", {"conditions": cond5})
+hdb.decide_reply(c, m5, TA, "CONFIRM", conditions=cond5, proposal_action="next")
+st5 = c.execute("SELECT status FROM proposal WHERE id=?", (pid5,)).fetchone()[0]
+new5 = hdb.open_next_proposal(c, pid5, 2)
+row5 = c.execute("SELECT round_id, timetable_id, course_id, section_no, status, prev_proposal_id FROM proposal WHERE id=?",
+                 (new5,)).fetchone()
+got5 = hdb.carried_conditions(c, new5)
+a5 = sc.alternatives(c, 1, 1, tt, cid, condition=got5, n=3, time_limit=10)
+cs5 = cells_of(a5)
+good5 = (st5 == "NEXT" and row5 == (2, tt, cid, 1, "OPEN", pid5) and got5 == cond5
+         and len(a5) > 0 and all(satisfies(cond5, row) for row in cs5))
+print(f"[다음 차수] 1차 상태 {st5}, 2차 안건 {row5}, 이어받은 조건 {got5 == cond5}, 대안 {len(a5)}개 {cs5}, "
+      f"조건 {'OK' if good5 else '위반!!'}")
+results.append(good5)
 
 ok = ok and verify(c, tt, " (조율 기록 뒤 시간표 그대로)") and all(results)
 print("\n결과:", "모두 통과" if ok else "실패")

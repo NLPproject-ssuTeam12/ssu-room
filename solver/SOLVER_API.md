@@ -79,6 +79,8 @@ opts = sc.make_alternatives(con, term_id, round_id, timetable_id, course_id,
 
 교수가 자기 화면에서 쓴 답장은 `db.add_reply`로, 해석은 `db.save_interpretation`으로 DB에 남는다. 조교가 [확인]·[수정]을 누르면 서버가 `db.decide_reply(con, message_id, ta_id, 'CONFIRM' | 'EDIT', reason, conditions=...)`로 조건을 `reply_interpretation.extracted_json`의 `"confirmed_conditions"`에 저장한다. 다음 차수 대안을 만들 때 `cond = db.confirmed_conditions(con, proposal_id)`로 읽어 **바꾸지 않고** `alternatives(..., condition=cond)`에 넘긴다. 모양은 서버 `conditions_json`과 같은 `{"day_slots": {"1": [...]}, "end_before": [...]}`이고, 조교가 확인한 조건이 없으면(`[현재대로 유지]`, 결정 전, 조건 없이 [확인]) `None`이라 조건 없이 만든 대안과 같다. 엔진 코드는 바뀌지 않았고, `tests/run_cc.py`가 이 흐름([확인]·[수정]·조건 없음·결정 전)을 가상 데이터로 검사한다. 자세한 함수 설명은 `../db/README.md` "조율 회신".
 
+**다음 차수로 조건 넘기기.** 처리안이 "다음 차수"이면 서버가 `db.decide_reply(..., 'CONFIRM', conditions=cond, proposal_action='next')`를 불러 안건을 `NEXT`로 둔다(조건이 비면 거부, 시간표는 그대로). 다음 차수를 열 때 `new = db.open_next_proposal(con, 이전 안건, 다음 차수 round_id)`로 같은 분반의 새 안건(`prev_proposal_id`로 이어짐)을 만들고, `cond = db.carried_conditions(con, new)`로 이전 차수에서 확인한 조건을 읽어 **바꾸지 않고** `alternatives(..., condition=cond)`에 넘긴다. 한 단계만 이어받으며(3차 안건은 2차에서 확인한 조건), 3차 다음 차수는 없다. 엔진 코드는 바뀌지 않았고(`timetable_section` INSERT에 칸 이름만 적음), `tests/run_cc.py` "[다음 차수]"가 이 흐름을 가상 데이터로 검사한다.
+
 반환: 대안 리스트(최대 n개). 각 항목:
 
 ```python
