@@ -15,6 +15,9 @@
 --   6. course_response.section_pair 추가 (NONE / BACK_TO_BACK / CROSS, 기본 NONE): 두 분반 연강·교차를 교수 입력 칸으로 받는다.
 --      이 교수가 이 과목 분반을 정확히 둘 맡을 때 적용. 솔버는 request_item SECTION_PAIR 를 더 읽지 않는다.
 --   7. chapel_slot 추가 (학기, 학년, 칸): 학년별 채플 칸. 그 학년 전공필수는 그 칸에 놓지 않는다(솔버 하드 규칙).
+--   8. course_response.single_day_pref(주 1회 연강)에서 '선호'(PREFER) 삭제 → MUST(무조건) / NONE(필요 없음, 주 2회) 두 가지.
+--   (3·4·6·8은 CHECK 를 바꿔야 해서 course_response 를 다시 만든다. response_slot·other_request·request_item 이
+--    course_response 를 가리키는 연결은 이름으로 이어져 그대로 유지된다.)
 --
 -- 기존 데이터 처리
 --   - 분반 행이 있는 과목: 각 분반 enrollment = 과목 예상 인원 ÷ 분반 수 (올림). 예전 솔버가 쓰던 값과 같다.
@@ -27,6 +30,7 @@
 --   - 건물: 교수마다 가장 높은 순위(rank 가 가장 작은) 건물 하나만 남긴다. 같은 순위가 여럿이면 번호가 작은 건물.
 --     2순위 이하는 버린다.
 --   - prefer_only, language 값은 버린다.
+--   - 주 1회 연강 PREFER(선호)는 NONE(필요 없음)으로 옮긴다. 하루 연강을 꼭 원하면 교수가 다시 MUST 를 고른다.
 --   - request_item 의 SECTION_PAIR(BACK_TO_BACK / CROSS)는 그 응답의 section_pair 로 옮긴다. 행은 지우지 않는다(기록).
 --     한 응답에 둘 이상이면 가장 최근(id 가 큰) 것. 그 밖의 값은 옮기지 않는다(NONE).
 --   - chapel_slot 은 비어 있다. 조교가 학년별 채플 칸을 넣는다.
@@ -54,20 +58,29 @@ WHERE expected_enrollment > 0 AND id NOT IN (SELECT course_id FROM course_sectio
 -- 2. 과목 전체 예상 인원 삭제
 ALTER TABLE course DROP COLUMN expected_enrollment;
 
--- 3·4. 선호 시간 외 불가, 강의 언어 삭제
-ALTER TABLE course_response DROP COLUMN prefer_only;
-ALTER TABLE course_response DROP COLUMN language;
-
--- 6. 두 분반 연강·교차를 교수 응답 칸으로
-ALTER TABLE course_response ADD COLUMN section_pair TEXT NOT NULL DEFAULT 'NONE'
-      CHECK (section_pair IN ('NONE','BACK_TO_BACK','CROSS'));   -- 상관없음 / 연강(가반 바로 뒤 나반) / 교차
-UPDATE course_response
-SET section_pair = (SELECT i.value_text FROM request_item i
-                    WHERE i.response_id = course_response.id AND i.type = 'SECTION_PAIR'
-                      AND i.value_text IN ('BACK_TO_BACK','CROSS')
-                    ORDER BY i.id DESC LIMIT 1)
-WHERE EXISTS (SELECT 1 FROM request_item i WHERE i.response_id = course_response.id AND i.type = 'SECTION_PAIR'
-                AND i.value_text IN ('BACK_TO_BACK','CROSS'));
+-- 3·4·6·8. 교수 응답 다시 만들기: 선호 시간 외 불가·강의 언어 삭제, 두 분반 연강·교차 칸 추가, 주 1회 연강 선호 삭제
+CREATE TABLE course_response_new (            -- 교수가 과목별로 낸 응답
+  id INTEGER PRIMARY KEY,
+  round_id INTEGER NOT NULL REFERENCES round(id),
+  course_id INTEGER NOT NULL REFERENCES course(id),
+  professor_id INTEGER NOT NULL REFERENCES user(id),   -- 응답한 교수 (분반마다 교수가 다를 수 있어 교수별로 받음)
+  lab_requirement INTEGER NOT NULL CHECK (lab_requirement IN (0,1)),      -- 실습실: 1=쓴다(실습실만 배정) / 0=안 쓴다 (사이트에서 필수 입력)
+  single_day_pref TEXT NOT NULL CHECK (single_day_pref IN ('MUST','NONE')),    -- 주 1회 연강(한 분반이 하루에 2칸 이어서): 무조건 / 필요 없음(주 2회)
+  section_pair TEXT NOT NULL DEFAULT 'NONE'
+         CHECK (section_pair IN ('NONE','BACK_TO_BACK','CROSS')),   -- 이 교수가 이 과목 두 분반을 맡을 때: 상관없음 / 연강(가반 바로 뒤 나반) / 교차
+  submitted_at TEXT,
+  UNIQUE (round_id, course_id, professor_id)
+);
+INSERT INTO course_response_new(id, round_id, course_id, professor_id, lab_requirement, single_day_pref, section_pair, submitted_at)
+SELECT r.id, r.round_id, r.course_id, r.professor_id, r.lab_requirement,
+       CASE WHEN r.single_day_pref = 'PREFER' THEN 'NONE' ELSE r.single_day_pref END,
+       COALESCE((SELECT i.value_text FROM request_item i
+                 WHERE i.response_id = r.id AND i.type = 'SECTION_PAIR' AND i.value_text IN ('BACK_TO_BACK','CROSS')
+                 ORDER BY i.id DESC LIMIT 1), 'NONE'),
+       r.submitted_at
+FROM course_response r;
+DROP TABLE course_response;
+ALTER TABLE course_response_new RENAME TO course_response;
 
 -- 7. 학년별 채플 칸
 CREATE TABLE chapel_slot (                   -- 학년별 채플 칸 (조교 입력). 그 학년 전공필수는 이 칸에 놓지 않는다

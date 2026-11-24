@@ -93,7 +93,7 @@ CREATE TABLE course_response (                -- 교수가 과목별로 낸 응�
   course_id INTEGER NOT NULL REFERENCES course(id),
   professor_id INTEGER NOT NULL REFERENCES user(id),   -- 응답한 교수 (분반마다 교수가 다를 수 있어 교수별로 받음)
   lab_requirement INTEGER NOT NULL CHECK (lab_requirement IN (0,1)),      -- 실습실: 1=쓴다(실습실만 배정) / 0=안 쓴다 (사이트에서 필수 입력)
-  single_day_pref TEXT NOT NULL CHECK (single_day_pref IN ('MUST','PREFER','NONE')),    -- 주 1회 연강(한 분반이 하루에 2칸 이어서): 무조건/선호/필요 없음
+  single_day_pref TEXT NOT NULL CHECK (single_day_pref IN ('MUST','NONE')),    -- 주 1회 연강(한 분반이 하루에 2칸 이어서): 무조건 / 필요 없음(주 2회)
   section_pair TEXT NOT NULL DEFAULT 'NONE'
          CHECK (section_pair IN ('NONE','BACK_TO_BACK','CROSS')),   -- 이 교수가 이 과목 두 분반을 맡을 때: 상관없음 / 연강(가반 바로 뒤 나반) / 교차
   submitted_at TEXT,

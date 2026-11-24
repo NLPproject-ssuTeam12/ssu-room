@@ -43,7 +43,7 @@ python db/tests/test_reply.py        # 조율 회신 함수 검사 (pytest 로�
 
 | 용어 | 뜻 | DB에서 어디 |
 |---|---|---|
-| **주 1회 연강** | 한 분반이 **하루에 2칸을 이어서** 수업 (예: 화 3·4교시). MUST 하루에 이어서 / PREFER 가능하면 / NONE 이틀 나눠도 됨 | 교수 응답 `course_response.single_day_pref` |
+| **주 1회 연강** | 한 분반이 **하루에 2칸을 이어서** 수업 (예: 화 3·4교시). MUST 하루에 이어서 / NONE 이틀 나눠도 됨 (선호는 11/24에 없앰) | 교수 응답 `course_response.single_day_pref` |
 | **분반 연강** | 한 교수가 한 과목의 두 분반을 맡을 때 **가반이 끝나자마자 나반** | 교수 응답 `course_response.section_pair` = `BACK_TO_BACK` |
 | **교차** | 분반 연강을 엇갈려서 (가반 월1·목2 / 나반 월2·목1) | `section_pair` = `CROSS` (기본 `NONE` 상관없음) |
 | **채플 칸** | 학년별 채플 시간. 그 학년 전공필수는 이 칸에 놓지 않는다 | `chapel_slot` (조교 입력) |
@@ -152,7 +152,7 @@ db.carried_conditions(con, new_id)                                  # -> dict | 
 | 11/21 | `reply_interpretation.label` 값 | 반영 | `ACCEPT / CONDITIONAL / REJECT / UNCLEAR` (DB `CHECK`). 한글 값은 거부됨. AI 응답 형식을 이 값에 맞추는 일은 AI 담당 |
 | 11/21 | 외래키 검사가 꺼져 있는 문제 | 반영(`db.connect`) | 백엔드 서버가 `db.connect()`를 쓰도록 적용해야 함 (적용 여부 미확인) |
 | 11/21 | 담당 교수를 과목마다 → **분반마다** | 반영 | `course_section`, `course_response.professor_id`, 뷰 |
-| 11/21 | 주 1회 연강 3단계 | 반영 | `course_response.single_day_pref` (MUST/PREFER/NONE) |
+| 11/21 | 주 1회 연강 3단계 | 11/24 두 단계로 | `course_response.single_day_pref` (MUST/NONE). PREFER는 006이 NONE으로 옮김 |
 | 11/21 → 11/22 | 실습실 3단계 → **0/1** | 반영 | `course_response.lab_requirement` (INTEGER 0/1). 003이 MUST·PREFER→1, NONE→0으로 옮김 |
 | 11/22 | "선호 시간을 제외하면 수업하기 어렵다" 버튼 | 11/24 삭제 | `course_response.prefer_only` (006에서 없앰) |
 | 11/22 | 서버 단계 관리 (3차 조율 `ROUND3` 포함) | 반영 | `term.phase`, `phase_log`, `db.get_phase` `db.set_phase`. 004가 `ROUND3`를 추가 |
@@ -201,7 +201,7 @@ sqlite3 -bail ssuroom.db < db/migrations/006_20261124_section.sql      # 005까�
 - **003**: `AVOID` 칸은 지워집니다(= 상관없음). 실습실은 MUST·PREFER → 1, NONE → 0.
 - **004**: `term` 테이블을 다시 만들어 `phase`에 `ROUND3`를 추가합니다. 학기 행과 지금 단계는 그대로 옮깁니다.
 - **005**: `message`에 `reply_to_id`(기존 행은 NULL), `timetable_section`에 `status`(기존 행은 `DONE`)를 더하고, `proposal`을 다시 만들어 `status`를 6개 값으로 고정하고 `prev_proposal_id`(기존 행은 NULL, `UNIQUE`)를 더합니다. `WAITING`(옛 기본값)과 NULL은 `OPEN`으로 옮기고, 그 밖의 값이 있으면 **멈춥니다**(조용히 바꾸지 않음). 실행 전에 확인하는 SELECT가 파일 위 주석에 있습니다. `-bail` 없이 실행하면 sqlite3가 오류 뒤에도 다음 줄을 실행해 옛 `proposal`을 지울 수 있으니 꼭 붙입니다.
-- **006**: `course_section`에 `enrollment`를 더하고 `course.expected_enrollment`의 값을 옮깁니다(분반 행이 있으면 인원 ÷ 분반 수 올림, 없으면 1분반 행을 만들어 그대로. 인원이 없으면 행을 만들지 않음). `course.expected_enrollment`, `course_response.prefer_only`·`language`는 지웁니다(`DROP COLUMN`이라 SQLite 3.35 이상). `professor_building_pref`는 교수당 한 행으로 다시 만들고 가장 높은 순위 건물 하나만 남깁니다. `course_response.section_pair`를 더하고 기존 `SECTION_PAIR` 요청(가장 최근 값)을 옮기며, 빈 `chapel_slot`을 만듭니다. **예전에 교수 요청(`SECTION_COUNT`)으로 분반이 여러 개였던 과목은 실행 뒤 조교가 `course_section`에 분반을 직접 넣어야 합니다** (확인 SELECT는 파일 주석).
+- **006**: `course_section`에 `enrollment`를 더하고 `course.expected_enrollment`의 값을 옮깁니다(분반 행이 있으면 인원 ÷ 분반 수 올림, 없으면 1분반 행을 만들어 그대로. 인원이 없으면 행을 만들지 않음). `course.expected_enrollment`, `course_response.prefer_only`·`language`는 지웁니다(`DROP COLUMN`이라 SQLite 3.35 이상). `professor_building_pref`는 교수당 한 행으로 다시 만들고 가장 높은 순위 건물 하나만 남깁니다. `course_response`는 다시 만들어 `section_pair`를 더하고(기존 `SECTION_PAIR` 요청의 가장 최근 값), 주 1회 연강 `PREFER`를 `NONE`으로 옮기며, 빈 `chapel_slot`을 만듭니다. **예전에 교수 요청(`SECTION_COUNT`)으로 분반이 여러 개였던 과목은 실행 뒤 조교가 `course_section`에 분반을 직접 넣어야 합니다** (확인 SELECT는 파일 주석).
 - 마지막 `PRAGMA foreign_key_check`가 아무것도 출력하지 않아야 정상입니다. 두 번 실행하면 오류가 납니다.
 - **주의**: `term` 칸이 늘어서 `INSERT INTO term VALUES (...)`처럼 칸 이름 없이 넣던 코드는 칸 이름을 적어야 합니다. `message`·`timetable_section`도 005로 칸이 하나씩 늘었습니다(`solver_core.py`, `solver/tests/run_n3.py`의 `timetable_section` INSERT는 칸 이름을 적도록 고쳤습니다). 006으로 `course_section`은 칸이 늘고 `course`·`course_response`·`professor_building_pref`는 칸이 줄었습니다.
 - `tests/test_migration.py`가 v3→001→…→006, v4→002→…→006, v7→005→006, v8→006 경로가 (005 뒤에는 `archive/schema_v8.sql`, 006 뒤에는) 최종 `schema.sql`과 같은 모양을 만들고, 데이터를 보존하며, 새 규칙(잘못된 단계·`NLP`·`AVOID`·`WAITING`·없는 `reply_to_id`·중복·없는 `prev_proposal_id`·잘못된 분반 `status` 거부, `NEXT` 허용)이 작동하는지, 목록 밖 `status`가 있으면 005가 멈추고 되돌릴 수 있는지 검사합니다.

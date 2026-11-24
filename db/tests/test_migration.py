@@ -175,7 +175,7 @@ def build_v8():
          VALUES (12,1,1,'인원 미정',2,NULL,2,1),(13,1,1,'자료구조',4,45,2,1)""")
     q("INSERT INTO course_section VALUES (10,1,2),(10,2,3),(13,1,4),(13,2,5)")
     q("""INSERT INTO course_response(id,round_id,course_id,professor_id,lab_requirement,single_day_pref,prefer_only,language)
-         VALUES (100,1,10,2,1,'MUST',1,'영어'),(101,1,11,3,0,'NONE',0,NULL)""")
+         VALUES (100,1,10,2,1,'MUST',1,'영어'),(101,1,11,3,0,'NONE',0,NULL),(102,1,13,4,0,'PREFER',0,NULL)""")
     q("INSERT INTO response_slot VALUES (100,1,'PREFER'),(100,2,'BLOCK')")
     q("INSERT INTO request_item(response_id,type,value_int) VALUES (100,'SECTION_COUNT',2)")
     q("INSERT INTO request_item(response_id,type,value_text) VALUES (100,'SECTION_PAIR','BACK_TO_BACK'),(100,'SECTION_PAIR','CROSS'),(101,'SECTION_PAIR','이상한 값')")
@@ -194,16 +194,20 @@ want8 = [(10, 1, 2, 20), (10, 2, 3, 20), (11, 1, 3, 40), (13, 1, 4, 23), (13, 2,
 bld8 = v8.execute("select professor_id, building_id from professor_building_pref order by 1").fetchall()
 print("  희망 건물(교수당 하나):", bld8)
 cr8 = v8.execute("select id, lab_requirement, single_day_pref, section_pair from course_response order by id").fetchall()
-print("  응답(실습실·연강 그대로, 분반 연강·교차 옮김: 최근 값, 이상한 값은 NONE):", cr8)
+print("  응답(실습실 그대로, 연강 PREFER→NONE, 분반 연강·교차 옮김: 최근 값, 이상한 값은 NONE):", cr8)
+rs8 = v8.execute("select response_id, slot_id, kind from response_slot order by 1,2").fetchall()
+print("  응답 칸(다시 만든 응답에 그대로 연결):", rs8); ok_rs8 = rs8 == [(100, 1, "PREFER"), (100, 2, "BLOCK")]
 cols8 = {t: [r[1] for r in v8.execute(f"pragma table_info({t})")] for t in ("course", "course_response")}
 gone = "expected_enrollment" not in cols8["course"] and not {"prefer_only", "language"} & set(cols8["course_response"])
 print("  삭제된 칸 없음:", gone)
-ok5 = ok5 and same and secs8 == want8 and bld8 == [(2, 2), (3, 3), (4, 1)] and cr8 == [(100, 1, "MUST", "CROSS"), (101, 0, "NONE", "NONE")] and gone
+ok5 = ok5 and ok_rs8 and same and secs8 == want8 and bld8 == [(2, 2), (3, 3), (4, 1)] and cr8 == [(100, 1, "MUST", "CROSS"), (101, 0, "NONE", "NONE"), (102, 0, "NONE", "NONE")] and gone
 for bad in ["UPDATE course_section SET enrollment=0 WHERE course_id=10 AND section_no=1",
             "INSERT INTO professor_building_pref VALUES (2,3)",
             "INSERT INTO professor_building_pref(professor_id) VALUES (5)",
             "INSERT INTO professor_building_pref VALUES (5,99)",
             "UPDATE course_response SET section_pair='BOTH' WHERE id=100",
+            "UPDATE course_response SET single_day_pref='PREFER' WHERE id=100",
+            "INSERT INTO response_slot VALUES (999,1,'BLOCK')",
             "INSERT INTO chapel_slot VALUES (1,'1',999)",
             "INSERT INTO chapel_slot VALUES (1,'1',1),(1,'1',1)"]:
     try: v8.execute(bad); print("  거부 안 됨!!", bad[:60]); ok5 = False
