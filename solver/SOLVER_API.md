@@ -104,14 +104,14 @@ dict(stage="다른 수업은 그대로" | "같은 교수의 다른 수업 일부
 | 희망 건물 `professor_building_pref.building_id` | 교수당 하나. 그 밖의 건물은 벌점(`building_other`) |
 | 실습실 `course_response.lab_requirement` | `1` 쓴다(실습실만 배정) / `0` 안 쓴다 (필수 입력) |
 | 칠한 칸 `response_slot.kind` | `PREFER` 희망 / `BLOCK` 불가. 칠하지 않은 칸은 상관없음 |
-| 주 1회 연강 `course_response.single_day_pref` | `MUST` 하루에 연속 2칸 / `PREFER` 가능하면 하루에 / `NONE` 1칸씩 이틀 (필수 입력) |
+| 주 1회 연강 `course_response.single_day_pref` | `MUST` 하루에 연속 2칸 / `NONE` 1칸씩 이틀 (필수 입력. `PREFER`는 11/24에 없앰) |
 | 답장 해석 `reply_interpretation.label` | `ACCEPT` 수용 / `CONDITIONAL` 조건부 / `REJECT` 거절 / `UNCLEAR` 확인 필요 |
 
 ### 연강은 두 종류다 (용어 구분)
 
 | 용어 | 뜻 | 어디서 받나 |
 |---|---|---|
-| **주 1회 연강** | 한 분반이 **하루에 2칸을 이어서** 수업 (예: 화 3·4교시). 3학점 수업이 이틀 나눠 하지 않고 하루에 끝남 | 교수 응답 `single_day_pref` (MUST/PREFER/NONE) |
+| **주 1회 연강** | 한 분반이 **하루에 2칸을 이어서** 수업 (예: 화 3·4교시). 3학점 수업이 이틀 나눠 하지 않고 하루에 끝남 | 교수 응답 `single_day_pref` (MUST/NONE) |
 | **분반 연강** | 한 교수가 한 과목의 두 분반을 맡을 때 **가반이 끝나자마자 나반**이 이어짐. 교차는 가반 월1·목2, 나반 월2·목1처럼 엇갈리게 | 교수 응답 `course_response.section_pair` (`NONE` / `BACK_TO_BACK` / `CROSS`, 11/24) |
 
 - 주 1회 연강은 **주당 2칸짜리 수업(1칸×2회)** 에만 적용된다. 그 외 수업은 입력된 구성 그대로.

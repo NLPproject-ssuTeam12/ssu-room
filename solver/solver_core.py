@@ -17,8 +17,7 @@ DB(schema.sql)에서 입력을 읽어 초안 시간표를 만들고 같은 DB에
   용어 두 가지 (섞어 쓰지 말 것)
     주 1회 연강 = 한 분반이 하루에 2칸을 이어서 수업 (course_response.single_day_pref)
         MUST   하루에 연속 2칸 한 번으로만 배정
-        NONE   1칸씩 두 번(이틀)으로만 배정
-        PREFER 솔버가 고르되, 하루에 몰면 보너스   ※ 주당 2칸짜리 수업에만 적용
+        NONE   1칸씩 두 번(이틀)으로만 배정   ※ 주당 2칸짜리 수업에만 적용. '선호'(PREFER)는 11/24에 없앰
     분반 연강/교차 = 한 교수가 한 과목의 두 분반을 맡을 때 가반 끝나자마자 나반
         (교수 응답 course_response.section_pair: BACK_TO_BACK / CROSS. 그 교수의 그 과목 분반이 정확히 둘일 때)
   채플: 학년별 채플 칸(chapel_slot)에는 그 학년 전공필수를 놓지 않는다(하드). 전공필수끼리는 겹쳐도 된다(11/24).
@@ -47,7 +46,6 @@ DEFAULT_WEIGHTS = {
     "prefer": 10,         # 교수가 희망한 칸 (보너스)
     "building_other": 50, # 교수가 고른 희망 건물이 아닌 건물이면 큰 벌점 (11/24: 하드는 아님. 유지 30 + 희망 칸 2칸 20 과 같은 크기)
     "lab_waste": 5,       # 실습실을 안 쓴다고 답한 수업(0)이 실습실 사용
-    "single_day_prefer": 12,  # 주 1회 연강 '선호'인데 이틀로 나눴을 때 벌점(= 하루에 몰면 보너스)
     "keep": 30,           # 이전 배정을 그대로 두면 보너스 (최소 변경)
     "late": 60,           # 19:30 교시를 쓰면 큰 감점 (11/21·11/24: 다른 방법이 없을 때만)
     "history_room": 8,    # 회신 안 한 교수: 전년에 같은 과목을 한 강의실이면 보너스
@@ -234,11 +232,11 @@ def _apply_day_slots(cond, slot_info):
 
 def _structures(c, sd):
     """한 분반이 가질 수 있는 수업 구성들. 각 구성 = [(회차번호, 한 회 칸 수), ...]
-    주당 2칸짜리 수업이고 교수가 연강을 답했을 때만 '연속 2칸 한 번'과 '1칸 두 번'을 오간다."""
+    주당 2칸짜리 수업이고 교수가 답했을 때만 MUST='연속 2칸 한 번', NONE='1칸 두 번'. 그 밖에는 입력 구성 그대로."""
     fixed = [(ss, c["k"]) for ss in range(1, c["sessions"] + 1)]
     if c["sessions"] * c["k"] == 2 and sd["single_day"] and not sd["paired"]:
         long_, split = [(1, 2)], [(1, 1), (2, 1)]
-        return {"MUST": [long_], "NONE": [split], "PREFER": [long_, split]}[sd["single_day"]]
+        return {"MUST": [long_], "NONE": [split]}[sd["single_day"]]
     return [fixed]
 
 
@@ -298,7 +296,7 @@ def _solve_model(con, term_id, round_id, W, time_limit, workers, prev, prevk, fr
         for sec in range(1, n + 1):
             sd = secs[(c["id"], sec)]
             cid = c["id"]
-            if sd["paired"] and sd["single_day"] in ("MUST", "PREFER"):
+            if sd["paired"] and sd["single_day"] == "MUST":
                 unsupported.append((cid, "주 1회 연강 응답과 분반 연강·교차 요청을 함께 받으면 분반 요청을 우선하고 주 1회 연강 응답은 무시"))
             structs = _structures(c, sd)
             ps = sorted((ss, prevk[(cid, sec, ss)]) for ss in prev_by_sec.get((cid, sec), {}))
@@ -307,18 +305,12 @@ def _solve_model(con, term_id, round_id, W, time_limit, workers, prev, prevk, fr
             if frozen:
                 structs = [matched]
                 frozen_secs.add((cid, sec))
-            choice = None
-            if len(structs) == 2:
-                choice = m.NewBoolVar(f"single_day{cid}_{sec}")        # 1이면 하루에 연속 2칸(첫 번째 구성)
-                cost[("choice", cid, sec)] = (choice, -W["single_day_prefer"])
-                if prev and matched is not None:
-                    m.AddHint(choice, 1 if structs.index(matched) == 0 else 0)   # 이전 구성도 출발점으로
             bp = pref.get(sd["prof"]) or (hist_bld.get(sd["prof"]) if not sd["responded"] else None)   # 희망 건물 하나
             hroom = hist_room.get((sd["prof"], c["name"]), set()) if not sd["responded"] else set()
             use_cond = bool(cond) and (cid, sec) in (cond_sections or ()) and not frozen
 
-            for si, struct in enumerate(structs):
-                act = 1 if choice is None else (choice if si == 0 else choice.Not())
+            for struct in structs:                      # 구성은 하나 (MUST·NONE·입력 그대로)
+                act = 1
                 for (ss, k) in struct:
                     key = (cid, sec, ss)
                     skey = (cid, sec, ss, k)

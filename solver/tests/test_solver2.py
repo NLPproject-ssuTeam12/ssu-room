@@ -46,7 +46,7 @@ def verify(c, tt, label=""):
                     WHERE a.timetable_id=? AND c.category='전공필수'""", tt),          # 전공필수가 그 학년 채플 칸에
         late_long=q("""SELECT COUNT(*) FROM (SELECT a.course_id,a.section_no,a.session_no,COUNT(*) n,MIN(ts.start_time) st FROM assignment a
                     JOIN time_slot ts ON ts.id=a.slot_id WHERE a.timetable_id=? GROUP BY 1,2,3) WHERE n>=2 AND st>='18:00'""", tt))   # 18:00 이후 시작 연강
-    # 연강 응답대로 구성되었나: MUST=연속 2칸 한 번, NONE=1칸씩 두 번, PREFER=둘 중 하나. 미응답은 원래 입력(2회×1칸)
+    # 연강 응답대로 구성되었나: MUST=연속 2칸 한 번, NONE=1칸씩 두 번. 미응답은 원래 입력 구성
     shape = {}
     for cid, sec, ss, n in c.execute("SELECT course_id, section_no, session_no, COUNT(*) FROM assignment WHERE timetable_id=? GROUP BY 1,2,3", (tt,)):
         shape.setdefault((cid, sec), []).append(n)
@@ -58,8 +58,7 @@ def verify(c, tt, label=""):
         r = c.execute("SELECT single_day_pref FROM course_response WHERE course_id=? AND professor_id=?", (cid, prof)).fetchone()
         pref = r[0] if r else None
         sc_, k_ = c.execute("SELECT session_count, slots_per_session FROM course WHERE id=?", (cid,)).fetchone()
-        ok = {"MUST": ns == [2], "NONE": sorted(ns) == [1, 1], "PREFER": ns == [2] or sorted(ns) == [1, 1],
-              None: sorted(ns) == [k_] * sc_}[pref]   # 미응답은 입력된 구성 그대로
+        ok = {"MUST": ns == [2], "NONE": sorted(ns) == [1, 1], None: sorted(ns) == [k_] * sc_}[pref]   # 미응답은 입력된 구성 그대로
         if not ok and WRONG_LOG is not None: WRONG_LOG.append((cid, sec, ns))
         wrong += (not ok)
     res["single_day_shape"] = wrong
