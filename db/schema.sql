@@ -153,6 +153,8 @@ CREATE TABLE timetable_section (              -- 이 버전에서 열리는 분�
   course_id INTEGER REFERENCES course(id),
   section_no INTEGER,
   planned_enrollment INTEGER,
+  status TEXT NOT NULL DEFAULT 'DONE'
+         CHECK (status IN ('DONE','COORD','MANUAL')),  -- 배정 상태: 끝남 / 조율 중 / 조교가 직접 정함 (서버 assignment.status 와 같은 이름)
   PRIMARY KEY (timetable_id, course_id, section_no)
 );
 CREATE TABLE assignment (                     -- 분반의 수업 회차가 차지한 칸 하나당 한 행
@@ -176,8 +178,10 @@ CREATE TABLE proposal (
   section_no INTEGER,                                  -- 어느 분반의 조율인지 (NULL = 과목 전체)
   reason TEXT,
   status TEXT NOT NULL DEFAULT 'OPEN'
-         CHECK (status IN ('OPEN','SENT','PROPOSED','RESOLVED','KEPT'))   -- 보내기 전 / 답 기다림 / 조교 확인 대기 / 반영됨 / 현재대로 유지
+         CHECK (status IN ('OPEN','SENT','PROPOSED','RESOLVED','KEPT','NEXT')),   -- 보내기 전 / 답 기다림 / 조교 확인 대기 / 반영됨 / 현재대로 유지 / 다음 차수로
+  prev_proposal_id INTEGER REFERENCES proposal(id)     -- 이어받은 이전 차수 안건 (NULL = 1차 또는 처음 연 안건)
 );
+CREATE UNIQUE INDEX ux_proposal_prev ON proposal(prev_proposal_id);   -- 한 안건에서 다음 차수 안건은 하나만
 CREATE TABLE proposal_option (
   id INTEGER PRIMARY KEY,
   proposal_id INTEGER NOT NULL REFERENCES proposal(id),
