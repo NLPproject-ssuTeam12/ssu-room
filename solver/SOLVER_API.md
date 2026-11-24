@@ -84,7 +84,7 @@ opts = sc.make_alternatives(con, term_id, round_id, timetable_id, course_id,
 반환: 대안 리스트(최대 n개). 각 항목:
 
 ```python
-dict(stage="다른 수업은 그대로" | "같은 교수·같은 학년 필수과목 일부 이동",
+dict(stage="다른 수업은 그대로" | "같은 교수의 다른 수업 일부 이동",
      placements={(분반, 회차): (시작 칸 id, 강의실 id)},
      ks={(분반, 회차): 한 회에 차지하는 칸 수},
      moves=[((과목, 분반, 회차), (이전 칸, 이전 방), (새 칸, 새 방))],   # 2단계에서 같이 움직인 다른 수업
@@ -112,7 +112,7 @@ dict(stage="다른 수업은 그대로" | "같은 교수·같은 학년 필수�
 | 용어 | 뜻 | 어디서 받나 |
 |---|---|---|
 | **주 1회 연강** | 한 분반이 **하루에 2칸을 이어서** 수업 (예: 화 3·4교시). 3학점 수업이 이틀 나눠 하지 않고 하루에 끝남 | 교수 응답 `single_day_pref` (MUST/PREFER/NONE) |
-| **분반 연강** | 두 분반을 맡을 때 **가반이 끝나자마자 나반**이 이어짐. 교차는 가반 월1·목2, 나반 월2·목1처럼 엇갈리게 | 기타 요청 → `request_item` `SECTION_PAIR` (`BACK_TO_BACK` / `CROSS`) |
+| **분반 연강** | 한 교수가 한 과목의 두 분반을 맡을 때 **가반이 끝나자마자 나반**이 이어짐. 교차는 가반 월1·목2, 나반 월2·목1처럼 엇갈리게 | 교수 응답 `course_response.section_pair` (`NONE` / `BACK_TO_BACK` / `CROSS`, 11/24) |
 
 - 주 1회 연강은 **주당 2칸짜리 수업(1칸×2회)** 에만 적용된다. 그 외 수업은 입력된 구성 그대로.
 - 응답이 없는 분반(미회신)은 입력된 구성 그대로 두고 주 1회 연강을 가정하지 않는다.
@@ -132,6 +132,9 @@ dict(stage="다른 수업은 그대로" | "같은 교수·같은 학년 필수�
 - 수강 인원: `enrollment`보다 정원이 작은 강의실은 그 분반의 후보에서 뺀다(필수). NULL이면 검사하지 않는다. 시간표의 `timetable_section.planned_enrollment`에 그 값을 그대로 적는다.
 - 희망 건물: 교수당 하나. 다른 건물에 놓으면 `building_other`(기본 50, 큰 벌점) 벌점. 응답 없는 교수는 전년 확정본에서 가장 많이 쓴 건물을 희망 건물로 본다.
 - "선호 시간 외 불가"(`prefer_only`)와 강의 언어(`language`)는 없앴다(006).
+- 채플: `chapel_slot(term_id, target_year, slot_id)`의 칸에는 그 학년(`course.target_year`) 전공필수를 놓지 않는다(하드). 전공필수끼리는 겹쳐도 된다. 교양필수는 다루지 않는다.
+- 시간: 19:30 교시는 `late`(기본 60) 감점, 연속 2칸 이상 수업은 18:00 이후에 시작하지 않는다(하드).
+- 대안은 분반별 시작 칸 집합으로 비교한다. 회차 순서만 바꾼 같은 안은 다시 나오지 않는다.
 
 ## 6. 서버 단계와 기타 요청 (`db.py`)
 
@@ -144,9 +147,9 @@ db.confirm_other_request(con, other_request_id, user_id, memo=None)
 
 - 단계: `COLLECTING` 희망 수집 → `ROUND1` 1차 조율 → `ROUND2` 2차 조율 → `ROUND3` 3차 조율 → `FINAL` 확정.
 - 기타 요청은 AI를 거치지 않는다. 교수 원문(`other_request.body`, `PENDING`) → 조교가 읽고 필요하면 `request_item`(`source='TA'`, `other_request_id`)을 직접 입력 → "확인함"(`CONFIRMED`).
-- 솔버가 읽는 `request_item` 종류는 `SECTION_PAIR`뿐이다(11/24부터 `SECTION_COUNT`는 읽지 않음). 그 밖의 요청은 조교가 보고 판단한다.
+- 11/24부터 솔버는 `request_item`을 읽지 않는다. 분반 수는 `course_section`, 분반 연강·교차는 응답의 `section_pair`로 받는다. `request_item`은 조교가 남기는 기록이다.
 
 ## 7. 알려진 한계
 
-- 분반 연강·교차(`SECTION_PAIR`)는 분반이 정확히 2개이고 1회 한 칸일 때만 지원. 이때 주 1회 연강 응답은 무시된다(`unsupported`에 표시).
+- 분반 연강·교차(`section_pair`)는 그 교수가 그 과목에서 맡은 분반이 정확히 2개이고 1회 한 칸일 때만 지원. 이때 주 1회 연강 응답은 무시된다(`unsupported`에 표시).
 - 풀이 시간: 조건이 빡빡한 분반 연강·교차 과목이 있으면 30초 안에는 일부가 못 놓일 수 있다. 60~90초를 권장.

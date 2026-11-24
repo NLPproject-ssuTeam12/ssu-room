@@ -44,6 +44,9 @@ def build(seed=1, n_courses=70, n_prof=30):
         n_sec = 2 if rnd.random() < 0.3 else 1   # 분반 수 (오프라인 회의에서 정해 조교가 입력)
         for s in range(1, n_sec+1):
             c.execute("INSERT INTO course_section VALUES (?,?,?,?)", (cid, s, prof, -(-enr // n_sec)))
+    CHAPEL = {"1": ("화", "12:00"), "2": ("목", "12:00"), "3": ("수", "12:00"), "4": ("월", "12:00")}   # 가상 채플 시간
+    for yr, (d, t) in CHAPEL.items():
+        c.execute("INSERT INTO chapel_slot SELECT 1, ?, id FROM time_slot WHERE day=? AND start_time=?", (yr, d, t))
     for p in range(1,n_prof+1):
         c.execute("INSERT INTO professor_building_pref VALUES (?,?)",(p,rnd.randint(1,4)))   # 희망 건물 하나
     c.commit(); return c

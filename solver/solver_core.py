@@ -19,7 +19,10 @@ DB(schema.sql)에서 입력을 읽어 초안 시간표를 만들고 같은 DB에
         MUST   하루에 연속 2칸 한 번으로만 배정
         NONE   1칸씩 두 번(이틀)으로만 배정
         PREFER 솔버가 고르되, 하루에 몰면 보너스   ※ 주당 2칸짜리 수업에만 적용
-    분반 연강/교차 = 두 분반을 맡을 때 가반 끝나자마자 나반 (request_item SECTION_PAIR: BACK_TO_BACK / CROSS)
+    분반 연강/교차 = 한 교수가 한 과목의 두 분반을 맡을 때 가반 끝나자마자 나반
+        (교수 응답 course_response.section_pair: BACK_TO_BACK / CROSS. 그 교수의 그 과목 분반이 정확히 둘일 때)
+  채플: 학년별 채플 칸(chapel_slot)에는 그 학년 전공필수를 놓지 않는다(하드). 전공필수끼리는 겹쳐도 된다(11/24).
+  시간: 19:30 교시는 큰 감점(late), 18:00 이후 시작하는 연속 2칸 이상 수업은 놓지 않는다(하드).
   실습실: 1(쓴다 → 실습실만 배정) / 0(안 쓴다 → 실습실 쓰면 약한 벌점). 희망 칸: PREFER(희망)/BLOCK(불가), 칠하지 않으면 상관없음
 
 공개 함수
@@ -33,8 +36,9 @@ from collections import defaultdict
 
 from ortools.sat.python import cp_model
 
-# 학년 겹침을 막을 과목 구분. 실제 학과 규칙에 맞게 바꿀 것.
-REQUIRED_CATEGORIES = {"전공필수", "교양필수"}
+MAJOR_REQUIRED = "전공필수"   # 채플 칸을 피할 과목 구분 (course.category)
+LATE_START = "19:30"          # 이 시각에 시작하는 칸은 큰 감점
+LONG_LAST_START = "16:30"     # 연속 2칸 이상 수업은 이 시각까지만 시작 (18:00 시작 연강 금지)
 GROUP_ROOMS = True   # False면 강의실마다 따로 변수를 만든다(비교 실험용)
 DAYS = ["월", "화", "수", "목", "금", "토", "일"]   # 조율 쪽 days 번호: 0=월 … 4=금
 
@@ -45,6 +49,7 @@ DEFAULT_WEIGHTS = {
     "lab_waste": 5,       # 실습실을 안 쓴다고 답한 수업(0)이 실습실 사용
     "single_day_prefer": 12,  # 주 1회 연강 '선호'인데 이틀로 나눴을 때 벌점(= 하루에 몰면 보너스)
     "keep": 30,           # 이전 배정을 그대로 두면 보너스 (최소 변경)
+    "late": 60,           # 19:30 교시를 쓰면 큰 감점 (11/21·11/24: 다른 방법이 없을 때만)
     "history_room": 8,    # 회신 안 한 교수: 전년에 같은 과목을 한 강의실이면 보너스
 }
 
@@ -95,14 +100,14 @@ def load_input(con, term_id, round_id):
                       session_count, slots_per_session
                FROM course WHERE term_id=?""", (term_id,)):
         courses[cid] = dict(id=cid, name=name, prof=prof, dept=dept, cat=cat, year=yr,
-                            sessions=sc, k=sps, sections=1, pair=None)
+                            sessions=sc, k=sps, sections=1)
     resp = {}                                   # (과목, 교수) -> 응답
-    for rid, cid, prof, lab, single_day in q(
-            """SELECT id, course_id, professor_id, lab_requirement, single_day_pref
+    for rid, cid, prof, lab, single_day, pair in q(
+            """SELECT id, course_id, professor_id, lab_requirement, single_day_pref, section_pair
                FROM course_response WHERE round_id=?""", (round_id,)):
         if cid not in courses:
             continue
-        r = dict(lab=lab, single_day=single_day, block=set(), prefer=set(), id=rid)
+        r = dict(lab=lab, single_day=single_day, pair=pair, block=set(), prefer=set(), id=rid)
         for sid, kind in q("SELECT slot_id, kind FROM response_slot WHERE response_id=?", (rid,)):
             r[{"BLOCK": "block", "PREFER": "prefer"}[kind]].add(sid)
         resp[(cid, prof)] = r
@@ -119,11 +124,14 @@ def load_input(con, term_id, round_id):
         c["sections"] = len(rows)
         c["section_prof"] = {sec: p for sec, (p, _) in rows.items()}
         c["section_enroll"] = {sec: e for sec, (_, e) in rows.items()}
-    for cid, mode in q("""SELECT r.course_id, i.value_text FROM request_item i
-                       JOIN course_response r ON r.id=i.response_id
-                       WHERE r.round_id=? AND i.type='SECTION_PAIR'""", (round_id,)):
-        if cid in courses:
-            courses[cid]["pair"] = mode        # BACK_TO_BACK(분반 연강: 가반 직후 나반) / CROSS(교차)
+    # 분반 연강·교차: 교수 응답 칸(section_pair). 그 교수가 이 과목에서 맡은 분반이 정확히 둘이면 (작은 번호=가반, 큰 번호=나반)
+    for c in courses.values():
+        c["pairs"] = []                          # [([그 교수의 분반 번호들], 모드)]
+        for (cc, prof), r in resp.items():
+            if cc != c["id"] or r["pair"] in (None, "NONE"):
+                continue
+            mine = sorted(sec for sec, p in c["section_prof"].items() if p == prof)
+            c["pairs"].append((mine, r["pair"]))
     secs = {}
     for c in courses.values():
         for sec in range(1, c["sections"] + 1):
@@ -131,6 +139,7 @@ def load_input(con, term_id, round_id):
             r = resp.get((c["id"], prof))
             secs[(c["id"], sec)] = dict(
                 prof=prof, responded=r is not None, enroll=c["section_enroll"][sec],
+                paired=any(sec in mine for mine, _ in c["pairs"]),
                 lab=r["lab"] if r else None, single_day=r["single_day"] if r else None,
                 block=r["block"] if r else set(), prefer=r["prefer"] if r else set(),
                 )
@@ -138,6 +147,11 @@ def load_input(con, term_id, round_id):
              for rid, b, cap, lab, rd in q(
                  "SELECT id, building_id, capacity, is_lab, reserved_department_id FROM room")}
     pref = {p: b for p, b in q("SELECT professor_id, building_id FROM professor_building_pref")}   # 교수 -> 희망 건물
+    chapel = defaultdict(set)                    # 학년 -> 채플 칸
+    for yr, sid in q("SELECT target_year, slot_id FROM chapel_slot WHERE term_id=?", (term_id,)):
+        chapel[str(yr)].add(sid)
+    for c in courses.values():
+        c["chapel"] = chapel.get(str(c["year"]), set()) if c["cat"] == MAJOR_REQUIRED and c["year"] else set()
     return by_day, courses, secs, rooms, pref, slot_info
 
 
@@ -222,7 +236,7 @@ def _structures(c, sd):
     """한 분반이 가질 수 있는 수업 구성들. 각 구성 = [(회차번호, 한 회 칸 수), ...]
     주당 2칸짜리 수업이고 교수가 연강을 답했을 때만 '연속 2칸 한 번'과 '1칸 두 번'을 오간다."""
     fixed = [(ss, c["k"]) for ss in range(1, c["sessions"] + 1)]
-    if c["sessions"] * c["k"] == 2 and sd["single_day"] and not c["pair"]:
+    if c["sessions"] * c["k"] == 2 and sd["single_day"] and not sd["paired"]:
         long_, split = [(1, 2)], [(1, 1), (2, 1)]
         return {"MUST": [long_], "NONE": [split], "PREFER": [long_, split]}[sd["single_day"]]
     return [fixed]
@@ -251,7 +265,6 @@ def _solve_model(con, term_id, round_id, W, time_limit, workers, prev, prevk, fr
     m = cp_model.CpModel()
     x, cost = {}, {}
     occ_room, occ_prof = defaultdict(list), defaultdict(list)
-    cohort_vars = defaultdict(list)
     day_use = defaultdict(list)
     unplaced = {}                               # (과목,분반,회차,칸수) -> 못 놓음 변수
     day_idx = {d: i for i, d in enumerate(by_day)}
@@ -285,7 +298,7 @@ def _solve_model(con, term_id, round_id, W, time_limit, workers, prev, prevk, fr
         for sec in range(1, n + 1):
             sd = secs[(c["id"], sec)]
             cid = c["id"]
-            if c["pair"] and sd["single_day"] in ("MUST", "PREFER"):
+            if sd["paired"] and sd["single_day"] in ("MUST", "PREFER"):
                 unsupported.append((cid, "주 1회 연강 응답과 분반 연강·교차 요청을 함께 받으면 분반 요청을 우선하고 주 1회 연강 응답은 무시"))
             structs = _structures(c, sd)
             ps = sorted((ss, prevk[(cid, sec, ss)]) for ss in prev_by_sec.get((cid, sec), {}))
@@ -321,6 +334,10 @@ def _solve_model(con, term_id, round_id, W, time_limit, workers, prev, prevk, fr
                             covered = [sid for _, sid in chunk]
                             if not frozen and sd["block"] & set(covered):
                                 continue                    # 절대 불가 칸
+                            if not frozen and c["chapel"] & set(covered):
+                                continue                    # 그 학년 채플 칸에는 전공필수를 놓지 않음
+                            if not frozen and k >= 2 and slot_info[covered[0]][2] > LONG_LAST_START:
+                                continue                    # 18:00 이후 시작 연강 금지
                             if use_cond:                    # 조율 쪽이 넘긴 조건
                                 if allowed_days is not None and day not in allowed_days:
                                     continue
@@ -360,6 +377,8 @@ def _solve_model(con, term_id, round_id, W, time_limit, workers, prev, prevk, fr
                                         w += W["lab_waste"]          # 미회신(None)에는 가정하지 않음
                                     if hroom and hroom & set(cl["rooms"]):
                                         w -= W["history_room"]
+                                    if any(slot_info[sid][2] == LATE_START for sid in covered):
+                                        w += W["late"]               # 19:30 교시는 다른 방법이 없을 때만
                                 same = (key in prev and prevk.get(key) == k and prev[key][0] == covered[0]
                                         and room2class[prev[key][1]] == cl["id"])
                                 if same and not frozen:
@@ -370,8 +389,6 @@ def _solve_model(con, term_id, round_id, W, time_limit, workers, prev, prevk, fr
                                 for sid in covered:
                                     occ_room[(cl["id"], sid)].append(var)
                                     occ_prof[(sd["prof"], sid)].append(var)
-                                    if c["cat"] in REQUIRED_CATEGORIES and c["year"]:
-                                        cohort_vars[((c["dept"], c["year"]), cid, sid)].append(var)
                                 day_use[(cid, sec, day)].append(var)
                     un = m.NewBoolVar(f"un{skey}")
                     unplaced[skey] = un
@@ -387,33 +404,24 @@ def _solve_model(con, term_id, round_id, W, time_limit, workers, prev, prevk, fr
         if len(vs) > 1: m.Add(sum(vs) <= 1)              # 같은 교수 동시 수업 불가
     for vs in day_use.values():
         if len(vs) > 1: m.Add(sum(vs) <= 1)              # 같은 분반은 하루 한 번
-    by_cohort_slot = defaultdict(list)
-    for (coh, cid, sid), vs in cohort_vars.items():
-        b = m.NewBoolVar(f"cohort{coh}{cid}{sid}")
-        for v in vs:
-            m.AddImplication(v, b)
-        by_cohort_slot[(coh, sid)].append(b)
-    for bs in by_cohort_slot.values():
-        if len(bs) > 1: m.Add(sum(bs) <= 1)              # 같은 학년 필수과목끼리 겹침 불가
     if cond_single_day is not None:
         if cond_day_vars:
             m.Add(sum(cond_day_vars) >= 1)               # 요일이 하나면 그 요일이 들어간 안
         else:
             m.Add(0 >= 1)                                # 후보가 없음 → 불가능
 
-    # 한 교수의 두 분반 연강/교차 (요청한 과목만)
-    for c in courses.values():
-        if not c["pair"]:
+    # 한 교수의 두 분반 연강/교차 (교수 응답 section_pair)
+    for c, (mine, mode) in [(c, pr) for c in courses.values() for pr in c["pairs"]]:
+        if len(mine) != 2 or c["k"] != 1:
+            unsupported.append((c["id"], "분반 연강·교차는 그 교수가 맡은 분반이 정확히 2개이고 1회 수업이 한 칸일 때만 지원"))
             continue
-        if c["sections"] != 2 or c["k"] != 1:
-            unsupported.append((c["id"], "분반이 정확히 2개이고 1회 수업이 한 칸일 때만 지원"))
-            continue
+        sa, sb = mine
         S = c["sessions"]
         K = lambda sec, ss: (c["id"], sec, ss, 1)
-        if any(K(1, ss) not in unplaced or K(2, ss) not in unplaced for ss in range(1, S + 1)):
+        if any(K(sa, ss) not in unplaced or K(sb, ss) not in unplaced for ss in range(1, S + 1)):
             continue
         for ss in range(1, S + 1):
-            A, B = K(1, ss), K(2, ss)
+            A, B = K(sa, ss), K(sb, ss)
             lits = [unplaced[A].Not(), unplaced[B].Not()]
             dA, dB = sum(day_terms[A]), sum(day_terms[B])
             pA, pB = sum(per_terms[A]), sum(per_terms[B])
@@ -421,19 +429,21 @@ def _solve_model(con, term_id, round_id, W, time_limit, workers, prev, prevk, fr
             up = m.NewBoolVar(f"adj{c['id']}_{ss}")                # 가반이 먼저(1) 또는 나반이 먼저
             m.Add(pB - pA == 1).OnlyEnforceIf(lits + [up])         # 바로 붙은 교시
             m.Add(pA - pB == 1).OnlyEnforceIf(lits + [up.Not()])
-        if c["pair"] == "CROSS" and S == 2:
-            A1, A2, B1, B2 = K(1, 1), K(1, 2), K(2, 1), K(2, 2)
+        if mode == "CROSS" and S == 2:
+            A1, A2, B1, B2 = K(sa, 1), K(sa, 2), K(sb, 1), K(sb, 2)
             lits = [unplaced[k].Not() for k in (A1, A2, B1, B2)]
             m.Add(sum(per_terms[A1]) == sum(per_terms[B2])).OnlyEnforceIf(lits)   # 가1 = 나2 교시
             m.Add(sum(per_terms[A2]) == sum(per_terms[B1])).OnlyEnforceIf(lits)   # 가2 = 나1 교시
-        elif c["pair"] == "CROSS":
+        elif mode == "CROSS":
             unsupported.append((c["id"], "교차 배정은 주 2회 수업일 때만 지원"))
 
-    # 대안끼리 달라지게: 이미 나온 대안과 같은 칸을 쓰는 회차 수를 제한
+    # 대안끼리 달라지게: 이미 나온 대안과 같은 시작 칸을 쓰는 회차 수를 제한.
+    # 회차 번호가 아니라 분반 단위 시작 칸 집합으로 본다 (회차 순서만 바꾼 같은 안이 다시 나오지 않게).
     for mapping, max_same in (forbid or []):
-        same_terms = []
+        starts = defaultdict(set)                        # (과목, 분반) -> 그 안의 시작 칸들
         for key, start in mapping.items():
-            same_terms += [v for (sk, st, cl), v in x.items() if sk[:3] == key and st == start]
+            starts[key[:2]].add(start)
+        same_terms = [v for (sk, st, cl), v in x.items() if st in starts.get(sk[:2], ())]
         if same_terms:
             m.Add(sum(same_terms) <= max_same)
 
@@ -579,7 +589,8 @@ def alternatives(con, term_id, round_id, timetable_id, course_id, section_no=Non
                                          연강(2칸)은 두 교시가 모두 들어 있어야 함. 비어 있으면({}) 요일·교시 조건 없음.
                                          안에서 days/slot_ids로 바뀐다. end_before는 그대로 쓴다.}
     1단계: 다른 수업은 그대로 두고 대상만 새로 놓는다.
-    2단계(모자라면): 같은 교수의 다른 분반과 같은 학년 필수과목까지 움직일 수 있게 하고, 움직인 수업을 함께 알려 준다.
+    2단계(모자라면): 같은 교수의 다른 분반까지 움직일 수 있게 하고, 움직인 수업을 함께 알려 준다.
+    같은 분반 칸 집합이 같은 안(회차 순서만 다른 안)은 하나로 본다.
     반환: [dict(stage, placements{(분반,회차):(시작칸,강의실)}, ks{(분반,회차):칸 수}, moves[(키,이전,이후)], objective)]"""
     W = {**DEFAULT_WEIGHTS, **(weights or {})}
     prev, prevk = load_assignment(con, timetable_id)
@@ -591,12 +602,10 @@ def alternatives(con, term_id, round_id, timetable_id, course_id, section_no=Non
     t_profs = {secs[ts]["prof"] for ts in t_secs}
     expanded = set(t_secs)
     for (cid, sec), sd in secs.items():
-        c = courses[cid]
-        if sd["prof"] in t_profs or (c["cat"] in REQUIRED_CATEGORIES and target["cat"] in REQUIRED_CATEGORIES
-                                     and c["dept"] == target["dept"] and c["year"] == target["year"]):
+        if sd["prof"] in t_profs:
             expanded.add((cid, sec))
     stages = [("다른 수업은 그대로", t_secs),
-              ("같은 교수·같은 학년 필수과목 일부 이동", expanded)]
+              ("같은 교수의 다른 수업 일부 이동", expanded)]
     results = []
     forbid = []
     cur = {k: v[0] for k, v in prev.items() if (k[0], k[1]) in t_secs}
@@ -623,6 +632,9 @@ def alternatives(con, term_id, round_id, timetable_id, course_id, section_no=Non
             mapping = {k: v[0] for k, v in pl.items() if (k[0], k[1]) in t_secs}
             if not mapping:
                 break
+            sig = _signature(mapping)
+            if sig == _signature(cur) or any(_signature(f) == sig for f, _ in forbid):
+                break                                        # 이미 나온 안(회차 순서만 다름)이면 더 찾지 않는다
             moves = [(k, prev[k], pl[k]) for k in pl
                      if k in prev and (k[0], k[1]) not in t_secs and pl[k] != prev[k]]
             results.append(dict(stage=stage_name,
@@ -631,6 +643,14 @@ def alternatives(con, term_id, round_id, timetable_id, course_id, section_no=Non
                                 moves=moves, objective=out["objective"]))
             forbid.append((mapping, 0))
     return results
+
+
+def _signature(mapping):
+    """대안 비교용: 분반별 시작 칸 집합 (회차 번호는 보지 않는다)."""
+    out = defaultdict(set)
+    for key, start in mapping.items():
+        out[key[:2]].add(start)
+    return {k: frozenset(v) for k, v in out.items()}
 
 
 make_alternatives = alternatives          # 조율 쪽 이름
