@@ -61,6 +61,18 @@ class WriteAndCheck(unittest.TestCase):
         self.assertIn("다른 강의와 겹칩니다", t)
         self.assertNotIn("가 교수", t)
 
+    def test_unknown_blocker_does_not_say_overlap(self):
+        # 서버가 겹친 상대를 못 찾으면 '겹친다'고 단정하지 않는다 (밀린 이유가 실습실 부족·학년 규칙일 수도 있음)
+        i = inp(blocker_prof=None, blocker_course=None)
+        t = write_message(i).text
+        self.assertIn("희망하신 시간(월·수 15:00)에 배정하지 못해 아래 대안을 드립니다.", t)
+        self.assertNotIn("겹", t)
+        self.assertEqual(check_message(t, i), [])
+        # 언어 모델이 '겹친다'를 지어내면 막는다. 상대를 아는 1차는 그대로 허용
+        self.assertIn("입력에 없는 이유를 덧붙임 ('겹')", coord.check_body("희망하신 월·수 15:00이 다른 강의와 겹칩니다.", i))
+        self.assertEqual(coord.check_body("희망하신 월·수 15:00에 배정하지 못해 아래 대안을 마련했습니다.", i), [])
+        self.assertEqual(coord.check_body("희망하신 월·수 15:00이 다른 강의와 겹칩니다.", inp(reveal=False)), [])
+
     def test_check_catches_problems(self):
         i = inp(reveal=False)
         good = write_message(i).text
@@ -261,6 +273,15 @@ class LLMPath(unittest.TestCase):
             r = parse_reply("A로 할게요. 둘 다 306으로 맞춰 주세요", alternatives=mixed, method="llm")
         self.assertEqual(r.kind, "조건부")
         self.assertIn("306", r.note)
+        # [수정]은 A·B·C만 고르므로 강의실만 바꾸는 길(AI 도우미)을 처리안 문구에 알려 준다
+        p = match_conditions(r, mixed, round=1)
+        self.assertEqual(p.action, "move")
+        self.assertIn("AI 도우미", p.text)
+        # 강의실과 상관없는 요청에는 붙이지 않는다
+        other = coord._ReplyLLM(kind="조건부", picks=["A"], end_before=[], note="목요일만 10:30으로 조정 희망")
+        with mock.patch.object(coord, "generate_json", return_value=other):
+            r2 = parse_reply("A로 할게요. 목요일만 10시 반이면 좋겠어요", alternatives=mixed, method="llm")
+        self.assertNotIn("AI 도우미", match_conditions(r2, mixed, round=1).text)
 
     def test_few_minutes_early_end_is_professor_choice(self):
         # A는 17:45 종료. "17:30에 끝낼 수 있으면"(15분 이내)은 재량 → 수용. "16:00 전"(105분)은 조건으로 남아 A가 어긋난다

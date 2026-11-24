@@ -100,10 +100,17 @@ def _compose(inp: MessageInput, body: list[str]) -> str:
     return "\n".join(L)
 
 
+def _knows_blocker(inp: MessageInput) -> bool:
+    """겹친 상대를 서버가 알려 줬는가. 모르면 '겹친다'고 단정하지 않는다
+    (배정 엔진은 상대를 알려 주지 않고, 밀린 이유가 실습실 부족·학년 규칙일 수도 있다. 11/24 하윤 점검 문서)."""
+    return bool(inp.blocker_prof and inp.blocker_course)
+
+
 def _template_body(inp: MessageInput) -> list[str]:
     if inp.round == 1:
-        other = (f"{inp.blocker_prof} 교수님의 {inp.blocker_course} 분반과"
-                 if inp.reveal and inp.blocker_prof and inp.blocker_course else "다른 강의와")
+        if not _knows_blocker(inp):
+            return [f"희망하신 시간({inp.wish})에 배정하지 못해 아래 대안을 드립니다."]
+        other = f"{inp.blocker_prof} 교수님의 {inp.blocker_course} 분반과" if inp.reveal else "다른 강의와"
         return [f"희망하신 시간({inp.wish})이 {other} 겹칩니다."]
     if inp.prev_conditions and not inp.prev_conditions.is_empty():
         first = f"지난 회신에서 주신 조건({cond_label(inp.prev_conditions)})을 반영해 대안을 다시 드립니다."
@@ -123,7 +130,7 @@ class _MessageLLM(BaseModel):
 _TIME = re.compile(r"\d{1,2}:\d{2}")
 _ALT_TALK = re.compile(r"(?<![A-Za-z])[ABC](?![A-Za-z])")
 _REASON = re.compile(r"때문|인해|사정|공사|수리|배정되|배정이\s*어려|배정하기\s*어려|사용\s*중|중복")
-_REASON_LATER = re.compile(r"겹")      # 2·3차는 처음 희망이 왜 안 됐는지 입력에 없다
+_REASON_LATER = re.compile(r"겹")      # 2·3차나 상대를 모르는 1차는 처음 희망이 왜 안 됐는지 입력에 없다
 
 
 def check_body(body: str, inp: MessageInput) -> list[str]:
@@ -133,7 +140,7 @@ def check_body(body: str, inp: MessageInput) -> list[str]:
         return ["설명 문단이 비었음"]
     if re.search(r"[(\[<]\s*상대|<<|>>", body):
         p.append("설명 문단에 자리표시가 남음")
-    if inp.round == 1 and inp.reveal and inp.blocker_prof and inp.blocker_course:
+    if inp.round == 1 and inp.reveal and _knows_blocker(inp):
         if f"{inp.blocker_prof} 교수" not in body or inp.blocker_course not in body:
             p.append("1차인데 겹친 상대 교수·강의 이름이 빠지거나 바뀜")
     plain = body
@@ -148,7 +155,7 @@ def check_body(body: str, inp: MessageInput) -> list[str]:
     extra = sorted(set(_TIME.findall(body)) - allowed)
     if extra:
         p.append(f"설명 문단에 입력에 없는 시각을 씀 ({', '.join(extra)})")
-    m = _REASON.search(body) or (_REASON_LATER.search(body) if inp.round > 1 else None)
+    m = _REASON.search(body) or (_REASON_LATER.search(body) if inp.round > 1 or not _knows_blocker(inp) else None)
     if m:
         p.append(f"입력에 없는 이유를 덧붙임 ('{m.group(0)}')")
     return p
@@ -157,9 +164,12 @@ def check_body(body: str, inp: MessageInput) -> list[str]:
 def write_message(inp: MessageInput, method: Method = "keyword") -> Message:
     if method == "keyword":
         return Message(text=_template(inp), method="keyword")
-    if inp.round == 1:
+    if inp.round == 1 and not _knows_blocker(inp):
+        situation = ("1차 조율. 희망 시간에 배정하지 못해 대안을 보낸다. 왜 못 했는지, 어느 강의와 겹치는지는 모른다. "
+                     "'겹친다'는 말이나 다른 이유를 쓰지 않는다.")
+    elif inp.round == 1:
         situation = (f"1차 조율. 희망 시간이 {inp.blocker_prof} 교수님의 {inp.blocker_course} 분반과 겹친다. 상대 교수와 강의 이름을 그대로 적는다."
-                     if inp.reveal and inp.blocker_prof and inp.blocker_course
+                     if inp.reveal
                      else "1차 조율. 희망 시간이 다른 강의와 겹친다. 상대 교수 이름과 강의 이름은 적지 않는다 (학과 설정).")
     elif inp.prev_conditions and not inp.prev_conditions.is_empty():
         situation = (f"{inp.round}차 조율. 지난 회신에서 받은 조건({cond_label(inp.prev_conditions)})을 반영한 대안을 다시 보낸다. "
@@ -267,6 +277,7 @@ class _ReplyLLM(BaseModel):
 
 _HHMM = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
 _ROOM_NO = re.compile(r"\d{3,5}")
+_ROOM_HINT = re.compile(r"강의실|호실|계단식|\d{3,5}")   # 처리안 문구에 '도우미로 강의실 바꾸기' 안내를 붙일지
 
 
 def _room_note(rooms: list[str], alt: Alternative | None, note: str) -> str:
@@ -411,9 +422,11 @@ def match_conditions(parse: ReplyParse, alternatives: list[Alternative], round: 
         g = next((c for c in checks if c.ok), None)
         if g:
             a = next(x for x in alternatives if x.key == g.key)
-            return Proposal(action="move", key=g.key, conditions=k, checks=checks,
-                            text=f"{g.key}안({alt_label(a)})으로 옮길까요?"
-                                 + (f" 교수님 요청: {parse.note}" if parse.note else ""))
+            text = f"{g.key}안({alt_label(a)})으로 옮길까요?" + (f" 교수님 요청: {parse.note}" if parse.note else "")
+            if parse.note and _ROOM_HINT.search(parse.note):
+                # [수정]은 A·B·C 중에서만 고르므로 "같은 시간, 다른 방"은 AI 도우미로 바꾼다 (11/24 하윤 점검 문서)
+                text += " (강의실만 바꾸려면 [확인] 뒤 AI 도우미에게 \"과목 건물 호수로\"처럼 말하면 됩니다)"
+            return Proposal(action="move", key=g.key, conditions=k, checks=checks, text=text)
         if round < MAX_ROUND:
             return Proposal(action="next", conditions=k, checks=checks,
                             text="고른 안이 모두 조건과 어긋납니다. 조건을 넣어 다음 차수 대안을 만들까요?")
