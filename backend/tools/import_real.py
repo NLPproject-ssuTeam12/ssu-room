@@ -216,9 +216,7 @@ def build_timetable(src: Path, warnings: list) -> dict:
     draft = read_json(src / "draft_보통.json")
     assignments = []
     for sid, blocks in draft.items():
-        rooms = {b.get("room") for b in blocks}
-        if len(rooms) > 1:
-            warnings.append(f"{sid}: 블록마다 강의실이 달라 첫 강의실만 씀 {sorted(map(str, rooms))}")
+        # 수업(회차)마다 강의실을 blocks[].room에 둔다. room은 대표 강의실(첫 수업의 강의실)
         out_blocks = []
         for b in blocks:
             length = to_minutes(b["end"]) - to_minutes(b["start"])
@@ -226,6 +224,7 @@ def build_timetable(src: Path, warnings: list) -> dict:
                 "day": b["day"],
                 "start": b["start"],
                 "slots": round((length + 15) / 90),
+                "room": b.get("room"),
             })
         assignments.append({
             "section_id": sid,

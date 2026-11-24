@@ -14,7 +14,7 @@
 - 데이터 묶음: 환경변수 `DATA_SET` (기본 `real`) → `data/private/<DATA_SET>/` 의 JSON을 읽는다.
   `real`은 `python backend/tools/import_real.py --src <원본 폴더>` 로 만든다. 이 폴더는 커밋하지 않는다.
 - 상태는 서버 메모리에만 있다. 서버를 다시 켜거나 `POST /reset` 하면 처음으로 돌아간다. (DB는 나중에)
-- 테스트: `python -m pytest backend/tests -q`
+- 테스트: `python -m pytest backend/tests -q` (backend/ 안에서는 `python -m pytest tests -q`)
 
 ## 데이터 안내 (화면에 표시할 것)
 
@@ -80,11 +80,17 @@ fetch(`http://localhost:8000/coord/${encodeURIComponent(sectionId)}/message`, { 
 
 ### Block (수업 한 번)
 ```json
-{ "day": "화", "start": "18:00", "slots": 1 }
+{ "day": "화", "start": "18:00", "slots": 1, "room": "문화관 03407" }
 ```
 - `day`: 월~금. **토요일(`토`)은 MANUAL 분반에만** 나온다(실제 데이터에 2개).
 - `start`: 보통 8칸 중 하나 — `09:00 10:30 12:00 13:30 15:00 16:30 18:00 19:30`.
 - `slots`: 칸 수. 1칸 = 75분, 2칸 = 165분(쉬는 시간 15분 포함). 끝 시각 = 시작 + 75×칸 + 15×(칸−1).
+- `room`: **이 수업의 강의실** (11/23 추가). 솔버는 한 분반의 두 수업을 다른 강의실에 놓을 수 있다(예: 화 문화관 03407, 목 정보과학관 21304).
+  서버가 내보내는 시간표에서는 늘 채워져 있다. 들어오는 값이 비어 있으면 그 배정의 `room`으로 본다.
+
+> **강의실 읽는 법:** 배정(Assignment)의 `room`은 **대표 강의실 = 첫 수업의 강의실**이다(기존 화면 호환용, 이름·뜻 그대로).
+> 수업마다 강의실은 `blocks[].room`을 쓴다. 두 수업의 강의실이 같으면 `room`과 `blocks[].room`이 모두 같다.
+> 도우미로 강의실만 바꾸면 그 분반의 모든 수업에 적용된다.
 
 ### 배정 상태 `status`
 | 값 | 뜻 |
@@ -287,20 +293,23 @@ fetch(`http://localhost:8000/coord/${encodeURIComponent(sectionId)}/message`, { 
   "status": "DRAFT",
   "assignments": [
     { "section_id": "2150162703-(공통-재수강)",
-      "blocks": [ { "day": "월", "start": "16:30", "slots": 1 }, { "day": "화", "start": "16:30", "slots": 1 } ],
+      "blocks": [ { "day": "월", "start": "16:30", "slots": 1, "room": "문화관 03407" },
+                  { "day": "화", "start": "16:30", "slots": 1, "room": "정보과학관 21304" } ],
       "room": "문화관 03407", "status": "DONE", "reason": null },
     { "section_id": "2150164203-(공통-재수강)",
-      "blocks": [ { "day": "화", "start": "18:00", "slots": 1 }, { "day": "목", "start": "18:00", "slots": 1 } ],
+      "blocks": [ { "day": "화", "start": "18:00", "slots": 1, "room": "문화관 03407" },
+                  { "day": "목", "start": "18:00", "slots": 1, "room": "문화관 03407" } ],
       "room": "문화관 03407", "status": "COORD",
       "reason": "희망 칸 화-19:30의 문화관 03407을(를) '오픈소스기초설계' 분반이 쓰고 있음 (가짜 값)" },
     { "section_id": "2150184201",
-      "blocks": [ { "day": "토", "start": "13:30", "slots": 4 } ],
+      "blocks": [ { "day": "토", "start": "13:30", "slots": 4, "room": "문화관 03105" } ],
       "room": "문화관 03105", "status": "MANUAL",
       "reason": "조교 직접 배정 분반 (수업 모양이 주 2회·주 1회 연강이 아님)" }
   ]
 }
 ```
 - `status`(시간표 전체): `DRAFT` / `ROUND` / `FINAL`.
+- `room`은 대표 강의실(첫 수업의 강의실), 수업마다 강의실은 `blocks[].room`. 첫 분반은 두 수업의 강의실이 다른 예(가상).
 - 과목명·교수는 `GET /sections`에서 `section_id`로 찾아 붙인다.
 
 에러: 409 `아직 초안이 없습니다. POST /draft 를 먼저 부르세요.`
@@ -486,7 +495,7 @@ fetch(`http://localhost:8000/coord/${encodeURIComponent(sectionId)}/message`, { 
   "violations": 0
 }
 ```
-- 옮긴 분반은 시간표에서 `status: "DONE"`이 되고 `blocks`·`room`이 `applied.meetings`로 바뀐다(강의실은 첫 수업의 것).
+- 옮긴 분반은 시간표에서 `status: "DONE"`이 되고 `blocks`가 `applied.meetings`로 바뀐다. 수업마다 강의실은 `blocks[].room`(= `meetings[].room`), `room`은 첫 수업의 강의실.
 - confirm `next` 응답은 `{decision, coord}`: `decision.action: "confirm_next"`, `applied`는 조건(`{"day_slots": {...}, "end_before": [...]}`), `coord.state: "NEXT"`.
 - keep 응답은 `violations` 없이 `{decision, coord}` (`applied: null`, `state: "KEPT"`).
 
@@ -768,7 +777,7 @@ STUB: `reassign`·`check_rules`(문하윤).
   - 1행: `가상/가명 데이터, SAP 실제 양식 아님(제안 양식). 교수 이름은 가명이다.`
   - 2행 열 이름: `과목 코드`, `과목명`, `분반`, `교수`, `요일·시간`, `강의실`
   - 3행부터 분반마다 한 행, 과목 코드 순. **MANUAL 분반도 들어간다.**
-  - `분반` = 과목 코드 끝 두 자리(+ 재수강 표시). `교수` = 가명(없으면 `담당 미정`). `요일·시간` = `화 10:30~11:45 / 목 10:30~11:45` (칸이 없으면 `미배정`). `강의실`이 없으면 `미정`.
+  - `분반` = 과목 코드 끝 두 자리(+ 재수강 표시). `교수` = 가명(없으면 `담당 미정`). `요일·시간` = `화 10:30~11:45 / 목 10:30~11:45` (칸이 없으면 `미배정`). `강의실`이 없으면 `미정`. 수업마다 강의실이 다르면 `요일·시간`과 같은 순서로 `문화관 03407 / 정보과학관 21304`처럼 짝지어 적는다.
 - 409: FINAL 전. `확정(FINAL)한 뒤에 내보낼 수 있습니다. 지금 단계: ROUND`
 - 지금은 서버 메모리의 시간표를 쓴다. 하윤 DB로 옮기면 `timetable_rows`만 바꾼다(`v_schedule`).
 
