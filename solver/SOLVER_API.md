@@ -75,6 +75,10 @@ opts = sc.make_alternatives(con, term_id, round_id, timetable_id, course_id,
 
 조건은 **대상 과목·분반에만** 적용된다. 시간은 `"HH:MM"` 0 채움 형식.
 
+### 확인된 조건 흐름 (11/24)
+
+교수가 자기 화면에서 쓴 답장은 `db.add_reply`로, 해석은 `db.save_interpretation`으로 DB에 남는다. 조교가 [확인]·[수정]을 누르면 서버가 `db.decide_reply(con, message_id, ta_id, 'CONFIRM' | 'EDIT', reason, conditions=...)`로 조건을 `reply_interpretation.extracted_json`의 `"confirmed_conditions"`에 저장한다. 다음 차수 대안을 만들 때 `cond = db.confirmed_conditions(con, proposal_id)`로 읽어 **바꾸지 않고** `alternatives(..., condition=cond)`에 넘긴다. 모양은 서버 `conditions_json`과 같은 `{"day_slots": {"1": [...]}, "end_before": [...]}`이고, 조교가 확인한 조건이 없으면(`[현재대로 유지]`, 결정 전, 조건 없이 [확인]) `None`이라 조건 없이 만든 대안과 같다. 엔진 코드는 바뀌지 않았고, `tests/run_cc.py`가 이 흐름([확인]·[수정]·조건 없음·결정 전)을 가상 데이터로 검사한다. 자세한 함수 설명은 `../db/README.md` "조율 회신".
+
 반환: 대안 리스트(최대 n개). 각 항목:
 
 ```python
