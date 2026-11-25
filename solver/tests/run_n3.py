@@ -8,7 +8,7 @@ rng = lambda s: tuple(c.execute('select start_time,end_time from time_slot where
 
 def apply_alt(c, tt, cid, sec_no, alt):
     c.execute("INSERT INTO timetable(term_id,round_id,kind,parent_id) VALUES (1,1,'TA_EDIT',?)",(tt,)); t2=c.execute("select last_insert_rowid()").fetchone()[0]
-    c.execute("INSERT INTO timetable_section SELECT ?,course_id,section_no,planned_enrollment FROM timetable_section WHERE timetable_id=?",(t2,tt))
+    c.execute("INSERT INTO timetable_section(timetable_id,course_id,section_no,planned_enrollment) SELECT ?,course_id,section_no,planned_enrollment FROM timetable_section WHERE timetable_id=?",(t2,tt))
     moved = {(k[0],k[1],k[2]) for k,_,_ in alt['moves']}
     ks_old = {(a,b,cc):n for a,b,cc,n in c.execute("select course_id,section_no,session_no,count(*) from assignment where timetable_id=? group by 1,2,3",(tt,))}
     secs = [sec_no] if sec_no else [s for s, in c.execute("select distinct section_no from assignment where timetable_id=? and course_id=?",(tt,cid))]

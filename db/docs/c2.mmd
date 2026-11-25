@@ -10,8 +10,10 @@ erDiagram
     course_response ||--o| other_request : "기타 요청(자연어)"
     course_response ||--o{ request_item : "솔버 요청"
     other_request ||--o{ request_item : "보고 만든 항목"
-    user ||--o{ professor_building_pref : "희망 건물"
+    user ||--o| professor_building_pref : "희망 건물 하나"
     building ||--o{ professor_building_pref : "건물"
+    term ||--o{ chapel_slot : "채플 칸"
+    time_slot ||--o{ chapel_slot : "칸"
     term { int id PK }
     user { int id PK }
     course { int id PK }
@@ -36,9 +38,8 @@ erDiagram
         int course_id FK
         int professor_id FK "분반 담당 교수별 응답"
         int lab_requirement "1 쓴다 0 안 쓴다 필수 입력"
-        text single_day_pref "MUST PREFER NONE 주1회 연강(분반 내)"
-        int prefer_only "1=선호 시간 외 수업 어려움"
-        text language
+        text single_day_pref "MUST NONE 주1회 연강(분반 내)"
+        text section_pair "NONE BACK_TO_BACK CROSS 두 분반 연강·교차"
     }
     response_slot {
         int response_id PK
@@ -58,15 +59,19 @@ erDiagram
         int id PK
         int response_id FK
         int other_request_id FK "조교가 기타 요청을 보고 만든 경우"
-        text type "SECTION_COUNT SECTION_PAIR 등"
+        text type "SECTION_PAIR 등 (SECTION_COUNT는 솔버가 안 읽음)"
         int value_int
         text value_text
         text params_json
         text source "FORM TA"
         int created_by FK
     }
+    chapel_slot {
+        int term_id PK
+        text target_year PK "그 학년 전공필수는 이 칸 금지"
+        int slot_id PK
+    }
     professor_building_pref {
         int professor_id PK
-        int building_id PK
-        int rank
+        int building_id FK "교수당 하나, 그 밖은 벌점"
     }

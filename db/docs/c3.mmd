@@ -13,6 +13,8 @@ erDiagram
     time_slot ||--o{ proposal_option_slot : "칸"
     room ||--o{ proposal_option_slot : "강의실"
     proposal ||--o{ message : "관련"
+    message ||--o{ message : "답장(reply_to_id)"
+    proposal |o--o| proposal : "다음 차수(prev_proposal_id)"
     user ||--o{ message : "주고받음"
     message ||--o| reply_interpretation : "해석"
     proposal_option ||--o{ reply_interpretation : "선택됨"
@@ -40,6 +42,7 @@ erDiagram
         int course_id PK
         int section_no PK
         int planned_enrollment
+        text status "DONE COORD MANUAL"
     }
     assignment {
         int timetable_id PK
@@ -55,7 +58,8 @@ erDiagram
         int course_id FK
         int section_no "어느 분반인지"
         text reason
-        text status
+        text status "OPEN SENT PROPOSED RESOLVED KEPT NEXT"
+        int prev_proposal_id FK "이전 차수 안건"
     }
     proposal_option {
         int id PK
@@ -78,6 +82,7 @@ erDiagram
         text kind "NOTICE REMINDER ALTERNATIVE REPLY"
         text channel "APP EMAIL SMS"
         text body
+        int reply_to_id FK "답하는 조율 메시지"
     }
     reply_interpretation {
         int message_id PK

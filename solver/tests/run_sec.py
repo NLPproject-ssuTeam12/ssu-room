@@ -1,3 +1,6 @@
+"""분반 입력 검사: 분반은 course_section 행 그대로 (오프라인 회의에서 정한 수·교수·인원). 가상 데이터.
+  python solver/tests/run_sec.py"""
+import sys
 from test_solver2 import *
 c = build()
 cid = c.execute("select id from course where id not in (select course_id from course_response) order by id limit 1").fetchone()[0]
@@ -9,22 +12,29 @@ def resp(prof, n=None, rid=[8000]):
     rid[0] += 1
     c.execute("INSERT INTO course_response(id,round_id,course_id,professor_id,lab_requirement,single_day_pref) VALUES (?,?,?,?,?,?)", (rid[0],1,cid,prof,0,'NONE'))
     if n: c.execute("INSERT INTO request_item(response_id,type,value_int) VALUES (?,?,?)", (rid[0],'SECTION_COUNT',n))
+def rows(*spec):
+    for s, p, e in spec: c.execute("INSERT INTO course_section VALUES (?,?,?,?)", (cid, s, p, e))
 def secs():
     _, courses, sd, *_ = sc.load_input(c, 1, 1)
-    return [sd[(cid, s)]["prof"] for s in range(1, courses[cid]["sections"]+1)]
-A, B, C = f"가({pa})", f"나({pb})", f"다({pc})"
+    return [(sd[(cid, s)]["prof"], sd[(cid, s)]["enroll"]) for s in range(1, courses[cid]["sections"]+1)]
 nm = {pa:"가", pb:"나", pc:"다"}
+results = []
 def check(label, expect):
-    got = "".join(nm.get(p, str(p)) for p in secs())
-    print(("OK  " if got == expect else "틀림") + f" {label}: {got}  (기대 {expect})")
-reset(); check("응답 없음", "가")
-reset(); resp(pa); check("가만 응답, 분반 수 미입력", "가")
-reset(); resp(pa, 2); check("가가 분반 2개 요청 (단독 과목)", "가가")
-reset(); resp(pa, 2); resp(pb, 2); check("가 2개 + 나 2개 (분반 지정 없음)", "가가나나")
-reset(); resp(pa, 1); resp(pb, 3); check("가 1개 + 나 3개", "가나나나")
-reset(); resp(pa, 2); resp(pb, 2); resp(pc, 1); check("세 교수: 2+2+1", "가가나나다")
-reset(); c.execute("INSERT INTO course_section VALUES (?,1,?)",(cid,pa)); c.execute("INSERT INTO course_section VALUES (?,2,?)",(cid,pb)); check("조교가 가·나 지정, 응답 없음", "가나")
-reset(); resp(pa, 2); resp(pb, 2); [c.execute("INSERT INTO course_section VALUES (?,?,?)",(cid,s,p)) for s,p in [(1,pa),(2,pa),(3,pb),(4,pb)]]; check("조교 지정과 요청이 같음", "가가나나")
-reset(); resp(pa, 3); c.execute("INSERT INTO course_section VALUES (?,1,?)",(cid,pa)); c.execute("INSERT INTO course_section VALUES (?,2,?)",(cid,pb)); check("조교가 가·나 1개씩 지정 + 가가 3개 요청", "가나가가")
-reset(); resp(pa, 1); [c.execute("INSERT INTO course_section VALUES (?,?,?)",(cid,s,pa)) for s in (1,2)]; check("가가 1개 요청했지만 조교가 가에게 2개 지정(지정이 더 큼)", "가가")
-reset(); c.execute("INSERT INTO course_section VALUES (?,3,?)",(cid,pb)); check("조교가 3번 분반만 나에게 지정(빈 번호는 기본 담당)", "가가나") 
+    got = secs()
+    txt = "".join(nm.get(p, str(p)) for p, _ in got) + " " + str([e for _, e in got])
+    ok = txt == expect; results.append(ok)
+    print(("OK  " if ok else "틀림") + f" {label}: {txt}  (기대 {expect})")
+reset(); check("행 없음 → 기본 담당 1분반, 인원 미정", "가 [None]")
+reset(); resp(pa, 2); check("가가 분반 2개 요청했지만 행 없음 → 요청은 읽지 않음", "가 [None]")
+reset(); rows((1, pa, 40)); check("1분반 40명", "가 [40]")
+reset(); rows((1, pa, 40), (2, pb, 35)); check("가 40명·나 35명", "가나 [40, 35]")
+reset(); resp(pa, 1); resp(pb, 3); rows((1, pa, 30), (2, pa, 30), (3, pb, 25), (4, pb, None)); check("가가나나 (요청 수와 달라도 행 그대로)", "가가나나 [30, 30, 25, None]")
+reset(); rows((2, pa, 30), (1, pb, 20)); check("입력 순서와 상관없이 번호 순", "나가 [20, 30]")
+reset(); rows((1, pa, 30), (3, pb, 30))
+try:
+    secs(); print("틀림 번호 빈틈(1,3)인데 오류 없음"); results.append(False)
+except ValueError as e:
+    print("OK   번호 빈틈(1,3) → ValueError:", e); results.append(True)
+reset(); c.commit()
+print("\n결과:", "모두 통과" if all(results) else "실패")
+sys.exit(0 if all(results) else 1)

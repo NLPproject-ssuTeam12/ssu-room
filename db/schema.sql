@@ -46,21 +46,21 @@ CREATE TABLE room (
   reserved_department_id INTEGER REFERENCES department(id),
   UNIQUE (building_id, room_no)
 );
-CREATE TABLE course (                         -- 조교가 입력한 과목. 분반은 결과에서 생김
+CREATE TABLE course (                         -- 조교가 입력한 과목. 분반은 course_section
   id INTEGER PRIMARY KEY,
   term_id INTEGER NOT NULL REFERENCES term(id),
   department_id INTEGER REFERENCES department(id),
   code TEXT, name TEXT NOT NULL,
   professor_id INTEGER NOT NULL REFERENCES user(id),   -- 담당 교수
   category TEXT, target_year TEXT,
-  expected_enrollment INTEGER,                         -- 과목 전체 예상 인원
   session_count INTEGER NOT NULL DEFAULT 1,            -- 주당 수업 횟수
   slots_per_session INTEGER NOT NULL DEFAULT 1         -- 1회 수업이 차지하는 칸 수
 );
-CREATE TABLE course_section (                -- 분반별 담당 교수 (조교가 입력). 행이 없는 분반은 course.professor_id가 담당
+CREATE TABLE course_section (                -- 분반 (오프라인 회의에서 정한 것을 조교가 입력). 분반 하나당 한 행, 번호는 1부터 빈틈없이. 행이 없는 과목은 course.professor_id의 1분반
   course_id INTEGER NOT NULL REFERENCES course(id),
   section_no INTEGER NOT NULL,
   professor_id INTEGER NOT NULL REFERENCES user(id),
+  enrollment INTEGER CHECK (enrollment IS NULL OR enrollment > 0),   -- 분반 수강 인원 (교수가 정함). 강의실 정원보다 많으면 그 강의실은 배정 후보에서 제외
   PRIMARY KEY (course_id, section_no)
 );
 CREATE TABLE rule_config (                    -- 배정 규칙 켜기/끄기/가중치. 규칙이 늘어도 테이블은 그대로
@@ -93,9 +93,9 @@ CREATE TABLE course_response (                -- 교수가 과목별로 낸 응�
   course_id INTEGER NOT NULL REFERENCES course(id),
   professor_id INTEGER NOT NULL REFERENCES user(id),   -- 응답한 교수 (분반마다 교수가 다를 수 있어 교수별로 받음)
   lab_requirement INTEGER NOT NULL CHECK (lab_requirement IN (0,1)),      -- 실습실: 1=쓴다(실습실만 배정) / 0=안 쓴다 (사이트에서 필수 입력)
-  single_day_pref TEXT NOT NULL CHECK (single_day_pref IN ('MUST','PREFER','NONE')),    -- 주 1회 연강(한 분반이 하루에 2칸 이어서): 무조건/선호/필요 없음
-  prefer_only INTEGER NOT NULL DEFAULT 0 CHECK (prefer_only IN (0,1)),   -- 1 = '선호 시간 외에는 수업하기 어려움': 희망 칸 밖에는 배정하지 않음
-  language TEXT,
+  single_day_pref TEXT NOT NULL CHECK (single_day_pref IN ('MUST','NONE')),    -- 주 1회 연강(한 분반이 하루에 2칸 이어서): 무조건 / 필요 없음(주 2회)
+  section_pair TEXT NOT NULL DEFAULT 'NONE'
+         CHECK (section_pair IN ('NONE','BACK_TO_BACK','CROSS')),   -- 이 교수가 이 과목 두 분반을 맡을 때: 상관없음 / 연강(가반 바로 뒤 나반) / 교차
   submitted_at TEXT,
   UNIQUE (round_id, course_id, professor_id)
 );
@@ -123,11 +123,15 @@ CREATE TABLE request_item (                   -- 솔버가 쓰는 구조화된 �
   source TEXT NOT NULL DEFAULT 'TA' CHECK (source IN ('FORM','TA')),   -- 화면 항목 / 조교 입력
   created_by INTEGER REFERENCES user(id), created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
-CREATE TABLE professor_building_pref (
-  professor_id INTEGER REFERENCES user(id),
-  building_id INTEGER REFERENCES building(id),
-  rank INTEGER NOT NULL,
-  PRIMARY KEY (professor_id, building_id)
+CREATE TABLE chapel_slot (                   -- 학년별 채플 칸 (조교 입력). 그 학년 전공필수는 이 칸에 놓지 않는다
+  term_id INTEGER NOT NULL REFERENCES term(id),
+  target_year TEXT NOT NULL,                           -- course.target_year 와 같은 값 (예: '1')
+  slot_id INTEGER NOT NULL REFERENCES time_slot(id),
+  PRIMARY KEY (term_id, target_year, slot_id)
+);
+CREATE TABLE professor_building_pref (       -- 교수가 고른 희망 건물 하나. 그 밖의 건물은 솔버 벌점
+  professor_id INTEGER PRIMARY KEY REFERENCES user(id),
+  building_id INTEGER NOT NULL REFERENCES building(id)
 );
 
 -- ===== 솔버와 시간표 버전 =====
@@ -153,6 +157,8 @@ CREATE TABLE timetable_section (              -- 이 버전에서 열리는 분�
   course_id INTEGER REFERENCES course(id),
   section_no INTEGER,
   planned_enrollment INTEGER,
+  status TEXT NOT NULL DEFAULT 'DONE'
+         CHECK (status IN ('DONE','COORD','MANUAL')),  -- 배정 상태: 끝남 / 조율 중 / 조교가 직접 정함 (서버 assignment.status 와 같은 이름)
   PRIMARY KEY (timetable_id, course_id, section_no)
 );
 CREATE TABLE assignment (                     -- 분반의 수업 회차가 차지한 칸 하나당 한 행
@@ -174,8 +180,12 @@ CREATE TABLE proposal (
   timetable_id INTEGER NOT NULL REFERENCES timetable(id),
   course_id INTEGER NOT NULL REFERENCES course(id),
   section_no INTEGER,                                  -- 어느 분반의 조율인지 (NULL = 과목 전체)
-  reason TEXT, status TEXT DEFAULT 'WAITING'
+  reason TEXT,
+  status TEXT NOT NULL DEFAULT 'OPEN'
+         CHECK (status IN ('OPEN','SENT','PROPOSED','RESOLVED','KEPT','NEXT')),   -- 보내기 전 / 답 기다림 / 조교 확인 대기 / 반영됨 / 현재대로 유지 / 다음 차수로
+  prev_proposal_id INTEGER REFERENCES proposal(id)     -- 이어받은 이전 차수 안건 (NULL = 1차 또는 처음 연 안건)
 );
+CREATE UNIQUE INDEX ux_proposal_prev ON proposal(prev_proposal_id);   -- 한 안건에서 다음 차수 안건은 하나만
 CREATE TABLE proposal_option (
   id INTEGER PRIMARY KEY,
   proposal_id INTEGER NOT NULL REFERENCES proposal(id),
@@ -196,7 +206,8 @@ CREATE TABLE message (
   sender_id INTEGER REFERENCES user(id),
   receiver_id INTEGER NOT NULL REFERENCES user(id),
   kind TEXT NOT NULL, channel TEXT,
-  body TEXT, sent_at TEXT, delivery_status TEXT
+  body TEXT, sent_at TEXT, delivery_status TEXT,
+  reply_to_id INTEGER REFERENCES message(id)            -- 교수 답장(REPLY)이 답하는 조율 메시지
 );
 CREATE TABLE reply_interpretation (
   message_id INTEGER PRIMARY KEY REFERENCES message(id),
