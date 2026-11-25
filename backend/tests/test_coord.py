@@ -55,6 +55,15 @@ class WriteAndCheck(unittest.TestCase):
             m = write_message(i)
             self.assertEqual(check_message(m.text, i), [], m.text)
 
+    def test_current_line(self):
+        # 희망 밖에라도 놓인 분반: 지금 자리를 알리는 한 줄 (11/25). 없으면 그 줄도 없다
+        i = inp(current="화·목 10:30~11:45 · 정보관 305")
+        t = write_message(i).text
+        self.assertIn("지금은 화·목 10:30~11:45 · 정보관 305에 배정되어 있습니다. 그대로 괜찮으시면 '지금 자리 그대로'를 골라 주세요.", t)
+        self.assertEqual(check_message(t, i), [])
+        self.assertNotIn("지금 자리 그대로", write_message(inp()).text)
+        self.assertIn("지금 배정된 자리가 빠지거나 바뀜", check_message(write_message(inp()).text, i))
+
     def test_reveal_setting(self):
         self.assertIn("가 교수님의 자료구조 01 분반과 겹칩니다", write_message(inp()).text)
         t = write_message(inp(reveal=False)).text
@@ -133,6 +142,19 @@ class KeywordReply(unittest.TestCase):
         r = parse_reply("A나 B 괜찮아요", choices=["A", "B"])
         self.assertEqual((r.picks, r.ordered), (["A", "B"], False))
         self.assertFalse(parse_reply("B가 제일 좋아요", choice="B").ordered)   # 하나만 고르면 순서 없음
+
+    def test_keep(self):
+        # '지금 자리 그대로' 버튼 → 처리안 keep ([현재대로 유지]) (11/25)
+        r = parse_reply("", choices=["KEEP"])
+        self.assertEqual((r.kind, r.picks, r.keep), ("수용", [], True))
+        p = match_conditions(r, ALTS, round=1)
+        self.assertEqual((p.action, p.key), ("keep", None))
+        self.assertIn("[현재대로 유지]", p.text)
+        # 글로 "지금 그대로 괜찮아요"는 지금 자리가 있는 분반(can_keep)일 때만 keep
+        self.assertTrue(parse_reply("지금 그대로 괜찮아요", choices=["ETC"], can_keep=True).keep)
+        self.assertFalse(parse_reply("지금 그대로 괜찮아요", choices=["ETC"]).keep)
+        # 안을 고르면 글의 "그대로"는 keep이 아니다 ("B로 하고 방은 지금 그대로 해 주세요")
+        self.assertFalse(parse_reply("B로 하고 방은 지금 그대로 해 주세요", choices=["B"], can_keep=True).keep)
 
     def test_late_afternoon_and_ordinal(self):
         r = parse_reply("세 번째 안은 어렵고 늦은 오후면 좋겠습니다")
@@ -278,6 +300,20 @@ class LLMPath(unittest.TestCase):
         self.assertEqual((r.kind, r.note, p.action), ("거절", "실습 조교 배치", "decide"))
         self.assertIn("[따로 연락]", p.text)
         self.assertIn("실습 조교 배치", p.text)
+
+    def test_llm_keep(self):
+        # 모델의 keep은 지금 자리가 있는 분반에서만 받는다. 버튼을 누르면 모델 답과 상관없이 keep
+        fake = coord._ReplyLLM(kind="수용", picks=[], keep=True)
+        with mock.patch.object(coord, "generate_json", return_value=fake) as g:
+            r = parse_reply("지금 시간 그대로 유지해 주세요", choices=["ETC"], alternatives=ALTS, method="llm", can_keep=True)
+        self.assertEqual((r.kind, r.keep, match_conditions(r, ALTS, round=1).action), ("수용", True, "keep"))
+        with mock.patch.object(coord, "generate_json", return_value=fake):
+            r = parse_reply("지금 시간 그대로 유지해 주세요", choices=["ETC"], alternatives=ALTS, method="llm")
+        self.assertFalse(r.keep)
+        with mock.patch.object(coord, "generate_json", return_value=coord._ReplyLLM(kind="거절", picks=[])) as g:
+            r = parse_reply("", choices=["KEEP"], alternatives=ALTS, method="llm")
+        self.assertEqual((r.kind, r.keep), ("수용", True))
+        self.assertIn("지금 자리 그대로", g.call_args[0][0])
 
     def test_llm_days_kept_when_days_written_together(self):
         # '화목'처럼 붙여 쓴 요일은 지킨다. 요일이 없는 답장에서 만든 요일만 버린다

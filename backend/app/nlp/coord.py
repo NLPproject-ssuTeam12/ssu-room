@@ -38,7 +38,7 @@ FORBIDDEN = re.compile(r"연차|임용|우선순위|경력|꼭 표시")
 # 교수 화면: A·B·C·기타 중 하나 이상 골라야 보낼 수 있고 여러 개 골라도 된다. 기타는 글을 쓴다 (11/25 #17)
 CLOSING = ("가능한 안을 모두 골라 주시고, 모두 어려우시면 기타를 골라 가능한 시간을 적어 주세요. "
            "회신 기한은 1주이며, 기한 전에 한 번 더 알려 드립니다.")
-CHOICES = ("A", "B", "C", "ETC")
+CHOICES = ("A", "B", "C", "ETC", "KEEP")   # KEEP = '지금 자리 그대로' (희망 밖에라도 놓인 분반만 화면에 보임, 11/25)
 
 
 # ---------------- 표시 ----------------
@@ -99,6 +99,8 @@ def _compose(inp: MessageInput, body: list[str]) -> str:
          f"{inp.term} {inp.course} 분반 시간표 {inp.round}차 조율 안내드립니다.", ""]
     L += body + [""]
     L += [f"{a.key}  {alt_label(a)}" for a in inp.alternatives]
+    if inp.current:   # 희망 밖에라도 놓인 분반: 지금 자리를 알리고 그대로 두는 길도 준다 (11/25)
+        L += ["", f"지금은 {inp.current}에 배정되어 있습니다. 그대로 괜찮으시면 '지금 자리 그대로'를 골라 주세요."]
     L += ["", CLOSING]
     return "\n".join(L)
 
@@ -210,6 +212,8 @@ def check_message(text: str, inp: MessageInput) -> list[str]:
         p.append("과목·분반 이름이 빠짐")
     if inp.wish not in text:
         p.append("본인 희망 시간이 빠지거나 바뀜")
+    if inp.current and inp.current not in text:
+        p.append("지금 배정된 자리가 빠지거나 바뀜")
     if not inp.alternatives:
         p.append("대안이 없음")
     lines = text.splitlines()
@@ -239,19 +243,23 @@ def _hour(h: int) -> int:
 _ORDER_WORD = re.compile(r"안\s*되면|어려우면|힘들면|제일|가장|먼저|우선|1순위|차선|그다음|그 다음|다음으로")
 
 
-def _buttons(choice: str | None, choices: list[str] | None) -> tuple[list[str], bool]:
-    """화면에서 누른 값 → (누른 안 A·B·C 목록, A·B·C를 하나도 안 고름).
-    choices = 새 화면(#17): A·B·C·ETC(기타) 중 하나 이상, 여러 개 가능. 기타만 누르면 A·B·C는 안 고른 것.
+_KEEP_WORD = re.compile(r"(지금|현재)[^.!?\n]{0,10}?(그대로|대로)\s*(괜찮|좋|두|해|유지|가|할게|하겠|부탁)")
+
+
+def _buttons(choice: str | None, choices: list[str] | None) -> tuple[list[str], bool, bool]:
+    """화면에서 누른 값 → (누른 안 A·B·C 목록, A·B·C를 하나도 안 고름, '지금 자리 그대로'를 누름).
+    choices = 새 화면(#17): A·B·C·ETC(기타)·KEEP(지금 자리 그대로) 중 하나 이상, 여러 개 가능. 기타만 누르면 A·B·C는 안 고른 것.
     choice = 예전 화면: 'A'/'B'/'C' 하나, 'none' = 모두 어려움, None = 안 누름. choices가 있으면 choices를 쓴다."""
     if choices:
         bad = [c for c in choices if c not in CHOICES]
         if bad:
             raise ValueError(f"누를 수 있는 값은 {CHOICES}: {bad}")
-        btn = [c for c in dict.fromkeys(choices) if c != "ETC"]
-        return btn, not btn
+        keep = "KEEP" in choices
+        btn = [c for c in dict.fromkeys(choices) if c in ("A", "B", "C")]
+        return btn, not btn and not keep, keep
     if choice in ("A", "B", "C"):
-        return [choice], False
-    return [], choice == "none"
+        return [choice], False, False
+    return [], choice == "none", False
 
 
 def _order_picks(btn: list[str], text_picks: list[str], ordered: bool) -> list[str]:
@@ -261,9 +269,12 @@ def _order_picks(btn: list[str], text_picks: list[str], ordered: bool) -> list[s
     return list(dict.fromkeys(btn + text_picks))
 
 
-def _keyword_reply(text: str, btn: list[str], none: bool) -> ReplyParse:
+def _keyword_reply(text: str, btn: list[str], none: bool, keep: bool = False, can_keep: bool = False) -> ReplyParse:
     t = text or ""
     text_picks = list(dict.fromkeys(_PICK.findall(t) + [{"첫": "A", "두": "B", "세": "C"}[m] for m in _ORD.findall(t)]))
+    keep = keep or (can_keep and not btn and not text_picks and bool(_KEEP_WORD.search(t)))
+    if keep:   # 지금 자리 그대로 (버튼 또는 "지금 그대로 괜찮아요") → 처리안 keep. 고른 안은 참고로만 남긴다
+        return ReplyParse(kind="수용", picks=list(dict.fromkeys(btn + text_picks)), keep=True, method="keyword")
     all_no = none or bool(_ALL_NO.search(t))
     ordered = len(set(text_picks) | set(btn)) >= 2 and bool(_ORDER_WORD.search(t))
     picks = [] if all_no else _order_picks(btn, text_picks, ordered)
@@ -299,6 +310,7 @@ class _ReplyLLM(BaseModel):
     kind: Literal["수용", "조건부", "거절", "확인 필요"]
     picks: list[Literal["A", "B", "C"]]
     ordered: bool = False  # 둘 이상 고르면서 어느 안을 더 원하는지 순서를 밝혔는가
+    keep: bool = False     # 지금 배정된 자리를 그대로 원하는가
     day_slots: list[_DaySlotsLLM] = []
     end_before: list[_EndBeforeLLM] = []
     rooms: list[str] = []  # 고른 안을 이 강의실에서 해 달라는 요청 (번호). 이미 그 방인지는 코드가 대안과 대조한다
@@ -323,11 +335,17 @@ def _room_note(rooms: list[str], alt: Alternative | None, note: str) -> str:
     return (note + " / " if note else "") + f"강의실 {'·'.join(sorted(want))} 요청"
 
 
-def _from_llm(r: _ReplyLLM, btn: list[str], none: bool, alts: list[Alternative], text: str = "") -> ReplyParse:
+def _from_llm(r: _ReplyLLM, btn: list[str], none: bool, alts: list[Alternative], text: str = "",
+              keep: bool = False, can_keep: bool = False) -> ReplyParse:
     """언어 모델 답을 검사하고 ReplyParse로 바꾼다. 모양이 이상하면 ValueError.
-    btn = 화면에서 누른 A·B·C, none = A·B·C를 하나도 안 고름 (기타만 또는 예전 '모두 어려움')."""
+    btn = 화면에서 누른 A·B·C, none = A·B·C를 하나도 안 고름 (기타만 또는 예전 '모두 어려움'),
+    keep = '지금 자리 그대로'를 누름, can_keep = 지금 자리가 있는 분반이라 글의 "지금 그대로"도 받을 수 있음."""
     keys = [a.key for a in alts]
     text_picks = [p for p in dict.fromkeys(r.picks) if not keys or p in keys]
+    if keep or (can_keep and r.keep and not btn and not text_picks):
+        note = r.note.strip()[:100]
+        return ReplyParse(kind="조건부" if note else "수용", picks=list(dict.fromkeys(btn + text_picks)), keep=True,
+                          note=note, method="llm")
     picks = [] if none else _order_picks(btn, text_picks, r.ordered)
     ordered = r.ordered and len(picks) >= 2
     day_slots: dict[int, list[str]] = {}
@@ -369,10 +387,12 @@ def _from_llm(r: _ReplyLLM, btn: list[str], none: bool, alts: list[Alternative],
 def _choice_text(btn: list[str], none: bool, choices: list[str] | None) -> str:
     if choices:
         etc = "기타(글로 적음)" if "ETC" in choices else ""
+        keep = "지금 자리 그대로" if "KEEP" in choices else ""
         abc = ", ".join(f"{c}안" for c in btn)
         if not btn:
-            return f"{etc} — A·B·C는 고르지 않음"
-        return ", ".join(x for x in (abc, etc) if x) + (" (여러 개 누름, 누른 순서는 선호 순서가 아님)" if len(btn) > 1 else "")
+            return ", ".join(x for x in (keep, etc) if x) + " — A·B·C는 고르지 않음"
+        return (", ".join(x for x in (abc, keep, etc) if x)
+                + (" (여러 개 누름, 누른 순서는 선호 순서가 아님)" if len(btn) > 1 else ""))
     if none:
         return "모두 어려움"
     return f"{btn[0]}안" if btn else "누르지 않음"
@@ -380,13 +400,17 @@ def _choice_text(btn: list[str], none: bool, choices: list[str] | None) -> str:
 
 def parse_reply(text: str, choice: str | None = None, *, choices: list[str] | None = None,
                 alternatives: list[Alternative] | None = None, message: str = "",
-                method: Method = "keyword") -> ReplyParse:
+                method: Method = "keyword", can_keep: bool = False) -> ReplyParse:
     """교수 답장 → 판정·고른 안·조건.
-    choices = 새 화면(#17)에서 누른 값: 'A'·'B'·'C'·'ETC'(기타) 중 하나 이상, 여러 개 가능. 기타만 누르면 A·B·C는 안 고른 것.
-    choice = 예전 화면 값 ('A'/'B'/'C', 'none' = 모두 어려움, None = 안 누름). choices가 있으면 choices를 쓴다."""
-    btn, none = _buttons(choice, choices)
+    choices = 새 화면(#17)에서 누른 값: 'A'·'B'·'C'·'ETC'(기타)·'KEEP'(지금 자리 그대로) 중 하나 이상, 여러 개 가능.
+      기타만 누르면 A·B·C는 안 고른 것.
+    choice = 예전 화면 값 ('A'/'B'/'C', 'none' = 모두 어려움, None = 안 누름). choices가 있으면 choices를 쓴다.
+    can_keep = 이 분반에 지금 배정된 자리가 있음 (희망 밖에라도 놓인 분반). True일 때만 글의 "지금 그대로 괜찮아요"를
+      '지금 자리 그대로'로 읽는다. 자리가 없는 분반(못 놓음)은 False (11/25)."""
+    btn, none, keep = _buttons(choice, choices)
+    can_keep = can_keep or keep
     if method == "keyword":
-        return _keyword_reply(text, btn, none)
+        return _keyword_reply(text, btn, none, keep, can_keep)
     alts = alternatives or []
     prompt = (load_prompt("parse_reply")
               .replace("<<MESSAGE>>", message or "(없음)")
@@ -394,14 +418,14 @@ def parse_reply(text: str, choice: str | None = None, *, choices: list[str] | No
               .replace("<<CHOICE>>", _choice_text(btn, none, choices))
               .replace("<<REPLY>>", text or "(빈 답장)"))
     try:
-        return _from_llm(generate_json(prompt, _ReplyLLM), btn, none, alts, text)
+        return _from_llm(generate_json(prompt, _ReplyLLM), btn, none, alts, text, keep, can_keep)
     except (LLMUnavailable, ValueError) as e:
         reason = _fallback_reason(e)
-        r = _keyword_reply(text, btn, none)
+        r = _keyword_reply(text, btn, none, keep, can_keep)
         r.fallback, r.fallback_reason = True, reason
         # 키워드 규칙은 거절·보류를 수용으로 잘못 읽을 때가 있다 (평가의 위험 오류). 모델이 막혀 넘어왔는데
         # 글만 보고 수용·조건부가 나오면 확인 필요로 낮추고 추정은 note에 남긴다. 화면 버튼(A/B/C)을 눌렀으면 그대로 둔다 (11/22)
-        if r.kind in ("수용", "조건부") and not btn:
+        if r.kind in ("수용", "조건부") and not btn and not keep:
             r = r.model_copy(update={"kind": "확인 필요", "picks": [], "ordered": False, "conditions": Conditions(),
                                      "note": f"AI 해석 실패({reason}). 키워드 추정: {''.join(r.picks)} {r.kind}"})
         return r
@@ -453,6 +477,8 @@ def match_conditions(parse: ReplyParse, alternatives: list[Alternative], round: 
     picks 순서와 parse.ordered(respect_order)를 넘겨 엔진이 최종으로 고른다 (11/25 #18)."""
     k = parse.conditions
     req = f" 교수님 요청: {parse.note}" if parse.note and not parse.fallback else ""
+    if parse.keep:   # '지금 자리 그대로' → 바꿀 것 없음. 조교가 [현재대로 유지]로 끝낸다 (11/25)
+        return Proposal(action="keep", text="교수님이 지금 자리를 그대로 원합니다. [현재대로 유지]를 누르면 끝납니다." + req)
     if parse.kind == "확인 필요":
         return Proposal(action="decide", text="답장을 확실히 읽지 못했습니다. [수정]으로 정하거나 [따로 연락]해 주세요."
                                               + (f" ({parse.note})" if parse.note else ""))
