@@ -48,7 +48,8 @@ erDiagram
     }
     other_request {
         int id PK
-        int response_id FK "응답당 하나"
+        int response_id FK "희망 입력 기타 (응답당 하나)"
+        int message_id FK "조율 답장 기타 (답장당 하나)"
         text body "교수가 쓴 자연어 원문"
         text status "PENDING CONFIRMED 조교 확인함"
         int confirmed_by FK

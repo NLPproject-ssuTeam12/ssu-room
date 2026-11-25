@@ -105,14 +105,16 @@ CREATE TABLE response_slot (                  -- 시간표에서 고른 칸
   kind TEXT NOT NULL CHECK (kind IN ('PREFER','BLOCK')),  -- PREFER 희망 / BLOCK 불가 (칠하지 않은 칸은 상관없음)
   PRIMARY KEY (response_id, slot_id)
 );
-CREATE TABLE other_request (                 -- 교수가 '기타 요청사항'에 자연어로 쓴 글. AI가 해석하지 않고 조교가 읽고 '확인'을 누른다
+CREATE TABLE other_request (                 -- 교수가 '기타'에 자연어로 쓴 시간표 밖 요청. AI가 시간표 조건으로 쓰지 않고 조교가 읽고 '확인'을 누른다
   id INTEGER PRIMARY KEY,
-  response_id INTEGER NOT NULL UNIQUE REFERENCES course_response(id),
+  response_id INTEGER UNIQUE REFERENCES course_response(id),   -- 희망 입력의 기타 요청 (응답당 하나)
+  message_id INTEGER UNIQUE REFERENCES message(id),            -- 조율 답장의 기타 중 시간표 밖 요청 (답장당 하나)
   body TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'PENDING' CHECK (status IN ('PENDING','CONFIRMED')),  -- 미확인 / 조교 확인함
   confirmed_by INTEGER REFERENCES user(id), confirmed_at TEXT,
   ta_memo TEXT,                                        -- 조교 메모 (예: "분반 2개로 입력함", "수동 처리")
-  created_at TEXT DEFAULT CURRENT_TIMESTAMP
+  created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+  CHECK ((response_id IS NULL) <> (message_id IS NULL))   -- 둘 중 정확히 하나
 );
 CREATE TABLE request_item (                   -- 솔버가 쓰는 구조화된 요청 (분반 수, 분반 연강·교차 등). 조교가 기타 요청을 읽고 입력하거나 화면 항목에서 바로 생성
   id INTEGER PRIMARY KEY,
@@ -159,6 +161,7 @@ CREATE TABLE timetable_section (              -- 이 버전에서 열리는 분�
   planned_enrollment INTEGER,
   status TEXT NOT NULL DEFAULT 'DONE'
          CHECK (status IN ('DONE','COORD','MANUAL')),  -- 배정 상태: 끝남 / 조율 중 / 조교가 직접 정함 (서버 assignment.status 와 같은 이름)
+  locked INTEGER NOT NULL DEFAULT 0 CHECK (locked IN (0,1)),   -- 1 = 고정: 이후 모든 풀이에서 움직이지 않음 (조교 수동 배치 등)
   PRIMARY KEY (timetable_id, course_id, section_no)
 );
 CREATE TABLE assignment (                     -- 분반의 수업 회차가 차지한 칸 하나당 한 행
@@ -182,7 +185,7 @@ CREATE TABLE proposal (
   section_no INTEGER,                                  -- 어느 분반의 조율인지 (NULL = 과목 전체)
   reason TEXT,
   status TEXT NOT NULL DEFAULT 'OPEN'
-         CHECK (status IN ('OPEN','SENT','PROPOSED','RESOLVED','KEPT','NEXT')),   -- 보내기 전 / 답 기다림 / 조교 확인 대기 / 반영됨 / 현재대로 유지 / 다음 차수로
+         CHECK (status IN ('OPEN','SENT','PROPOSED','RESOLVED','KEPT','NEXT','OFFLINE')),   -- 보내기 전 / 답 기다림 / 조교 확인 대기 / 반영됨 / 현재대로 유지 / 다음 차수로 / 따로 연락 중
   prev_proposal_id INTEGER REFERENCES proposal(id)     -- 이어받은 이전 차수 안건 (NULL = 1차 또는 처음 연 안건)
 );
 CREATE UNIQUE INDEX ux_proposal_prev ON proposal(prev_proposal_id);   -- 한 안건에서 다음 차수 안건은 하나만
@@ -208,6 +211,12 @@ CREATE TABLE message (
   kind TEXT NOT NULL, channel TEXT,
   body TEXT, sent_at TEXT, delivery_status TEXT,
   reply_to_id INTEGER REFERENCES message(id)            -- 교수 답장(REPLY)이 답하는 조율 메시지
+);
+CREATE TABLE reply_choice (                  -- 교수 답장에서 고른 값 (하나 이상, 여러 개 가능)
+  message_id INTEGER NOT NULL REFERENCES message(id),
+  choice TEXT NOT NULL CHECK (choice IN ('A','B','C','ETC')),   -- 대안 A / B / C / 기타(답장 본문)
+  option_id INTEGER REFERENCES proposal_option(id),    -- A·B·C 가 가리키는 대안 (기타는 NULL)
+  PRIMARY KEY (message_id, choice)
 );
 CREATE TABLE reply_interpretation (
   message_id INTEGER PRIMARY KEY REFERENCES message(id),

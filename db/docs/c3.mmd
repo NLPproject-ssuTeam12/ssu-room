@@ -17,6 +17,8 @@ erDiagram
     proposal |o--o| proposal : "다음 차수(prev_proposal_id)"
     user ||--o{ message : "주고받음"
     message ||--o| reply_interpretation : "해석"
+    message ||--o{ reply_choice : "고른 값"
+    proposal_option ||--o{ reply_choice : "A B C"
     proposal_option ||--o{ reply_interpretation : "선택됨"
     round { int id PK }
     course { int id PK }
@@ -43,6 +45,7 @@ erDiagram
         int section_no PK
         int planned_enrollment
         text status "DONE COORD MANUAL"
+        int locked "1 고정"
     }
     assignment {
         int timetable_id PK
@@ -58,7 +61,7 @@ erDiagram
         int course_id FK
         int section_no "어느 분반인지"
         text reason
-        text status "OPEN SENT PROPOSED RESOLVED KEPT NEXT"
+        text status "OPEN SENT PROPOSED RESOLVED KEPT NEXT OFFLINE"
         int prev_proposal_id FK "이전 차수 안건"
     }
     proposal_option {
@@ -89,5 +92,10 @@ erDiagram
         text label "ACCEPT CONDITIONAL REJECT UNCLEAR"
         int chosen_option_id FK
         text extracted_json
-        text ta_action "CONFIRM EDIT KEEP"
+        text ta_action "CONFIRM EDIT KEEP OFFLINE"
+    }
+    reply_choice {
+        int message_id PK
+        text choice PK "A B C ETC 하나 이상"
+        int option_id FK
     }
