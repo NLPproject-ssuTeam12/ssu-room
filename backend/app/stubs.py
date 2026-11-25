@@ -365,23 +365,40 @@ def check_message(text: str, inp: MessageInput) -> List[str]:
     return p
 
 
-def parse_reply(text: str, choice: Optional[str] = None, *, alternatives: Optional[List[Alternative]] = None,
-                message: str = "", method: Method = "keyword") -> ReplyParse:
+def parse_reply(text: str, choice: Optional[str] = None, *, choices: Optional[List[str]] = None,
+                alternatives: Optional[List[Alternative]] = None, message: str = "",
+                method: Method = "keyword", can_keep: bool = False) -> ReplyParse:
     """STUB: 담당 최재성
-    교수 답장 (+ 화면에서 누른 안 choice: 'A'/'B'/'C'/'none'/None) → ReplyParse.
-    가짜: method와 상관없이 간단한 키워드로 읽는다. 애매하면 '확인 필요'."""
+    교수 답장 + 누른 값 → ReplyParse. 가짜: method와 상관없이 간단한 키워드로 읽는다. 애매하면 '확인 필요'.
+    choices = 'A'·'B'·'C'·'ETC'·'KEEP' 중 하나 이상(여러 개). 없으면 예전 choice('A'/'B'/'C'/'none'/None).
+    KEEP을 누르거나 can_keep이고 글이 '지금 그대로'면 keep."""
     t = (text or "").strip()
-    picks = list(dict.fromkeys(re.findall(r"(?<![A-Za-z])([ABC])(?![A-Za-z])", t)))
-    if choice and choice != "none":
-        picks = [choice] + [x for x in picks if x != choice]
-    if choice == "none":
-        picks = []
     cond = Conditions(end_before=[
         EndBefore(day=DAYN.index(d), time=f"{(int(h) + 12 if int(h) < 8 else int(h)):02d}:00")
         for d, h in re.findall(r"([월화수목금])요?일?[은는]?\s*(\d{1,2})시\s*(?:전|이전|까지)", t)])
+    if choices is not None:
+        if "KEEP" in choices:
+            return ReplyParse(kind="수용", keep=True, conditions=cond)
+        btn = [c for c in ("A", "B", "C") if c in choices]
+        none = not btn
+    else:
+        btn = [choice] if choice in ("A", "B", "C") else []
+        none = choice == "none"
+    text_picks = list(dict.fromkeys(re.findall(r"(?<![A-Za-z])([ABC])(?![A-Za-z])", t)))
+    if btn:
+        ordered = [x for x in text_picks if x in btn]
+        picks = ordered + [x for x in btn if x not in ordered]
+    else:
+        picks = [] if none else text_picks
+    if can_keep and not picks and re.search(r"지금\s*(자리\s*)?그대로", t):
+        return ReplyParse(kind="수용", keep=True, conditions=cond)
     if picks:
-        return ReplyParse(kind="조건부" if not cond.is_empty() else "수용", picks=picks, conditions=cond)
-    if choice == "none" or re.search(r"안\s*[돼되]|어렵|불가|힘들", t):
+        return ReplyParse(kind="조건부" if not cond.is_empty() else "수용", picks=picks,
+                          ordered=len(picks) > 1 and len([x for x in text_picks if x in picks]) > 1,
+                          conditions=cond)
+    if none and not cond.is_empty():
+        return ReplyParse(kind="조건부", conditions=cond)
+    if none or re.search(r"안\s*[돼되]|어렵|불가|힘들", t):
         return ReplyParse(kind="거절", conditions=cond)
     return ReplyParse(kind="확인 필요", conditions=cond)
 
@@ -389,9 +406,14 @@ def parse_reply(text: str, choice: Optional[str] = None, *, alternatives: Option
 def match_conditions(parse: ReplyParse, alternatives: List[Alternative], round: int,
                      unavailable: List[str] = ()) -> Proposal:
     """STUB: 담당 최재성
-    ReplyParse + 대안 + 차수 (+ 못 쓰게 된 안) → 처리안. 가짜: 고른 안을 순서대로 조건에 대 보고 처음 맞는 안."""
+    ReplyParse + 대안 + 차수 (+ 못 쓰게 된 안) → 처리안. 가짜: 고른 안을 순서대로 조건에 대 보고 처음 맞는 안.
+    지금 자리 그대로(keep)면 keep, 고른 안도 조건도 없으면 [따로 연락]을 권하는 decide (진짜와 같은 규칙)."""
+    if getattr(parse, "keep", False):
+        return Proposal(action="keep", text="교수님이 지금 자리를 그대로 원합니다. [현재대로 유지]를 누르면 끝납니다.")
     if parse.kind == "확인 필요":
-        return Proposal(action="decide", text="답장을 확실히 읽지 못했습니다. [수정]으로 직접 정해 주세요.")
+        return Proposal(action="decide", text="답장을 확실히 읽지 못했습니다. [수정]으로 정하거나 [따로 연락]해 주세요.")
+    if not parse.picks and parse.conditions.is_empty():
+        return Proposal(action="decide", text="되는 시간을 말하지 않고 거절했습니다. 교수님과 [따로 연락]해 정해 주세요.")
     checks = []
     for key in parse.picks:
         a = next((x for x in alternatives if x.key == key), None)

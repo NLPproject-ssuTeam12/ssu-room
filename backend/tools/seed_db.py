@@ -1,24 +1,25 @@
-"""실제(가명) 데이터 data/private/<DATA_SET>/*.json → 문하윤 DB(db/schema.sql) 시드 + 분반 대응표 (백엔드 ③, 김대원).
+"""강의정보 엑셀(2026-2) → 문하윤 DB(db/schema.sql) 시드 + 분반 대응표 (백엔드 ③, 김대원).
 
 사용 (저장소 맨 위에서):
-    python backend/tools/seed_db.py                 # → ssuroom.db, data/private/real/section_map.json
-    python backend/tools/seed_db.py --db 다른.db --year 2026 --semester 2
+    python backend/tools/seed_db.py                          # 기본 엑셀 → ssuroom.db, data/private/real/section_map.json
+    python backend/tools/seed_db.py --xlsx 다른.xlsx --db 다른.db
 
-하는 일
-- 새 DB 파일(이미 있으면 지움) → schema.sql → db/seed_time_slot.py로 칸(월~금 × 8교시) → department, term, round 1(희망 수집)
-- user: 교수 가명마다 PROF 한 줄. building/room: rooms.json 그대로(추정치 표시는 대응표에 남김. DB에 칸이 없음)
-- course: 과목 코드(끝 두 자리 뺀 것)마다 한 줄. 카테고리 "전필-…" → "전공필수", "교필…" → "교양필수"(솔버가 아는 이름).
-  원래 값은 대응표에 남긴다. 학과는 카테고리 뒤쪽(AI소프트웨어/정보보호)
-- course_section: 데이터에 있는 분반만. 솔버는 분반을 1..n으로 세므로 원래 번호 순으로 1부터 다시 매긴다.
-  (course_id, 새 번호) ↔ 원래 분반 번호·서버 분반 id는 대응표에. 교수별 SECTION_COUNT도 넣는다
-- 희망: (과목, 교수)마다 course_response 1개 (팀 결정 11/23: 분반 번호를 DB에 더하지 않는다).
-  같은 교수가 여러 분반을 맡아 희망이 다르면 합친다: BLOCK = 합집합, PREFER = 합집합 − BLOCK.
-  실습실 = 한 분반이라도 필요하면 1. 주 1회 연강 = 지금 연강(2칸 한 번)인 분반은 MUST, 주 2회는 NONE, 섞이면 PREFER.
-  '꼭'(must)은 prefer_only로 옮기지 않는다('꼭'은 하드 규칙이 아니라 가장 큰 가중치. 실제 데이터에는 없음).
-  기타 요청(note)은 other_request(PENDING)로. 건물 선호는 교수별 professor_building_pref(많이 고른 건물이 1순위)
-- MANUAL 분반(주 2칸이 아니거나 토요일·교시 밖)은 DB에 넣지 않고 대응표에 "MANUAL"로 표시
-- 채플·교양필수 고정 시간: 하윤 DB에 표가 없어 넣지 않는다 (fixed_blocks.json 그대로 둠)
+엑셀 열: 이수구분(주전공)·과목번호·과목명·분반·교수명·시간/학점·수강인원·강의시간(강의실)·수강대상.
 
+- 교수 실명은 가명(교수01…)으로 바꾼다. 대응은 data/private/alias_map.json 에만 둔다(출력하지 않음).
+  강의시간(강의실) 칸의 '-이름' 부분도 버린다. 끝에 DB·대응표·출력 전체를 실명으로 검색해 0건인지 본다.
+- 과목 = 과목번호 끝 두 자리를 뺀 것. 분반 = 그 과목의 행들(1부터 다시 번호, 원래 번호·분반 표기는 대응표에).
+  분반 인원 = 수강인원. 학년 = 수강대상의 'N학년'(없으면 비움). 이수구분 '전필-…' → '전공필수'(엔진 MAJOR_REQUIRED),
+  '교필…' → '교양필수', 전기·전선은 원래 값 그대로(엔진은 필수과목만 이름으로 본다).
+- 강의시간에서 회차·칸 수를 읽는다: 75분 수업 두 번(다른 요일) = 주 2회, 같은 날 이어진 두 칸 = 주 1회 연강.
+  토요일·교시 밖·강의시간 없음·교수 여러 명·그 밖의 모양은 MANUAL(DB에 넣지 않고 대응표에 표시).
+- 강의실: 강의시간의 건물·호수. 정원은 data/private/real/rooms.json, 없으면 그 방을 쓰는 분반 인원 최댓값(추정, 대응표에 표시).
+  실습실은 11/24 회의에서 정한 8개(LABS).
+- 희망(가상, 분반마다): 실제 강의 칸을 PREFER, 실습실을 쓰면 실습실 MUST, 하루 두 칸 이어서면 주 1회 연강 MUST.
+  분반 연강·교차는 없음. 교수 희망 건물 = 그 교수가 가장 많이 쓴 건물 하나.
+- 채플: data/private/real/fixed_blocks.json 의 채플(AI대학 대상) 칸 → 학년별 chapel_slot. 교양필수 고정 시간은 넣지 않는다.
+- 조교 계정 하나(user role TA, 이름 '조교')를 만든다(조교 결정 함수가 조교만 받음).
+- 전 학기(2026-1) 기록은 넣지 않는다: 엔진 load_history 는 전년도 같은 학기만 읽는다.
 대응표(section_map.json)는 서버·어댑터가 읽는다. data/private 아래라 커밋하지 않는다.
 """
 
@@ -32,20 +33,77 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(REPO_ROOT))
+PRIVATE = REPO_ROOT / "data" / "private"
+DEFAULT_XLSX = PRIVATE / "timetable" / "2026-2_강의정보.xlsx"
 
-from backend.app.contracts import DAYS, STARTS, Timetable, parse, section_shape  # noqa: E402
-
-ALIAS = re.compile(r"^교수\d+$")
-CATEGORY = (("전필", "전공필수"), ("교필", "교양필수"))   # 솔버 REQUIRED_CATEGORIES와 같은 이름
+STARTS = ("09:00", "10:30", "12:00", "13:30", "15:00", "16:30", "18:00", "19:30")
+DAYS = ("월", "화", "수", "목", "금")
+# 11/24 회의: 실습실 8개 (21206·21306은 엑셀에 표기가 없지만 실습실)
+LABS = {"정보과학관 21101", "정보과학관 21206", "정보과학관 21305", "정보과학관 21306",
+        "문화관 03407", "문화관 03408", "문화관 03411", "전산관 19328"}
+CATEGORY = (("전필", "전공필수"), ("교필", "교양필수"))
 DEPARTMENTS = {"AI소프트웨어": "AI소프트웨어학부", "정보보호": "정보보호학과"}
-COLLEGE = "AI융합대학"   # 가정한 이름 (단과대 이름은 데이터에 없음)
+COLLEGE = "AI융합대학"   # 가정한 이름
+TA_NAME = "조교"
+LINE = re.compile(r"^([월화수목금토일](?: [월화수목금토일])*) (\d\d:\d\d)-(\d\d:\d\d) \((.*)\)$")
+COLUMNS = ("이수구분(주전공)", "과목번호", "과목명", "분반", "교수명", "수강인원", "강의시간(강의실)", "수강대상")
 
 
-# ---------- 순수 함수 (DB 없이 시험할 수 있게) ----------
+# ---------- 엑셀 읽기 (실명이 들어 있으므로 결과를 출력하지 않는다) ----------
+
+def _mins(t: str) -> int:
+    h, m = t.split(":")
+    return int(h) * 60 + int(m)
+
+
+def _hhmm(x: int) -> str:
+    return f"{x // 60:02d}:{x % 60:02d}"
+
+
+def room_of(raw: str) -> Optional[str]:
+    """'정보과학관 21305 (이철희실습실)-이름' → '정보과학관 21305'. 이름 부분은 버린다."""
+    body = raw.rsplit("-", 1)[0].strip()
+    m = re.match(r"(\S+)\s+(\d{5})", body)
+    return f"{m.group(1)} {m.group(2)}" if m else None
+
+
+def read_excel(path: Path) -> List[dict]:
+    """엑셀 행 → [dict(code, name, division, category, prof_real, enrollment, year, meets[(요일, 시작분, 끝분, 강의실)])]."""
+    from openpyxl import load_workbook
+    ws = load_workbook(path, read_only=True, data_only=True).worksheets[0]
+    rows = list(ws.iter_rows(values_only=True))
+    head = [str(h).strip() if h is not None else "" for h in rows[0]]
+    missing = [c for c in COLUMNS if c not in head]
+    if missing:
+        raise ValueError(f"엑셀에 열이 없습니다: {missing}")
+    out = []
+    for r in rows[1:]:
+        d = dict(zip(head, r))
+        if not d.get("과목번호"):
+            continue
+        meets = []
+        for line in str(d.get("강의시간(강의실)") or "").split("\n"):
+            m = LINE.match(line.strip())
+            if not m:
+                continue
+            for day in m.group(1).split():
+                meets.append((day, _mins(m.group(2)), _mins(m.group(3)), room_of(m.group(4))))
+        grade = re.match(r"\s*(\d)학년", str(d.get("수강대상") or ""))
+        out.append(dict(
+            code=str(d["과목번호"]).strip(), name=str(d["과목명"]).strip(),
+            division=(str(d.get("분반") or "").strip() or None),
+            category=(str(d.get("이수구분(주전공)") or "").strip() or None),
+            prof_real=str(d.get("교수명") or "").strip(),
+            enrollment=int(d["수강인원"]) if d.get("수강인원") else None,
+            year=int(grade.group(1)) if grade else None,
+            meets=meets,
+        ))
+    return out
+
+
+# ---------- 순수 함수 ----------
 
 def db_category(cat: Optional[str]) -> Optional[str]:
-    """'전필-AI소프트웨어' → '전공필수', '교필…' → '교양필수'. 나머지는 원래 값."""
     if not cat:
         return cat
     for prefix, name in CATEGORY:
@@ -56,240 +114,302 @@ def db_category(cat: Optional[str]) -> Optional[str]:
 
 def department_of(cat: Optional[str]) -> str:
     tail = (cat or "").partition("-")[2]
-    return DEPARTMENTS.get(tail, tail or DEPARTMENTS["AI소프트웨어"])
+    return DEPARTMENTS.get(tail, DEPARTMENTS["AI소프트웨어"])
 
 
-def _grid_cell(key: str) -> bool:
-    day, _, start = key.partition("-")
-    return day in DAYS and start in STARTS
+def section_id(row: dict) -> str:
+    """서버 분반 id: 과목번호, 공통 분반이면 '과목번호-(공통-재수강)' (기존 모양과 같게)."""
+    return row["code"] + (f"-{row['division']}" if row["division"] else "")
 
 
-def merge_wishes(wishes: List[dict], shapes: List[str]) -> dict:
-    """한 교수가 같은 과목에서 맡은 분반들의 희망 → 응답 하나."""
-    block = {k for w in wishes for k, v in w.get("cells", {}).items() if v == "BLOCK" and _grid_cell(k)}
-    prefer = {k for w in wishes for k, v in w.get("cells", {}).items() if v == "PREFER" and _grid_cell(k)} - block
-    kinds = set(shapes)
-    single = "MUST" if kinds == {"ONCE_LONG"} else "NONE" if kinds == {"TWICE"} else "PREFER"
-    notes = list(dict.fromkeys(w["note"].strip() for w in wishes if (w.get("note") or "").strip()))
-    return {
-        "block": sorted(block), "prefer": sorted(prefer),
-        "lab": int(any(w.get("lab") == "MUST" for w in wishes)),
-        "single_day": single,
-        "buildings": [w["building"] for w in wishes if w.get("building")],
-        "note": "\n".join(notes),
-        "differ": len({json.dumps(w.get("cells", {}), sort_keys=True) for w in wishes}) > 1,
-        "mixed_shape": len(kinds) > 1,
-    }
+def shape_of(row: dict) -> Tuple[str, List[dict], str]:
+    """-> (TWICE | ONCE_LONG | MANUAL, 수업 칸 [{day, start, slots, room}], MANUAL 이유)."""
+    ms = sorted(row["meets"], key=lambda m: (("월화수목금토일").index(m[0]), m[1]))
+    raw = [dict(day=d, start=_hhmm(s), slots=max(1, round((e - s + 15) / 90)), room=r) for d, s, e, r in ms]
+    if not ms:
+        return "MANUAL", raw, "강의시간 없음"
+    if not row["prof_real"]:
+        return "MANUAL", raw, "담당 교수 없음"
+    if "\n" in row["prof_real"] or "," in row["prof_real"]:
+        return "MANUAL", raw, "교수 여러 명"
+    if any(m[0] not in DAYS for m in ms):
+        return "MANUAL", raw, "토·일요일 수업"
+    if any(m[3] is None for m in ms):
+        return "MANUAL", raw, "강의실 없음"
+    if not all(m[2] - m[1] == 75 and _hhmm(m[1]) in STARTS for m in ms):
+        return "MANUAL", raw, "교시 밖 시각"
+    if len(ms) == 2 and ms[0][0] != ms[1][0]:
+        return "TWICE", [dict(day=d, start=_hhmm(s), slots=1, room=r) for d, s, e, r in ms], ""
+    if len(ms) == 2 and ms[0][0] == ms[1][0] and ms[1][1] - ms[0][2] == 15:
+        if ms[0][3] != ms[1][3]:
+            return "MANUAL", raw, "연강 두 칸의 강의실이 다름"
+        if ms[0][1] >= _mins("18:00"):
+            return "MANUAL", raw, "18:00 이후 시작 연강"
+        d, s, _, r = ms[0]
+        return "ONCE_LONG", [dict(day=d, start=_hhmm(s), slots=2, room=r)], ""
+    return "MANUAL", raw, f"주 2칸 모양이 아님 (수업 {len(ms)}번)"
 
 
-def build_plan(sections: List[dict], wishes: List[dict], timetable: dict) -> dict:
-    """분반·희망·초안 → DB에 넣을 계획. 과목 id·분반 번호를 여기서 정한다(과목 코드 순, 원래 분반 번호 순)."""
-    tt = parse(Timetable, timetable)
-    blocks = {a.section_id: a.blocks for a in tt.assignments}
-    wish = {w["section_id"]: w for w in wishes}
+def make_aliases(rows: List[dict], old: Optional[Dict[str, str]] = None) -> Dict[str, str]:
+    """실명 → 가명(교수01…). 이미 있는 대응은 그대로 두고 새 이름만 다음 번호로."""
+    alias = dict(old or {})
+    n = max([int(a[2:]) for a in alias.values() if re.fullmatch(r"교수\d+", a)] or [0])
+    for r in rows:
+        name = r["prof_real"]
+        if name and name not in alias:
+            n += 1
+            alias[name] = f"교수{n:02d}"
+    return alias
 
-    shape = {s["id"]: section_shape(s["weekly_blocks"], blocks.get(s["id"], [])) for s in sections}
-    manual = sorted(s["id"] for s in sections if shape[s["id"]] == "MANUAL")
+
+def cells_of(blocks: List[dict]) -> List[str]:
+    """수업 칸 → 희망 칸 이름 ['월-09:00', ...] (연강은 두 칸)."""
+    out = []
+    for b in blocks:
+        i = STARTS.index(b["start"])
+        out += [f"{b['day']}-{STARTS[j]}" for j in range(i, i + b["slots"])]
+    return out
+
+
+def build_plan(rows: List[dict], alias: Dict[str, str], rooms_info: Dict[str, dict], fixed: List[dict]) -> dict:
+    """엑셀 행 → DB에 넣을 계획. 교수는 가명만 담는다."""
+    sections = []
+    for r in rows:
+        shape, blocks, why = shape_of(r)
+        sections.append(dict(
+            section_id=section_id(r), code=r["code"], name=r["name"], division=r["division"],
+            category_orig=r["category"], category=db_category(r["category"]), department=department_of(r["category"]),
+            professor=alias.get(r["prof_real"]) if r["prof_real"] else None,
+            enrollment=r["enrollment"], year=r["year"], shape=shape, blocks=blocks, manual_reason=why or None,
+        ))
+    ids = Counter(s["section_id"] for s in sections)
+    dup = [k for k, v in ids.items() if v > 1]
+    if dup:
+        raise ValueError(f"서버 분반 id가 겹칩니다: {dup}")
+
     by_course: Dict[str, List[dict]] = defaultdict(list)
     for s in sections:
-        if shape[s["id"]] != "MANUAL":
+        if s["shape"] != "MANUAL":
             by_course[s["code"][:-2]].append(s)
-
-    courses, section_rows = [], []
+    courses = []
     for cid, base in enumerate(sorted(by_course), start=1):
-        secs = sorted(by_course[base], key=lambda s: (s["code"][-2:], s["id"]))
+        secs = sorted(by_course[base], key=lambda s: (s["code"][-2:], s["section_id"]))
         years = Counter(s["year"] for s in secs if s["year"] is not None)
-        cat = secs[0]["category"]
-        courses.append({
-            "course_id": cid, "code": base, "name": secs[0]["name"],
-            "category": db_category(cat), "category_orig": cat, "department": department_of(cat),
-            "target_year": str(years.most_common(1)[0][0]) if years else None,
-            "expected_enrollment": sum(s["enrollment"] or 0 for s in secs) or None,
-            "professor": secs[0]["professor"],
-        })
+        courses.append(dict(course_id=cid, code=base, name=secs[0]["name"], category=secs[0]["category"],
+                            category_orig=secs[0]["category_orig"], department=secs[0]["department"],
+                            target_year=str(years.most_common(1)[0][0]) if years else None,
+                            professor=secs[0]["professor"]))
         for no, s in enumerate(secs, start=1):
-            section_rows.append({
-                "section_id": s["id"], "course_id": cid, "section_no": no,
-                "orig_section_no": s["code"][-2:], "division": s["division"], "code": s["code"],
-                "name": s["name"], "professor": s["professor"], "shape": shape[s["id"]],
-                "enrollment": s["enrollment"], "year": s["year"],
-                "category_orig": s["category"], "category": db_category(s["category"]),
-            })
+            s.update(course_id=cid, section_no=no, orig_section_no=s["code"][-2:])
 
-    responses = []
-    groups: Dict[Tuple[int, str], List[dict]] = defaultdict(list)
-    for r in section_rows:
-        groups[(r["course_id"], r["professor"])].append(r)
-    for (cid, prof), rows in sorted(groups.items()):
-        ws = [wish.get(r["section_id"], {}) for r in rows]
-        m = merge_wishes(ws, [r["shape"] for r in rows])
-        responses.append(dict(m, course_id=cid, professor=prof, n_sections=len(rows),
-                              section_ids=[r["section_id"] for r in rows]))
+    # 강의실: 엑셀에 나온 호수 (MANUAL 분반 포함)
+    used: Dict[str, List[int]] = defaultdict(list)
+    for s in sections:
+        for b in s["blocks"]:
+            if b["room"]:
+                used[b["room"]].append(s["enrollment"] or 0)
+    rooms = []
+    for rid in sorted(used):
+        info = rooms_info.get(rid)
+        cap = info["capacity"] if info and info.get("capacity") else None
+        est = cap is None or bool(info and info.get("estimated"))
+        if cap is None:
+            cap = max(5 * -(-max(used[rid]) // 5), 5)
+        b, no = rid.split(" ", 1)
+        rooms.append(dict(id=rid, building=b, room_no=no, capacity=cap, is_lab=rid in LABS, estimated=est))
 
-    profs = sorted({s["professor"] for s in sections if s["professor"]} |
-                   {r["professor"] for r in responses})
-    return {"courses": courses, "sections": section_rows, "responses": responses,
-            "manual": manual, "professors": profs}
+    # 희망 (가상): 실제 칸 = PREFER
+    wishes = []
+    for s in sections:
+        if s["shape"] == "MANUAL":
+            continue
+        wishes.append(dict(section_id=s["section_id"], course_id=s["course_id"], section_no=s["section_no"],
+                           professor=s["professor"], prefer=cells_of(s["blocks"]),
+                           lab="MUST" if any(b["room"] in LABS for b in s["blocks"]) else "NONE",
+                           single_day="MUST" if s["shape"] == "ONCE_LONG" else "NONE"))
+    bld = defaultdict(Counter)
+    for s in sections:
+        if s["shape"] != "MANUAL" and s["professor"]:
+            for b in s["blocks"]:
+                bld[s["professor"]][b["room"].split(" ")[0]] += 1
+    building_pref = {p: sorted(c.items(), key=lambda kv: (-kv[1], kv[0]))[0][0] for p, c in bld.items()}
+
+    chapel = []
+    for f in fixed:
+        if f.get("kind") == "채플" and f.get("scope") == "AI대학":
+            for y in f.get("years") or []:
+                chapel.append(dict(year=str(y), day=f["day"], start=f["start"], end=f["end"]))
+
+    profs = sorted({s["professor"] for s in sections if s["professor"]})
+    return dict(sections=sections, courses=courses, rooms=rooms, wishes=wishes, building_pref=building_pref,
+                chapel=chapel, professors=profs)
 
 
-def building_ranks(responses: List[dict]) -> Dict[str, List[str]]:
-    """교수별 건물 선호 순위. 그 교수의 희망에서 많이 고른 건물이 1순위."""
-    count: Dict[str, Counter] = defaultdict(Counter)
-    for r in responses:
-        for b in r["buildings"]:
-            count[r["professor"]][b] += 1
-    return {p: [b for b, _ in sorted(c.items(), key=lambda kv: (-kv[1], kv[0]))] for p, c in count.items()}
+# ---------- DB 쓰기 ----------
+
+def _haeyoon():
+    for p in (REPO_ROOT / "db", REPO_ROOT / "solver"):
+        if str(p) not in sys.path:
+            sys.path.insert(0, str(p))
+    import db as hdb             # noqa: E402 - 하윤 파일 (고치지 않음)
+    import seed_time_slot        # noqa: E402
+    return hdb, seed_time_slot
 
 
-def section_map(plan: dict, rooms: List[dict], db: str, term_id: int, round_id: int,
-                room_ids: Dict[str, int]) -> dict:
-    """서버 분반 id ↔ (course_id, 새 분반 번호). MANUAL은 "MANUAL"."""
-    m = {r["section_id"]: {k: r[k] for k in ("course_id", "section_no", "orig_section_no", "division",
-                                             "category_orig", "category")}
-         for r in plan["sections"]}
-    for sid in plan["manual"]:
-        m[sid] = "MANUAL"
+def create_db(con, plan: dict, year: int = 2026, semester: str = "2", deadline: str = "2026-12-31") -> dict:
+    """스키마·칸·학기·차수 1·교수·조교·강의실·과목·분반·희망·희망 건물·채플. -> ids"""
+    _, sts = _haeyoon()
+    con.executescript((REPO_ROOT / "db" / "schema.sql").read_text(encoding="utf-8"))
+    con.execute("PRAGMA foreign_keys = ON")
+    grid = sts.seed(con)
+    q = con.execute
+    dept = {n: q("INSERT INTO department(name, college) VALUES (?,?)", (n, COLLEGE)).lastrowid
+            for n in sorted(set(DEPARTMENTS.values()) | {c["department"] for c in plan["courses"]})}
+    term = q("INSERT INTO term(year, semester, grid_id) VALUES (?,?,?)", (year, semester, grid)).lastrowid
+    rnd = q("INSERT INTO round(term_id, round_no, deadline_at) VALUES (?,1,?)", (term, deadline)).lastrowid
+    user = {p: q("INSERT INTO user(role, name, password_hash) VALUES ('PROF', ?, 'x')", (p,)).lastrowid
+            for p in plan["professors"]}
+    ta = q("INSERT INTO user(role, name, password_hash) VALUES ('TA', ?, 'x')", (TA_NAME,)).lastrowid
+    bld, room_ids = {}, {}
+    for r in plan["rooms"]:
+        if r["building"] not in bld:
+            bld[r["building"]] = q("INSERT INTO building(name) VALUES (?)", (r["building"],)).lastrowid
+        room_ids[r["id"]] = q("INSERT INTO room(building_id, room_no, capacity, is_lab) VALUES (?,?,?,?)",
+                              (bld[r["building"]], r["room_no"], r["capacity"], int(r["is_lab"]))).lastrowid
+    for c in plan["courses"]:
+        q("""INSERT INTO course(id, term_id, department_id, code, name, professor_id, category, target_year,
+                                session_count, slots_per_session) VALUES (?,?,?,?,?,?,?,?,2,1)""",
+          (c["course_id"], term, dept[c["department"]], c["code"], c["name"], user[c["professor"]],
+           c["category"], c["target_year"]))
+    for s in plan["sections"]:
+        if s["shape"] != "MANUAL":
+            q("INSERT INTO course_section(course_id, section_no, professor_id, enrollment) VALUES (?,?,?,?)",
+              (s["course_id"], s["section_no"], user[s["professor"]], s["enrollment"] or None))
+    slot = {(d, st): sid for sid, d, st in q("SELECT id, day, start_time FROM time_slot WHERE grid_id=?", (grid,))}
+    for w in plan["wishes"]:
+        rid = q("""INSERT INTO course_response(round_id, course_id, section_no, professor_id, lab_requirement,
+                                               single_day_pref, submitted_at) VALUES (?,?,?,?,?,?,datetime('now'))""",
+                (rnd, w["course_id"], w["section_no"], user[w["professor"]], w["lab"], w["single_day"])).lastrowid
+        for cell in w["prefer"]:
+            d, _, st = cell.partition("-")
+            q("INSERT OR IGNORE INTO response_slot(response_id, slot_id, kind) VALUES (?,?, 'PREFER')", (rid, slot[(d, st)]))
+    for p in sorted({w["professor"] for w in plan["wishes"]}):
+        q("INSERT INTO round_invite(round_id, professor_id, status) VALUES (?,?, 'RESPONDED')", (rnd, user[p]))
+    for p, b in plan["building_pref"].items():
+        q("INSERT INTO professor_building_pref(professor_id, building_id) VALUES (?,?)", (user[p], bld[b]))
+    for ch in plan["chapel"]:
+        for (d, st), sid in slot.items():
+            s0 = _mins(st)
+            if d == ch["day"] and s0 < _mins(ch["end"]) and _mins(ch["start"]) < s0 + 75:
+                q("INSERT OR IGNORE INTO chapel_slot(term_id, target_year, slot_id) VALUES (?,?,?)", (term, ch["year"], sid))
+    con.commit()
+    return dict(term_id=term, round_id=rnd, ta_id=ta, users=user, rooms=room_ids, slots=slot)
+
+
+def section_map(plan: dict, ids: dict, db_path: str) -> dict:
+    """서버 분반 id → 분반 정보. DB에 넣은 분반은 course_id·section_no, MANUAL은 "manual": true 와 칸."""
+    secs = {}
+    for s in plan["sections"]:
+        e = {k: s[k] for k in ("code", "name", "division", "category_orig", "category", "professor", "enrollment",
+                               "year", "shape")}
+        if s["shape"] == "MANUAL":
+            e.update(manual=True, manual_reason=s["manual_reason"], blocks=s["blocks"])
+        else:
+            e.update(manual=False, course_id=s["course_id"], section_no=s["section_no"],
+                     orig_section_no=s["orig_section_no"])
+        secs[s["section_id"]] = e
     return {
-        "db": db, "term_id": term_id, "round_id": round_id,
-        "sections": m,
-        "rooms": {r["id"]: {"room_id": room_ids[r["id"]], "estimated": bool(r.get("estimated"))} for r in rooms},
-        "note": "가명 데이터. 채플·교양필수 고정 시간은 DB에 표가 없어 넣지 않음(fixed_blocks.json).",
+        "db": db_path, "term_id": ids["term_id"], "round_id": ids["round_id"], "ta_id": ids["ta_id"],
+        "professors": {p: uid for p, uid in ids["users"].items()},
+        "sections": secs,
+        "rooms": {r["id"]: dict(room_id=ids["rooms"][r["id"]], capacity=r["capacity"], is_lab=r["is_lab"],
+                                estimated=r["estimated"]) for r in plan["rooms"]},
+        "note": "가명 데이터. 희망은 실제 강의 칸으로 만든 가상 값. 교양필수 고정 시간은 넣지 않음.",
     }
 
 
 def section_pairs(mapping: dict) -> Dict[Tuple[int, int], str]:
     """대응표 → 어댑터 SectionMap 입력 {(과목 id, 분반 번호): 서버 분반 id}. MANUAL은 뺀다."""
-    return {(v["course_id"], v["section_no"]): sid for sid, v in mapping["sections"].items() if v != "MANUAL"}
+    return {(v["course_id"], v["section_no"]): sid for sid, v in mapping["sections"].items() if not v.get("manual")}
 
 
-# ---------- DB 쓰기 ----------
-
-def load_haeyoon_db():
-    sys.path.insert(0, str(REPO_ROOT / "db"))
-    import seed_time_slot  # noqa: E402 - 하윤 파일 (고치지 않음)
-    return seed_time_slot
-
-
-def create_db(con, plan: dict, rooms: List[dict], year: int = 2026, semester: str = "2",
-              deadline: str = "2026-12-31") -> Tuple[int, int, Dict[str, int]]:
-    """스키마·칸부터 응답까지 넣는다. -> (term_id, round_id, 서버 강의실 id → room.id)"""
-    con.executescript((REPO_ROOT / "db" / "schema.sql").read_text(encoding="utf-8"))
-    con.execute("PRAGMA foreign_keys = ON")
-    grid = load_haeyoon_db().seed(con)
-    q = con.execute
-
-    dept = {}
-    for name in sorted({c["department"] for c in plan["courses"]} | set(DEPARTMENTS.values())):
-        dept[name] = q("INSERT INTO department(name, college) VALUES (?,?)", (name, COLLEGE)).lastrowid
-    term = q("INSERT INTO term(year, semester, grid_id) VALUES (?,?,?)", (year, semester, grid)).lastrowid
-    rnd = q("INSERT INTO round(term_id, round_no, deadline_at) VALUES (?,?,?)", (term, 1, deadline)).lastrowid
-
-    user = {p: q("INSERT INTO user(role, name, password_hash) VALUES ('PROF', ?, 'x')", (p,)).lastrowid
-            for p in plan["professors"]}
-
-    bld = {}
-    room_ids = {}
-    for r in rooms:
-        if r["building"] not in bld:
-            bld[r["building"]] = q("INSERT INTO building(name) VALUES (?)", (r["building"],)).lastrowid
-        room_ids[r["id"]] = q("INSERT INTO room(building_id, room_no, capacity, is_lab) VALUES (?,?,?,?)",
-                              (bld[r["building"]], r["room_no"], r.get("capacity"), int(bool(r.get("is_lab"))))).lastrowid
-
-    for c in plan["courses"]:
-        q("""INSERT INTO course(id, term_id, department_id, code, name, professor_id, category, target_year,
-                                expected_enrollment, session_count, slots_per_session)
-             VALUES (?,?,?,?,?,?,?,?,?,2,1)""",
-          (c["course_id"], term, dept[c["department"]], c["code"], c["name"], user[c["professor"]],
-           c["category"], c["target_year"], c["expected_enrollment"]))
-    for s in plan["sections"]:
-        q("INSERT INTO course_section(course_id, section_no, professor_id) VALUES (?,?,?)",
-          (s["course_id"], s["section_no"], user[s["professor"]]))
-
-    slot = {(d, st): sid for sid, d, st in q("SELECT id, day, start_time FROM time_slot WHERE grid_id=?", (grid,))}
-    invited = set()
-    for r in plan["responses"]:
-        pid = user[r["professor"]]
-        rid = q("""INSERT INTO course_response(round_id, course_id, professor_id, lab_requirement, single_day_pref,
-                                               prefer_only, submitted_at) VALUES (?,?,?,?,?,0,datetime('now'))""",
-                (rnd, r["course_id"], pid, r["lab"], r["single_day"])).lastrowid
-        for kind in ("BLOCK", "PREFER"):
-            for cell in r[kind.lower()]:
-                d, _, st = cell.partition("-")
-                q("INSERT INTO response_slot(response_id, slot_id, kind) VALUES (?,?,?)", (rid, slot[(d, st)], kind))
-        q("""INSERT INTO request_item(response_id, type, value_int, source) VALUES (?, 'SECTION_COUNT', ?, 'FORM')""",
-          (rid, r["n_sections"]))
-        if r["note"]:
-            q("INSERT INTO other_request(response_id, body) VALUES (?,?)", (rid, r["note"]))
-        if pid not in invited:
-            q("INSERT INTO round_invite(round_id, professor_id, status) VALUES (?,?, 'RESPONDED')", (rnd, pid))
-            invited.add(pid)
-    for p, blds in building_ranks(plan["responses"]).items():
-        for rank, b in enumerate(blds, start=1):
-            if b in bld:
-                q("INSERT INTO professor_building_pref(professor_id, building_id, rank) VALUES (?,?,?)",
-                  (user[p], bld[b], rank))
-    con.commit()
-    return term, rnd, room_ids
-
-
-def real_name_hits(con) -> List[str]:
-    """교수 이름이 가명(교수NN)이 아닌 것, 기타 요청에 'OOO 교수' 꼴 이름이 있는 것."""
-    bad = [n for (n,) in con.execute("SELECT name FROM user") if not ALIAS.match(n)]
-    for (body,) in con.execute("SELECT body FROM other_request"):
-        bad += [m for m in re.findall(r"[가-힣]{2,4}\s*교수", body) if not ALIAS.match(m.replace(" ", ""))]
-    return bad
+def real_name_hits(names: List[str], con=None, texts: List[str] = ()) -> int:
+    """실명이 DB(모든 글 칸)나 글 목록에 몇 번 나오는지. 이름 자체는 돌려주지 않는다."""
+    names = [n for n in names if n]
+    blobs = list(texts)
+    if con is not None:
+        for (t,) in con.execute("SELECT name FROM sqlite_master WHERE type='table'"):
+            cols = [c[1] for c in con.execute(f"PRAGMA table_info({t})")]
+            for row in con.execute(f"SELECT {','.join(cols)} FROM {t}"):
+                blobs += [str(v) for v in row if isinstance(v, str)]
+    return sum(1 for b in blobs for n in names if n in b)
 
 
 def counts(con, plan: dict) -> List[Tuple[str, int]]:
     one = lambda sql: con.execute(sql).fetchone()[0]   # noqa: E731
+    shapes = Counter(s["shape"] for s in plan["sections"])
     return [
+        ("엑셀 행(분반)", len(plan["sections"])),
         ("과목", one("SELECT COUNT(*) FROM course")),
-        ("분반", one("SELECT COUNT(*) FROM course_section")),
-        ("교수", one("SELECT COUNT(*) FROM user WHERE role='PROF'")),
+        ("분반(DB)", one("SELECT COUNT(*) FROM course_section")),
+        ("  주 2회", shapes["TWICE"]),
+        ("  주 1회 연강", shapes["ONCE_LONG"]),
+        ("MANUAL (DB에 안 넣음)", shapes["MANUAL"]),
+        ("교수(가명)", one("SELECT COUNT(*) FROM user WHERE role='PROF'")),
         ("강의실", one("SELECT COUNT(*) FROM room")),
-        ("응답", one("SELECT COUNT(*) FROM course_response")),
-        ("합친 쌍(분반 2개 이상)", sum(1 for r in plan["responses"] if r["n_sections"] > 1)),
-        ("  그중 희망이 달랐던 쌍", sum(1 for r in plan["responses"] if r["differ"])),
-        ("  그중 연강·주 2회가 섞여 PREFER", sum(1 for r in plan["responses"] if r["mixed_shape"])),
-        ("기타 요청", one("SELECT COUNT(*) FROM other_request")),
-        ("MANUAL (DB에 안 넣음)", len(plan["manual"])),
+        ("  실습실", one("SELECT COUNT(*) FROM room WHERE is_lab=1")),
+        ("  정원 추정", sum(1 for r in plan["rooms"] if r["estimated"])),
+        ("희망 응답(분반마다)", one("SELECT COUNT(*) FROM course_response")),
+        ("희망 건물", one("SELECT COUNT(*) FROM professor_building_pref")),
+        ("채플 칸", one("SELECT COUNT(*) FROM chapel_slot")),
     ]
 
 
-def seed(data_dir: Path, db_path: Path, map_path: Path, year: int = 2026, semester: str = "2") -> dict:
-    load = lambda n: json.loads((data_dir / n).read_text(encoding="utf-8"))   # noqa: E731
-    sections, rooms = load("sections.json"), load("rooms.json")
-    plan = build_plan(sections, load("wishes.json")["wishes"], load("timetable.json"))
+def seed(xlsx: Path, db_path: Path, map_path: Path, alias_path: Path, rooms_json: Path, fixed_json: Path,
+         year: int = 2026, semester: str = "2") -> dict:
+    rows = read_excel(xlsx)
+    old = json.loads(alias_path.read_text(encoding="utf-8")) if alias_path.exists() else {}
+    alias = make_aliases(rows, old)
+    rooms_info = {r["id"]: r for r in json.loads(rooms_json.read_text(encoding="utf-8"))} if rooms_json.exists() else {}
+    fixed = json.loads(fixed_json.read_text(encoding="utf-8")) if fixed_json.exists() else []
+    plan = build_plan(rows, alias, rooms_info, fixed)
     if db_path.exists():
         db_path.unlink()
     con = sqlite3.connect(db_path)
-    term, rnd, room_ids = create_db(con, plan, rooms, year, semester)
-    mapping = section_map(plan, rooms, str(db_path), term, rnd, room_ids)
-    map_path.write_text(json.dumps(mapping, ensure_ascii=False, indent=2), encoding="utf-8")
-    out = {"counts": counts(con, plan), "real_names": real_name_hits(con), "term_id": term, "round_id": rnd,
-           "estimated_rooms": sum(1 for r in rooms if r.get("estimated"))}
+    ids = create_db(con, plan, year, semester)
+    mapping = section_map(plan, ids, str(db_path))
+    alias_path.parent.mkdir(parents=True, exist_ok=True)
+    alias_path.write_text(json.dumps(alias, ensure_ascii=False, indent=2), encoding="utf-8")
+    text = json.dumps(mapping, ensure_ascii=False, indent=2)
+    map_path.write_text(text, encoding="utf-8")
+    table = counts(con, plan)
+    out_text = "\n".join(f"{k} {v}" for k, v in table)
+    names = {part.strip() for n in alias for part in re.split(r"[\n,]", n) if part.strip()}
+    hits = real_name_hits(sorted(names), con, [text, out_text])
     con.close()
-    return out
+    manual = Counter(s["manual_reason"] for s in plan["sections"] if s["shape"] == "MANUAL")
+    return dict(counts=table, real_name_hits=hits, manual_reasons=manual, term_id=ids["term_id"],
+                round_id=ids["round_id"])
 
 
 def main() -> None:
-    import os
-    ap = argparse.ArgumentParser(description="가명 데이터를 하윤 DB에 넣고 분반 대응표를 만든다")
-    data = REPO_ROOT / "data" / "private" / os.environ.get("DATA_SET", "real")
-    ap.add_argument("--data", type=Path, default=data)
+    ap = argparse.ArgumentParser(description="강의정보 엑셀을 하윤 DB에 넣고 분반 대응표를 만든다 (가명)")
+    ap.add_argument("--xlsx", type=Path, default=DEFAULT_XLSX)
     ap.add_argument("--db", type=Path, default=REPO_ROOT / "ssuroom.db")
-    ap.add_argument("--map", type=Path, default=None, help="기본: <data>/section_map.json")
+    ap.add_argument("--map", type=Path, default=PRIVATE / "real" / "section_map.json")
+    ap.add_argument("--alias", type=Path, default=PRIVATE / "alias_map.json")
+    ap.add_argument("--rooms", type=Path, default=PRIVATE / "real" / "rooms.json")
+    ap.add_argument("--fixed", type=Path, default=PRIVATE / "real" / "fixed_blocks.json")
     ap.add_argument("--year", type=int, default=2026)
     ap.add_argument("--semester", default="2")
     a = ap.parse_args()
-    out = seed(a.data, a.db, a.map or a.data / "section_map.json", a.year, a.semester)
+    out = seed(a.xlsx, a.db, a.map, a.alias, a.rooms, a.fixed, a.year, a.semester)
     print(f"DB: {a.db}  (term {out['term_id']}, round {out['round_id']})")
-    print(f"{'항목':<28}개수")
     for k, v in out["counts"]:
-        print(f"{k:<28}{v}")
-    print(f"강의실 중 정원·실습실이 추정치: {out['estimated_rooms']}")
-    print(f"실명 의심: {len(out['real_names'])}건 {out['real_names'] or ''}")
-    print("채플·교양필수 고정 시간: 하윤 DB에 표가 없어 넣지 않음 (fixed_blocks.json 그대로)")
+        print(f"{k:<24}{v}")
+    print("MANUAL 이유:", dict(out["manual_reasons"]))
+    print(f"실명 검색(DB·대응표·출력): {out['real_name_hits']}건")
+    print("교양필수 고정 시간은 넣지 않음. 전 학기(2026-1)는 엔진이 읽지 않아(전년도 같은 학기만) 넣지 않음.")
 
 
 if __name__ == "__main__":

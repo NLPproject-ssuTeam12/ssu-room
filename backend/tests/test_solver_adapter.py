@@ -37,23 +37,25 @@ def build_db():
     for rid, b, no, cap, lab in [(1, 1, "21303", 60, 0), (2, 1, "21304", 60, 0), (3, 1, "21501", 40, 1),
                                  (4, 2, "03407", 60, 0)]:
         ins("INSERT INTO room(id, building_id, room_no, capacity, is_lab) VALUES (?,?,?,?,?)", (rid, b, no, cap, lab))
-    # (id, 이름, 교수, 학년, 인원, 주당 횟수, 1회 칸 수)
-    for cid, name, prof, yr, enr, n, k in [(1, "자료구조", 1, "2", 40, 2, 1), (2, "알고리즘", 2, "3", 70, 2, 1),
-                                          (3, "운영체제", 4, "3", 40, 2, 1), (4, "AI보안", 1, "4", 35, 1, 2)]:
+    # (id, 이름, 교수, 학년, 주당 횟수, 1회 칸 수)
+    for cid, name, prof, yr, n, k in [(1, "자료구조", 1, "2", 2, 1), (2, "알고리즘", 2, "3", 2, 1),
+                                     (3, "운영체제", 4, "3", 2, 1), (4, "AI보안", 1, "4", 1, 2)]:
         ins("""INSERT INTO course(id, term_id, department_id, name, professor_id, category, target_year,
-               expected_enrollment, session_count, slots_per_session) VALUES (?,?,?,?,?,?,?,?,?,?)""",
-            (cid, 1, 1, name, prof, "전공선택", yr, enr, n, k))
-    ins("INSERT INTO course_section(course_id, section_no, professor_id) VALUES (2, 1, 2), (2, 2, 3)")
+               session_count, slots_per_session) VALUES (?,?,?,?,?,?,?,?,?)""",
+            (cid, 1, 1, name, prof, "전공선택", yr, n, k))
+    # 분반 = course_section 한 행 (분반마다 인원, 11/24·006)
+    ins("""INSERT INTO course_section(course_id, section_no, professor_id, enrollment)
+           VALUES (1, 1, 1, 40), (2, 1, 2, 35), (2, 2, 3, 35), (3, 1, 4, 40), (4, 1, 1, 35)""")
     slot = {(d, s): i for i, d, s in c.execute("SELECT id, day, start_time FROM time_slot")}
-    # (응답 id, 과목, 교수, 실습실, 주 1회 연강, 불가 칸, 희망 칸)
-    for rid, cid, prof, lab, single, block, prefer in [
-        (1, 1, 1, 0, "NONE", [("월", "09:00"), ("수", "09:00")], [("화", "13:30"), ("목", "13:30")]),
-        (2, 2, 2, 0, "NONE", [], [("월", "10:30"), ("수", "10:30")]),
-        (3, 2, 3, 1, "NONE", [("금", "09:00")], []),
-        (4, 4, 1, 0, "MUST", [], [("수", "13:30"), ("수", "15:00")]),
+    # (응답 id, 과목, 분반, 교수, 실습실, 주 1회 연강, 불가 칸, 희망 칸) — 희망은 분반마다 (009)
+    for rid, cid, sec, prof, lab, single, block, prefer in [
+        (1, 1, 1, 1, "NONE", "NONE", [("월", "09:00"), ("수", "09:00")], [("화", "13:30"), ("목", "13:30")]),
+        (2, 2, 1, 2, "NONE", "NONE", [], [("월", "10:30"), ("수", "10:30")]),
+        (3, 2, 2, 3, "MUST", "NONE", [("금", "09:00")], []),
+        (4, 4, 1, 1, "NONE", "MUST", [], [("수", "13:30"), ("수", "15:00")]),
     ]:
-        ins("""INSERT INTO course_response(id, round_id, course_id, professor_id, lab_requirement, single_day_pref)
-               VALUES (?,?,?,?,?,?)""", (rid, 1, cid, prof, lab, single))
+        ins("""INSERT INTO course_response(id, round_id, course_id, section_no, professor_id, lab_requirement,
+               single_day_pref) VALUES (?,?,?,?,?,?,?)""", (rid, 1, cid, sec, prof, lab, single))
         for x in block:
             ins("INSERT INTO response_slot VALUES (?,?, 'BLOCK')", (rid, slot[x]))
         for x in prefer:
@@ -181,7 +183,12 @@ def test_reassign_uses_alternative(adapter):
     m = alt.meetings[0]
     assert [(b.day, b.start, b.slots) for b in a.blocks] == [(DAYN[m.day], m.start, 2)] and a.room == m.room
     after_orig = [b.model_dump() for b in next(x for x in tt.assignments if x.section_id == "S4-01").blocks]
-    assert after_orig == before                                   # 원본 시간표는 그대로 (DB에도 안 씀)
+    assert after_orig == before                                   # 넘긴 시간표 객체는 그대로
+    # DB에는 새 시간표 버전(TA_EDIT, parent = 초안)으로 저장된다 (하윤 apply_option, 11/25)
+    old_id = adapter.last_saved["timetable_id"]
+    kind, parent = adapter.con.execute("SELECT kind, parent_id FROM timetable WHERE id=?", (old_id,)).fetchone()
+    assert kind == "TA_EDIT" and parent is not None and adapter.timetable_id == old_id
+    assert adapter.last_saved["proposal_id"] is None                # 안건 없이 = 도우미 [적용]
 
 
 def test_call_passes_only_known_kwargs():

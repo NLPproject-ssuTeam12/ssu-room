@@ -15,7 +15,7 @@ from typing import Dict, List, Optional
 
 from .contracts import (
     DAYS, STARTS, Alternative, Assignment, Block, Message, MessageInput, Proposal, ReplyParse, Room,
-    Section, Timetable, Wish, block_minutes, block_room, dump, parse, section_shape,
+    Section, Timetable, Wish, block_minutes, block_room, blocks_to_meetings, dump, parse, section_shape,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -175,7 +175,7 @@ class Store:
             "section_id": sid,
             "reason": reason,
             "round_no": self.round_no or None,
-            "state": "OPEN",             # OPEN → SENT → PROPOSED → RESOLVED | KEPT | NEXT
+            "state": "OPEN",             # OPEN → SENT → PROPOSED → RESOLVED | KEPT | NEXT | OFFLINE(→ 수동 배치)
             "alternatives": alternatives,
             "message": None,
             "proposal": None,
@@ -236,6 +236,37 @@ class Store:
                     return hit.section_id
         return None
 
+    def current_label(self, sid: str) -> Optional[str]:
+        """지금 배정된 자리를 대안 줄 모양으로 ("화·목 10:30~11:45 · 정보과학관 21304"). 못 놓인 분반은 None.
+        있으면 조율 메시지에 '지금 자리 그대로' 줄이 붙고 교수 화면에 KEEP 버튼이 보인다."""
+        if self.timetable is None:
+            return None
+        a = next((x for x in self.timetable.assignments if x.section_id == sid), None)
+        if a is None or not a.blocks or any(b.day not in DAYS for b in a.blocks):
+            return None
+        alt = Alternative(key="A", meetings=blocks_to_meetings(a.blocks))
+        try:
+            from .nlp.coord import alt_label
+        except Exception:   # 조율 모듈이 없을 때(가짜 함수만)
+            return " / ".join(f"{DAYS[m.day]} {m.start}~{m.end} · {m.room}" for m in alt.meetings)
+        return alt_label(alt)
+
+    def off_of(self, sid: str):
+        """희망에서 어긋난 것 → (off, 희망 건물). 시간: 수업 칸이 희망 칸 밖, 건물: 강의실이 희망 건물 밖.
+        못 놓인 분반·희망 칸이 없는 분반은 'time'(기본)."""
+        wish = self.wishes.get(sid)
+        a = next((x for x in self.timetable.assignments if x.section_id == sid), None) if self.timetable else None
+        building = (wish.building or None) if wish else None
+        if a is None or not a.blocks or wish is None:
+            return "time", building
+        prefer = {k for k, v in wish.cells.items() if v == "PREFER"}
+        cells = [f"{b.day}-{STARTS[j]}" for b in a.blocks if b.start in STARTS
+                 for j in range(STARTS.index(b.start), min(STARTS.index(b.start) + b.slots, len(STARTS)))]
+        time_off = bool(prefer) and any(c not in prefer for c in cells)
+        bld_off = bool(building) and any((block_room(a, b) or "").split(" ")[0] != building for b in a.blocks)
+        off = "both" if time_off and bld_off else "building" if bld_off else "time"
+        return off, building
+
     def message_input(self, sid: str) -> MessageInput:
         """write_message·check_message에 넣을 값. 분반·희망·대안·차수·겹친 상대로 채운다.
         - 상대 교수 이름은 학과 설정 reveal_opponent(기본 켬)를 따른다. 끄면 메시지에 쓰지 않는다.
@@ -259,7 +290,11 @@ class Store:
             reveal=bool(self.settings["reveal_opponent"]),
             prev_conditions=prev if prev is not None and not prev.is_empty() else None,
             hidden=[other_wish.note.strip()] if other_wish and other_wish.note.strip() else [],
+            current=self.current_label(sid),
         )
+        off, building = self.off_of(sid)
+        if off != "time" and building:
+            fields.update(off=off, wish_building=building)
         if os.environ.get("COORD_TERM"):
             fields["term"] = os.environ["COORD_TERM"]
         return MessageInput(**fields)
@@ -274,7 +309,7 @@ class Store:
         self.messages.append(rec)
         return rec
 
-    def add_reply(self, sid: str, text: str, choice: Optional[str], method: str, parsed: ReplyParse,
+    def add_reply(self, sid: str, text: str, choice, method: str, parsed: ReplyParse,
                   proposal: Proposal, unavailable: List[str]) -> dict:
         rec = {"section_id": sid, "round_no": self.round_no, "text": text, "choice": choice, "method": method,
                "parse": dump(parsed), "proposal": dump(proposal),
