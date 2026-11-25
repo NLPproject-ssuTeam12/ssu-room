@@ -29,6 +29,13 @@ DB(schema.sql)에서 입력을 읽어 초안 시간표를 만들고 같은 DB에
         같은 과목의 분반끼리는 겹쳐도 된다(교수가 같으면 교수 겹침 규칙이 막는다).
   채플: 학년별 채플 칸(chapel_slot)에는 그 학년 전공필수를 놓지 않는다(하드).
   시간: 19:30 교시는 큰 감점(late), 18:00 이후 시작하는 연속 2칸 이상 수업은 놓지 않는다(하드).
+  동선(11/25): 같은 학과·같은 학년의 전공 과목(이수구분이 '전공'으로 시작) 둘이 같은 요일 바로 이어진 교시에
+        같은 건물이면 좋은 배치(flow). 강의실은 달라도 된다. 학년이 다르면 같이 듣지 않으므로 세지 않는다.
+        두 단계 풀이: 1단계에서 동선 없이 풀고, 2단계에서 1단계 점수(희망·건물·못 놓음 …)를 나빠지지 않게 묶은 채
+        동선만 늘린다. 그래서 동선은 다른 점수가 모두 같을 때만 따진다(교수 희망이 항상 먼저).
+  동점 처리(11/25): 같은 희망 칸을 두고 점수가 같으면 ① 가능한 시간(불가가 아닌 칸)이 적은 분반 ② 먼저 임용된 교수
+        (user.hire_year, 비면 건너뜀) ③ 과목·분반 번호 순서로 그 칸을 준다. 모든 점수를 TIE_SCALE 배 하고
+        이 순위를 그보다 작은 보너스로 더해, 점수가 같을 때만 순서를 정한다(같은 입력이면 같은 결과).
   실습실: MUST(필요 → 실습실만 배정) / NONE(필요 없음 → 실습실 쓰면 약한 벌점). 희망 칸: PREFER(희망)/BLOCK(불가), 칠하지 않으면 상관없음
 
   고정: 이전 시간표에서 고정(timetable_section.locked=1)된 분반은 모든 풀이(부분 재풀이·대안·전체 재풀이)에서 움직이지 않는다.
@@ -57,6 +64,9 @@ GENERAL_REQUIRED = "교양필수"  # 같은 학년 전공필수와 겹치면 안
 LATE_START = "19:30"          # 이 시각에 시작하는 칸은 큰 감점
 LONG_LAST_START = "16:30"     # 연속 2칸 이상 수업은 이 시각까지만 시작 (18:00 시작 연강 금지)
 GROUP_ROOMS = True   # False면 강의실마다 따로 변수를 만든다(비교 실험용)
+MAJOR_PREFIX = "전공"         # 동선 보너스를 줄 이수구분 (전공필수·전공선택·전공기초 …)
+FLOW_TIME_LIMIT = 20          # 2단계(동선) 기본 제한 시간(초). 실제 82분반: 20초면 동선 103, 60초면 107
+TIE_SCALE = 100000            # 점수 단위. 동점 순위 보너스(희망 칸마다 경쟁 분반 수 이하)를 이 단위보다 작게 둔다
 DAYS = ["월", "화", "수", "목", "금", "토", "일"]   # 조율 쪽 days 번호: 0=월 … 4=금
 
 DEFAULT_WEIGHTS = {
@@ -67,6 +77,7 @@ DEFAULT_WEIGHTS = {
     "keep": 30,           # 이전 배정을 그대로 두면 보너스 (최소 변경)
     "late": 60,           # 19:30 교시를 쓰면 큰 감점 (11/21·11/24: 다른 방법이 없을 때만)
     "history_room": 8,    # 회신 안 한 교수: 전년에 같은 과목을 한 강의실이면 보너스
+    "flow": 4,            # 0이 아니면 2단계에서 동선(같은 학년 전공 연강 같은 건물)을 늘린다. 0이면 2단계를 하지 않음
 }
 
 
@@ -155,6 +166,7 @@ def load_input(con, term_id, round_id):
             else:
                 mine = sorted(sec for sec, p in c["section_prof"].items() if p == prof)
             c["pairs"].append((mine, mode))
+    hire = {u: y for u, y in q("SELECT id, hire_year FROM user WHERE hire_year IS NOT NULL")}      # 교수 -> 임용 연도
     secs = {}
     for c in courses.values():
         for sec in range(1, c["sections"] + 1):
@@ -165,6 +177,7 @@ def load_input(con, term_id, round_id):
                 paired=any(sec in mine[:2] for mine, _ in c["pairs"] if len(mine) >= 2),
                 lab=r["lab"] if r else None, single_day=r["single_day"] if r else None,
                 block=r["block"] if r else set(), prefer=r["prefer"] if r else set(),
+                hire_year=hire.get(prof),
                 )
     rooms = {rid: dict(id=rid, bld=b, cap=cap, lab=lab or 0, dept=rd)
              for rid, b, cap, lab, rd in q(
@@ -176,6 +189,32 @@ def load_input(con, term_id, round_id):
     for c in courses.values():
         c["chapel"] = chapel.get(str(c["year"]), set()) if c["cat"] == MAJOR_REQUIRED and c["year"] else set()
     return by_day, courses, secs, rooms, pref, slot_info
+
+
+def _tie_ranks(secs, slot_info):
+    """동점 순위 (11/25). 희망 칸마다 그 칸을 희망한 분반들을 줄 세워, 앞 순서일수록 큰 보너스(경쟁 분반 수 - 순위).
+    순서: ① 가능한 칸(불가가 아닌 칸)이 적은 분반 ② 먼저 임용된 교수(hire_year 작은 쪽, 없으면 뒤) ③ 과목·분반 번호.
+    -> {(과목, 분반, 칸): 보너스}. 보너스 합은 TIE_SCALE 보다 훨씬 작아 원래 점수가 같을 때만 순서를 정한다."""
+    total = len(slot_info)
+    by_cell = defaultdict(list)
+    for (cid, sec), sd in secs.items():
+        for sid in sd["prefer"]:
+            by_cell[sid].append((total - len(sd["block"]),
+                                 sd.get("hire_year") if sd.get("hire_year") is not None else 9999, cid, sec))
+    out = {}
+    for sid, rows in by_cell.items():
+        rows.sort()
+        n = len(rows)
+        for r, (_, _, cid, sec) in enumerate(rows):
+            out[(cid, sec, sid)] = n - r
+    return out
+
+
+def _any_pos(m, vs, name):
+    """vs 중 하나라도 1일 때만 1이 될 수 있는 변수 (보너스용: 위로만 막는다)"""
+    b = m.NewBoolVar(name)
+    m.Add(b <= sum(vs))
+    return b
 
 
 def make_classes(rooms):
@@ -267,14 +306,16 @@ def _structures(c, sd):
 
 # ---------------------------------------------------------------- 모델
 def _solve_model(con, term_id, round_id, W, time_limit, workers, prev, prevk, free,
-                 seed, forbid=None, must_sections=None, cond=None, cond_sections=None, locked=None):
+                 seed, forbid=None, must_sections=None, cond=None, cond_sections=None, locked=None, flow_time_limit=None):
     """모델을 만들어 풀고 결과를 메모리로 돌려준다(DB에는 쓰지 않음).
     prev/prevk: 이전 시간표 {(과목,분반,회차): (시작칸, 강의실)} / {(과목,분반,회차): 칸 수}
     free: None이면 전부 새로 풀고, 집합(과목 id 또는 (과목,분반))이면 그 분반만 풀고 나머지는 prev 그대로 고정
     forbid: [(dict(세션키 -> 시작칸), 허용되는 같은 칸 수)]  대안끼리 달라지게 하는 금지 조건
     must_sections: 모든 회차를 반드시 놓아야 하는 (과목, 분반) 집합
     cond/cond_sections: 조율 쪽 조건(요일·시간대)과 그것이 적용될 (과목, 분반) 집합
-    locked: 고정된 (과목, 분반) 집합. free 에 들어 있어도 prev 그대로 둔다"""
+    locked: 고정된 (과목, 분반) 집합. free 에 들어 있어도 prev 그대로 둔다
+    두 단계로 푼다(11/25): 1단계 원래 점수 + 동점 순위, 2단계 원래 점수를 1단계보다 나빠지지 않게 묶고 동선을 늘린 뒤 동점 순위.
+    flow_time_limit: 2단계 제한 시간(초). 없으면 min(time_limit, FLOW_TIME_LIMIT=20). 2단계가 끝나지 않아도 찾은 해를 쓴다(원래 점수는 그대로)."""
     by_day, courses, secs, rooms, pref, slot_info = load_input(con, term_id, round_id)
     hist_bld, hist_room = load_history(con, term_id)
     classes, room2class = make_classes(rooms)
@@ -285,6 +326,10 @@ def _solve_model(con, term_id, round_id, W, time_limit, workers, prev, prevk, fr
     prev_by_sec = defaultdict(dict)
     for (c, s, ss), v in prev.items():
         prev_by_sec[(c, s)][ss] = v
+
+    tie = _tie_ranks(secs, slot_info)            # (과목, 분반, 칸) -> 동점 순위 보너스
+    flow_end, flow_start = defaultdict(lambda: defaultdict(list)), defaultdict(lambda: defaultdict(list))
+    # 동선: (학과, 학년, 요일, 교시, 건물) -> 과목 -> 그 교시에 끝나는(또는 시작하는) 회차 변수들
 
     m = cp_model.CpModel()
     x, cost = {}, {}
@@ -410,7 +455,12 @@ def _solve_model(con, term_id, round_id, W, time_limit, workers, prev, prevk, fr
                                     w -= W["keep"]
                                 if prev:
                                     m.AddHint(var, 1 if same else 0)     # 이전 해를 출발점으로 알려 줌
-                                cost[var.Index()] = (var, w)
+                                tb = 0 if frozen else sum(tie.get((cid, sec, sid), 0) for sid in sd["prefer"] & set(covered))
+                                cost[var.Index()] = (var, w, tb)
+                                if c["cat"] and str(c["cat"]).startswith(MAJOR_PREFIX) and c["year"]:
+                                    ck = (c["dept"], str(c["year"]), day)
+                                    flow_end[ck + (chunk[-1][0], cl["bld"])][cid].append(var)
+                                    flow_start[ck + (chunk[0][0], cl["bld"])][cid].append(var)
                                 for sid in covered:
                                     occ_room[(cl["id"], sid)].append(var)
                                     occ_prof[(sd["prof"], sid)].append(var)
@@ -520,19 +570,64 @@ def _solve_model(con, term_id, round_id, W, time_limit, workers, prev, prevk, fr
         if same_terms:
             m.Add(sum(same_terms) <= max_same)
 
-    m.Minimize(sum(w * v for v, w in cost.values()) + W["unplaced"] * sum(unplaced.values()))
+    flow_vars = []
+    if W.get("flow"):
+        for (dept, yr, day, per, bld), ends in flow_end.items():
+            starts = flow_start.get((dept, yr, day, per + 1, bld))
+            if not starts or len(set(ends) | set(starts)) < 2:
+                continue                                 # 서로 다른 두 과목이 있어야 함
+            e = {cid: _any_pos(m, vs, f"fe{dept}_{yr}_{day}_{per}_{bld}_{cid}") for cid, vs in ends.items()}
+            st = {cid: _any_pos(m, vs, f"fs{dept}_{yr}_{day}_{per}_{bld}_{cid}") for cid, vs in starts.items()}
+            z = m.NewBoolVar(f"flow{dept}_{yr}_{day}_{per}_{bld}")
+            ws = []
+            for cid, ev in e.items():                    # 과목 cid 가 끝나고 다른 과목이 바로 이어서 시작
+                others = [sv for c2, sv in st.items() if c2 != cid]
+                if not others:
+                    continue
+                wv = m.NewBoolVar(f"fw{dept}_{yr}_{day}_{per}_{bld}_{cid}")
+                m.Add(wv <= ev)
+                m.Add(wv <= sum(others))
+                ws.append(wv)
+            if not ws:
+                continue
+            m.Add(z <= sum(ws))
+            flow_vars.append(z)
+    main_terms = [(v, w) for v, w, _ in cost.values() if w] + [(u, W["unplaced"]) for u in unplaced.values()]
+    tie_terms = [(v, tb) for v, _, tb in cost.values() if tb]
+    main_expr = sum(w * v for v, w in main_terms)                # 원래 점수 (희망·건물·유지·못 놓음 …)
+    tie_expr = sum(tb * v for v, tb in tie_terms)                # 동점 순위 보너스 (TIE_SCALE 미만)
 
-    s = cp_model.CpSolver()
-    s.parameters.max_time_in_seconds = time_limit
-    s.parameters.num_workers = workers
-    s.parameters.random_seed = seed
-    status = s.Solve(m)
+    def run(limit):
+        sv = cp_model.CpSolver()
+        sv.parameters.max_time_in_seconds = limit
+        sv.parameters.num_workers = workers
+        sv.parameters.random_seed = seed
+        return sv, sv.Solve(m)
+
+    # 1단계: 동선 없이 원래 점수(+ 동점 순위)로 푼다
+    m.Minimize(main_expr * TIE_SCALE - tie_expr)
+    s, status = run(time_limit)
     status_name = s.StatusName(status)
+    flow_status, seconds = None, s.WallTime()
+    # 2단계: 1단계 원래 점수보다 나빠지지 않게 묶고, 동선(같은 학년 전공 연강 같은 건물)을 늘린다. 그다음 동점 순위
+    if status in (cp_model.OPTIMAL, cp_model.FEASIBLE) and flow_vars and W.get("flow"):
+        main1 = sum(w * s.Value(v) for v, w in main_terms)
+        m.Add(main_expr <= main1)
+        m.ClearHints()
+        for v in list(x.values()) + list(unplaced.values()):
+            m.AddHint(v, s.Value(v))                         # 1단계 해에서 출발
+        m.Minimize(-TIE_SCALE * sum(flow_vars) - tie_expr)
+        s2, st2 = run(flow_time_limit or min(time_limit, FLOW_TIME_LIMIT))
+        flow_status = s2.StatusName(st2)
+        seconds += s2.WallTime()
+        if st2 in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+            s = s2
     out = dict(status=status_name, unsupported=unsupported, courses=courses, secs=secs, rooms=rooms,
                classes=classes, room2class=room2class, by_day=by_day, hist_room=hist_room,
                locked={k for k in (locked or ()) if k in frozen_secs}, slot_info=slot_info)
     if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
-        out.update(placements=None, ks=None, unplaced=[], objective=None, seconds=s.WallTime())
+        out.update(placements=None, ks=None, unplaced=[], objective=None, objective_raw=None, tie_bonus=None,
+                   flow_pairs=None, flow_status=None, seconds=seconds)
         return out
 
     # ----- 묶음 안에서 실제 호실 배정 -----
@@ -550,7 +645,11 @@ def _solve_model(con, term_id, round_id, W, time_limit, workers, prev, prevk, fr
         for key, _, _, k in items:
             ks[key] = k
     left = [sk[:3] for sk, v in unplaced.items() if s.Value(v)]
-    out.update(placements=placements, ks=ks, unplaced=left, objective=s.ObjectiveValue(), seconds=s.WallTime())
+    main = sum(w * s.Value(v) for v, w in main_terms)    # 원래 점수 (동선·동점 순위 제외)
+    tie_b = sum(tb * s.Value(v) for v, tb in tie_terms)
+    flows = sum(s.Value(z) for z in flow_vars)
+    out.update(placements=placements, ks=ks, unplaced=left, objective=main, objective_raw=main * TIE_SCALE - tie_b,
+               tie_bonus=tie_b, flow_pairs=flows, flow_status=flow_status, seconds=seconds)
     return out
 
 
@@ -642,7 +741,7 @@ def _covered(start, k, sorted_days):
 
 # ---------------------------------------------------------------- 공개 함수
 def solve(con, term_id, round_id, weights=None, time_limit=30, workers=8,
-          previous_timetable_id=None, free_courses=None, created_by=None, seed=0):
+          previous_timetable_id=None, free_courses=None, created_by=None, seed=0, flow_time_limit=None):
     """전체 풀이. previous_timetable_id를 주면 그 시간표를 출발점·유지 보너스로 쓴다.
     free_courses(과목 id 또는 (과목 id, 분반) 집합)까지 주면 그것만 다시 풀고 나머지는 이전 시간표 그대로 고정한다."""
     W = {**DEFAULT_WEIGHTS, **(weights or {})}
@@ -651,10 +750,11 @@ def solve(con, term_id, round_id, weights=None, time_limit=30, workers=8,
         raise ValueError("free_courses는 previous_timetable_id와 함께 써야 합니다")
     out = _solve_model(con, term_id, round_id, W, time_limit, workers, prev, prevk,
                        set(free_courses) if free_courses is not None else None, seed,
-                       locked=load_locked(con, previous_timetable_id))
+                       locked=load_locked(con, previous_timetable_id), flow_time_limit=flow_time_limit)
     run_id, tt = _persist(con, out, term_id, round_id, W, time_limit, previous_timetable_id, created_by)
     return dict(status=out["status"], run_id=run_id, timetable_id=tt, unplaced=out["unplaced"],
-                objective=out["objective"], seconds=out["seconds"], unsupported=out["unsupported"])
+                objective=out["objective"], seconds=out["seconds"], unsupported=out["unsupported"],
+                flow_pairs=out["flow_pairs"], flow_status=out["flow_status"])
 
 
 def alternatives(con, term_id, round_id, timetable_id, course_id, section_no=None, condition=None,
@@ -833,7 +933,7 @@ def pick_best(con, term_id, round_id, timetable_id, course_id, section_no=None, 
                     got |= set(_covered(pl[k][0], out["ks"][k], sorted_days))
             if got != set(slots):                        # 고른 안의 칸을 모두 그대로 써야 그 안이다
                 continue
-            best.update(feasible=True, objective=out["objective"], stage=stage_name,
+            best.update(feasible=True, objective=out["objective"], objective_raw=out["objective_raw"], stage=stage_name,
                         placements={k[1:]: v for k, v in pl.items() if (k[0], k[1]) in t_secs},
                         ks={k[1:]: out["ks"][k] for k in pl if (k[0], k[1]) in t_secs},
                         moves=[(k, prev[k], pl[k]) for k in pl
@@ -845,7 +945,7 @@ def pick_best(con, term_id, round_id, timetable_id, course_id, section_no=None, 
         out_list.sort(key=lambda d: (not d["feasible"], rank.get(d["option_id"], len(rank))))
     else:                                                # 버튼만 누른 경우 → 점수 순
         out_list.sort(key=lambda d: (not d["feasible"], d["stage"] != "다른 수업은 그대로",
-                                     d["objective"] if d["objective"] is not None else 0))
+                                     d["objective_raw"] if d.get("objective_raw") is not None else 0))
     return out_list
 
 
