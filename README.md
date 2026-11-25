@@ -238,6 +238,8 @@ cp .env.example .env   # Windows: copy .env.example .env
 
 `.env`에는 각자 발급받은 API 키를 넣습니다. `.env`는 절대 커밋하지 않습니다.
 
+테스트: 저장소 맨 위에서 `python -m pytest backend/tests -q` (backend/ 안에서는 `python -m pytest tests -q`).
+
 ## 저장소 사용 규칙
 
 ### 1. 기본 흐름

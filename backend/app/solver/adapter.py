@@ -6,17 +6,22 @@
 - 아래 모듈 함수(make_draft, make_alternatives, reassign)는 engine.py가 쓰는 서버 모양이다.
   engine.py는 환경변수 SSUROOM_ENGINE=solver일 때만 이 패키지를 본다. 기본은 가짜(stubs.py).
   check_rules·what_if는 솔버에 없어서 여기 두지 않는다 (engine이 함수마다 가짜를 쓴다).
-- 모듈 함수를 쓰기 전에 configure(SolverAdapter(...))로 어댑터를 정해야 한다 (시드 스크립트가 할 일).
+- 모듈 함수를 쓰기 전에 configure(SolverAdapter(...))로 어댑터를 정한다. 정하지 않았으면 처음 쓸 때
+  시드 스크립트(backend/tools/seed_db.py)가 만든 DB와 분반 대응표(section_map.json)를 읽어 스스로 정한다
+  (from_files. 경로는 환경변수 SSUROOM_DB, SSUROOM_SECTION_MAP 또는 기본값).
 """
 
 import inspect
+import json
+import os
+import sqlite3
 import sys
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple, Union
 
 from ..contracts import (
     DAYS, Alternative, Assignment, Block, Conditions, Meeting, Room, Section, Timetable, Wish, conditions_json, dump,
-    parse,
+    parse, set_place,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -106,20 +111,19 @@ class SectionMap:
 def assignments_from_db(start: Dict[Tuple[int, int, int], Tuple[int, int]], ks: Dict[Tuple[int, int, int], int],
                         slots: SlotIndex, rooms: RoomIndex, sections: SectionMap) -> Dict[str, Assignment]:
     """솔버 배정 {(과목, 분반, 회차): (시작 칸, 강의실)} + {키: 칸 수} → 서버 분반 id별 Assignment.
-    서버 Assignment는 강의실이 하나라 첫 회차(요일 순)의 강의실을 쓰고, 회차마다 다르면 reason에 적는다.
+    회차마다 강의실은 Block.room에 그대로 넣는다 (Assignment.room = 첫 회차(요일 순)의 강의실, 대표 강의실).
     대응표에 없는 분반은 건너뛴다."""
     per: Dict[str, List[Tuple[Block, str]]] = {}
     for (cid, sec, _ss), (sid_slot, room_id) in start.items():
         sid = sections.sid_of.get((cid, sec))
         if sid is None:
             continue
-        per.setdefault(sid, []).append((slots.block(sid_slot, ks[(cid, sec, _ss)]), rooms.name_of[room_id]))
+        b = slots.block(sid_slot, ks[(cid, sec, _ss)])
+        per.setdefault(sid, []).append(b.model_copy(update={"room": rooms.name_of[room_id]}))
     out = {}
-    for sid, items in per.items():
-        items.sort(key=lambda br: (DAYS.index(br[0].day), br[0].start))
-        names = list(dict.fromkeys(r for _, r in items))
-        out[sid] = Assignment(section_id=sid, blocks=[b for b, _ in items], room=names[0], status="DONE",
-                              reason=None if len(names) == 1 else f"회차마다 강의실이 다름: {', '.join(names)}")
+    for sid, blocks in per.items():
+        blocks.sort(key=lambda b: (DAYS.index(b.day), b.start))
+        out[sid] = Assignment(section_id=sid, blocks=blocks, room=blocks[0].room, status="DONE")
     return out
 
 
@@ -133,6 +137,19 @@ def option_to_alternative(key: str, option: dict, course_id: int, slots: SlotInd
                                 room=rooms.name_of[room_id]))
     meetings.sort(key=lambda m: (m.day, m.start))
     return Alternative(key=key, meetings=meetings)
+
+
+def unique_options(options: List[dict], course_id: int, slots: SlotIndex, rooms: RoomIndex) -> List[dict]:
+    """서버에서 보면 같은 자리인 대안을 뺀다. 솔버는 회차 번호만 바꾼 안(1회차 월·2회차 수 ↔ 1회차 수·2회차 월)을
+    다른 안으로 내지만, 요일·시각·강의실이 같으므로 교수에게는 같은 안이다."""
+    out, seen = [], set()
+    for o in options:
+        key = tuple((m.day, m.start, m.end, m.room)
+                    for m in option_to_alternative("A", o, course_id, slots, rooms).meetings)
+        if key not in seen:
+            seen.add(key)
+            out.append(o)
+    return out
 
 
 def options_to_alternatives(options: List[dict], course_id: int, slots: SlotIndex,
@@ -186,6 +203,7 @@ class SolverAdapter:
         opts = _call(self.sc.make_alternatives, self.con, self.term_id, self.round_id, self.timetable_id, cid,
                      section_no=sec, condition=solver_condition(conditions), n=n,
                      time_limit=self.alt_time_limit, wish_round_id=self.wish_round_id)
+        opts = unique_options(opts, cid, self.slots, self.rooms)   # 회차 번호만 바뀐 같은 안은 하나로
         self.last_options[section_id] = opts
         return opts
 
@@ -231,15 +249,15 @@ class SolverAdapter:
             if not alts:
                 return tt
             choice = alts[0]
-        blocks, room = [], None
+        blocks = []
         for m in choice.meetings:
             sid = self.slots.id_of[(DAYS[m.day], m.start)]
             k = next(n for n in range(1, 4) if self.slots.end(sid, n) == m.end)
-            blocks.append(Block(day=DAYS[m.day], start=m.start, slots=k))
-            room = room or m.room
+            blocks.append(Block(day=DAYS[m.day], start=m.start, slots=k, room=m.room))   # 수업마다 강의실 유지
         for a in tt.assignments:
             if a.section_id == section_id:
-                a.blocks, a.room, a.status, a.reason = blocks, room, "DONE", None
+                set_place(a, blocks)
+                a.status, a.reason = "DONE", None
         return tt
 
 
@@ -253,9 +271,36 @@ def configure(adapter: Optional[SolverAdapter]) -> None:
     _ADAPTER = adapter
 
 
+def default_paths() -> Tuple[Path, Path]:
+    """(DB 파일, 분반 대응표). 기본: 저장소 맨 위 ssuroom.db, data/private/<DATA_SET>/section_map.json."""
+    data = REPO_ROOT / "data" / "private" / os.environ.get("DATA_SET", "real")
+    return (Path(os.environ.get("SSUROOM_DB") or REPO_ROOT / "ssuroom.db"),
+            Path(os.environ.get("SSUROOM_SECTION_MAP") or data / "section_map.json"))
+
+
+def from_files(db_path: Optional[Path] = None, map_path: Optional[Path] = None) -> SolverAdapter:
+    """시드 스크립트가 만든 DB와 대응표로 어댑터를 만든다. MANUAL 분반은 대응표에만 있고 DB에는 없다."""
+    d, m = default_paths()
+    db_path, map_path = Path(db_path or d), Path(map_path or m)
+    for f, how in ((db_path, "DB"), (map_path, "분반 대응표")):
+        if not f.exists():
+            raise RuntimeError(f"{how} 파일이 없습니다: {f}. 먼저 python backend/tools/seed_db.py 를 실행하세요.")
+    mp = json.loads(map_path.read_text(encoding="utf-8"))
+    pairs = {(v["course_id"], v["section_no"]): sid for sid, v in mp["sections"].items() if v != "MANUAL"}
+    # 서버(FastAPI)는 요청을 다른 스레드에서 처리하므로 check_same_thread=False로 연다.
+    # (하윤 db.connect와 같이 외래키 검사를 켠다. db.connect에 이 인자가 생기면 그걸 쓴다)
+    con = sqlite3.connect(db_path, check_same_thread=False)
+    con.execute("PRAGMA foreign_keys = ON")
+    return SolverAdapter(con, mp["term_id"], mp["round_id"], pairs)
+
+
 def current() -> SolverAdapter:
+    global _ADAPTER
     if _ADAPTER is None:
-        raise RuntimeError("솔버 어댑터가 정해지지 않았습니다. backend.app.solver.adapter.configure(...)를 먼저 부르세요.")
+        try:
+            _ADAPTER = from_files()
+        except RuntimeError as e:
+            raise RuntimeError(f"솔버 어댑터가 정해지지 않았습니다. configure(...)를 부르거나 시드를 만드세요. ({e})") from e
     return _ADAPTER
 
 

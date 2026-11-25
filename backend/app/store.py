@@ -15,7 +15,7 @@ from typing import Dict, List, Optional
 
 from .contracts import (
     DAYS, STARTS, Alternative, Assignment, Block, Message, MessageInput, Proposal, ReplyParse, Room,
-    Section, Timetable, Wish, block_minutes, dump, parse, section_shape,
+    Section, Timetable, Wish, block_minutes, block_room, dump, parse, section_shape,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -224,9 +224,14 @@ class Store:
             o = self.sections.get(a.section_id)
             return bool(o and sec.professor and o.professor == sec.professor)
 
-        for test in (lambda a: me.room is not None and a.room == me.room, same_prof):
+        my_rooms = {block_room(me, b) for b in me.blocks} - {None}
+
+        def same_room(a: Assignment, b: Block) -> bool:   # 그 수업의 강의실이 내 강의실 중 하나
+            return block_room(a, b) in my_rooms
+
+        for test in (same_room, lambda a, b: same_prof(a)):
             for c in cells:
-                hit = next((a for a in others if test(a) and any(_overlap(b, c) for b in a.blocks)), None)
+                hit = next((a for a in others if any(test(a, b) and _overlap(b, c) for b in a.blocks)), None)
                 if hit is not None:
                     return hit.section_id
         return None

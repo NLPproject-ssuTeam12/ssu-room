@@ -1,0 +1,1352 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SSU:room 시연 v4</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/pretendard@1.3.9/dist/web/static/pretendard.min.css">
+<style>
+/* 11/15 시안 v4: 희망은 선택칸(시간 칠하기 등)으로 받고, NLP는 조율 회신 해석 · 조율 메시지 · AI 도우미에 쓴다
+   11/23: v3의 장점을 더함 — API 명세 모양(19:30 교시, day_slots·end_before 조건, ReplyParse·Proposal, method·fallback),
+   메시지 미리 보기 후 보내기와 check_message, 적용·확인 전 확인창(도우미 적용은 사유 필수), 테마 버튼, 인쇄 화면,
+   교양필수 시간 막기, 월·수/화·목 묶어 칠하기, 키보드·화면 읽기 지원(포커스 유지, 알림)
+   11/23 2차: 진행 바(희망 수집 ── 초안 ── 조율 중 ── 확정), 덜 AI 같은 색, 기타 요청 먼저 보기, 어디서나 '현재 시간표' 서랍과
+   대안 미리 보기, 회신 도착 알림(메뉴 숫자), 최종 시간표 확정 요청 → 교수 [확정] 회신 → 내보내기, 교수 '내 강의만' 보기 */
+:root{
+  --bg:#F3F4F6; --surface:#FFFFFF; --sunk:#EDEFF2; --line:#D8DCE1; --ink:#1F2328; --muted:#5E6670;
+  --accent:#2F4A73; --accent-soft:#E5EAF1; --accent-ink:#FFFFFF;
+  --good:#2F6B47; --good-soft:#E2EEE6; --warn:#875A12; --warn-soft:#F4ECDC; --bad:#A33A32; --bad-soft:#F5E2E0;
+  --lab:#5A4C86; --lab-soft:#ECE9F3;
+  --font:'Pretendard','Malgun Gothic','Apple SD Gothic Neo',sans-serif; color-scheme:light;
+}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){
+  --bg:#16181B; --surface:#1E2125; --sunk:#191B1F; --line:#32363C; --ink:#E5E7EA; --muted:#9AA1AA;
+  --accent:#93ABD3; --accent-soft:#232B38; --accent-ink:#10151C;
+  --good:#7FB894; --good-soft:#1B2A21; --warn:#D6AC64; --warn-soft:#2D2414; --bad:#E38B82; --bad-soft:#341E1C;
+  --lab:#B2A6DC; --lab-soft:#262236; color-scheme:dark}}
+:root[data-theme="dark"]{
+  --bg:#16181B; --surface:#1E2125; --sunk:#191B1F; --line:#32363C; --ink:#E5E7EA; --muted:#9AA1AA;
+  --accent:#93ABD3; --accent-soft:#232B38; --accent-ink:#10151C;
+  --good:#7FB894; --good-soft:#1B2A21; --warn:#D6AC64; --warn-soft:#2D2414; --bad:#E38B82; --bad-soft:#341E1C;
+  --lab:#B2A6DC; --lab-soft:#262236; color-scheme:dark}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--font);font-size:14px;line-height:1.55}
+button,input,select,textarea{font:inherit;color:inherit}
+.wrap{max-width:1240px;margin:0 auto;padding:0 16px}
+/* 상단 바 */
+.top{background:var(--surface);border-bottom:1px solid var(--line)}
+.top .wrap{display:flex;align-items:center;gap:14px;flex-wrap:wrap;padding-top:12px;padding-bottom:12px}
+.logo{font-weight:800;font-size:19px;letter-spacing:-.3px}.logo b{color:var(--accent)}
+.sub{color:var(--muted);font-size:13px}
+.virt{font-size:12px;font-weight:600;background:var(--warn-soft);color:var(--warn);border-radius:4px;padding:1px 8px}
+.spacer{flex:1}
+.seg{display:inline-flex;background:var(--sunk);border:1px solid var(--line);border-radius:7px;padding:3px}
+.seg button{border:0;background:none;padding:5px 14px;border-radius:5px;cursor:pointer;font-weight:600;color:var(--muted)}
+.seg button.on{background:var(--surface);color:var(--ink);box-shadow:0 1px 2px rgba(0,0,0,.08)}
+select,input[type=text],textarea{background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:7px 10px}
+select{max-width:100%}
+textarea{width:100%;resize:vertical;min-height:58px}
+input[type=text]{width:100%}
+/* 단계 바: 희망 수집 ── 초안 ── 조율 중 ── 확정 */
+.steps{display:flex;align-items:center;list-style:none;margin:0;padding:16px 2px 8px;overflow-x:auto}
+.steps li{display:flex;align-items:center;flex:1;min-width:0}
+.steps li:last-child{flex:none}
+.st{white-space:nowrap;font-size:13.5px;font-weight:600;color:var(--muted)}
+.st small{font-size:12px;font-weight:600;margin-left:5px;color:var(--accent)}
+.steps li.done .st{color:var(--ink)}
+.steps li.now .st{color:var(--accent);font-weight:800}
+.ln{flex:1;height:2px;min-width:20px;margin:0 12px;background:var(--line)}
+.steps li.done .ln{background:var(--accent)}
+/* 본문 */
+.main{display:grid;grid-template-columns:190px minmax(0,1fr);gap:18px;padding:12px 0 40px}
+nav{display:flex;flex-direction:column;gap:3px;position:sticky;top:12px;align-self:start}
+nav button{display:flex;justify-content:space-between;align-items:center;text-align:left;border:0;background:none;padding:9px 12px;border-radius:9px;cursor:pointer;font-weight:600;color:var(--muted)}
+nav button:hover{background:var(--sunk)}
+nav button.on{background:var(--surface);color:var(--ink);box-shadow:inset 3px 0 0 var(--accent)}
+.badge{font-size:11px;background:var(--accent);color:var(--accent-ink);border-radius:999px;padding:0 7px;min-width:18px;text-align:center}
+h1{font-size:22px;margin:4px 0 4px;letter-spacing:-.3px}
+h2{font-size:16px;margin:0 0 10px}
+.lead{color:var(--muted);margin:0 0 16px}
+.card{background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:18px;margin-bottom:14px}
+.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.cols{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:14px}
+.kpi{background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:14px 16px}
+.kpi .n{font-size:26px;font-weight:800;letter-spacing:-.5px}
+.kpi .l{color:var(--muted);font-size:12.5px}
+.btn{white-space:nowrap;font-weight:600;border-radius:6px;padding:8px 15px;cursor:pointer;border:1px solid var(--line);background:var(--surface)}
+.btn:hover{background:var(--sunk)}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--accent-ink)}
+.btn.primary:hover{filter:brightness(1.06)}
+.btn.small{padding:4px 11px;font-size:13px;font-weight:500}
+.btn:disabled{opacity:.45;cursor:not-allowed}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.chip{display:inline-flex;align-items:center;font-size:12px;font-weight:600;border-radius:4px;padding:1px 7px;background:var(--sunk);color:var(--ink);white-space:nowrap;margin:0 4px 4px 0}
+.chip.accent{background:var(--accent-soft);color:var(--accent)}
+.chip.good{background:var(--good-soft);color:var(--good)}
+.chip.warn{background:var(--warn-soft);color:var(--warn)}
+.chip.bad{background:var(--bad-soft);color:var(--bad)}
+.chip.lab{background:var(--lab-soft);color:var(--lab)}
+.muted{color:var(--muted)}.small{font-size:12.5px}
+.tblwrap{overflow-x:auto}
+table{border-collapse:collapse;width:100%}
+th,td{text-align:left;vertical-align:top;padding:10px 8px;border-bottom:1px solid var(--line)}
+th{font-size:12px;color:var(--muted);font-weight:600}
+tr.flag td{background:var(--warn-soft)}
+.raw{font-size:13px}.raw span{color:var(--muted);font-size:11.5px;margin-right:4px}
+details summary{cursor:pointer;color:var(--muted);font-size:12px}
+pre{background:var(--sunk);border-radius:8px;padding:8px 10px;font-size:12px;overflow-x:auto;margin:6px 0 0;font-family:Consolas,ui-monospace,monospace;white-space:pre-wrap}
+.note{font-size:12.5px;color:var(--muted);background:var(--sunk);border-radius:9px;padding:8px 12px}
+.who{display:inline-block;font-size:11px;font-weight:700;border-radius:5px;padding:1px 6px;margin-right:6px}
+.who.ai{background:var(--accent-soft);color:var(--accent)}.who.sv{background:var(--good-soft);color:var(--good)}.who.ta{background:var(--warn-soft);color:var(--warn)}.who.code{background:var(--sunk);color:var(--muted)}
+/* 시간표 */
+.ttwrap{overflow-x:auto}
+.tt{display:grid;grid-template-columns:62px repeat(5,minmax(118px,1fr));gap:4px;min-width:700px}
+.tt .h{font-size:12px;font-weight:700;color:var(--muted);text-align:center;padding:4px 0}
+.tt .t{font-size:12px;color:var(--muted);padding-top:6px;line-height:1.3}
+.tt .t span{font-size:11px;opacity:.8}
+.tt .cell{background:var(--sunk);border-radius:8px;min-height:62px;padding:4px;display:flex;flex-direction:column;gap:4px}
+.blk{border-radius:7px;padding:5px 7px;background:var(--surface);border:1px solid var(--line);font-size:12px;line-height:1.35}
+.blk b{display:block;font-size:12.5px}
+.blk.temp{background:var(--warn-soft);border-color:var(--warn)}
+.blk.changed{box-shadow:0 0 0 2px var(--good)}
+.blk.mine{background:var(--accent-soft);border-color:var(--accent)}
+.blk.dim{opacity:.4}
+/* 시간 칠하기 */
+.pw{display:grid;grid-template-columns:minmax(0,420px) minmax(0,1fr);gap:20px}
+.pg{display:grid;grid-template-columns:50px repeat(5,1fr);gap:4px;max-width:440px;touch-action:none;user-select:none;-webkit-user-select:none}
+.pgh,.pgt{font-size:12px;color:var(--muted);font-weight:700;padding:3px 0;text-align:center}
+.pgt{text-align:left;align-self:center}
+.pc{height:32px;border-radius:6px;border:1px solid var(--line);background:var(--sunk);font-size:11.5px;font-weight:700;cursor:pointer;color:var(--ink);padding:0}
+.pc:disabled{cursor:default}
+.m-must{background:var(--accent);border-color:var(--accent);color:var(--accent-ink)}
+.m-want{background:var(--good-soft);border-color:var(--good);color:var(--good)}
+.m-no{background:var(--bad-soft);border-color:var(--bad);color:var(--bad)}
+.mm{display:inline-grid;grid-template-columns:22px repeat(5,12px);gap:2px;font-size:10px;color:var(--muted);line-height:13px;margin-top:4px}
+.mm span{text-align:center}
+.mc{width:12px;height:13px;border-radius:3px;background:var(--sunk);border:1px solid var(--line)}
+.legend{display:flex;gap:10px;flex-wrap:wrap;font-size:12px;color:var(--muted);align-items:center}
+.legend i{display:inline-block;width:14px;height:12px;border-radius:3px;border:1px solid var(--line);vertical-align:-1px;margin-right:4px;background:var(--sunk)}
+.mc.m-must,.legend i.m-must{background:var(--accent);border-color:var(--accent)}
+.mc.m-want,.legend i.m-want{background:var(--good-soft);border-color:var(--good)}
+.mc.m-no,.legend i.m-no{background:repeating-linear-gradient(135deg,var(--bad) 0 2px,var(--bad-soft) 2px 4px);border-color:var(--bad)}
+/* 조율 */
+.msg{white-space:pre-wrap;background:var(--sunk);border-radius:6px;padding:12px 14px;font-size:13.5px;line-height:1.65}
+.alt{display:flex;gap:10px;align-items:center;border:1px solid var(--line);border-radius:6px;padding:9px 12px;margin-bottom:6px;cursor:pointer;background:var(--surface)}
+.alt .k{width:28px;height:28px;border-radius:7px;background:var(--accent);color:var(--accent-ink);display:flex;align-items:center;justify-content:center;font-weight:800;flex:none}
+.alt input{accent-color:var(--accent)}
+.chk{font-size:12.5px;margin:3px 0}.chk.ok{color:var(--good)}.chk.no{color:var(--bad)}
+.prop{border:1px solid var(--accent);border-left-width:3px;border-radius:6px;padding:12px 14px;margin-top:10px}
+.prop .big{font-size:18px;font-weight:800}
+.vs{font-size:13px;margin:3px 0}
+.decided{background:var(--good-soft);color:var(--good);border-radius:9px;padding:8px 12px;font-weight:600;margin-top:10px}
+.log li{margin-bottom:4px}
+.switch{display:flex;align-items:center;gap:10px;cursor:pointer}
+.switch input{width:18px;height:18px;accent-color:var(--accent)}
+.flow{display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-size:13px}
+.flow .b{border:1px solid var(--line);border-radius:8px;padding:5px 9px;background:var(--surface)}
+.flow .a{color:var(--muted)}
+.lbl{font-size:12.5px;font-weight:600;margin:10px 0 4px}
+/* AI 도우미 */
+.chat{display:flex;flex-direction:column;gap:12px;max-height:620px;overflow-y:auto;padding-right:4px}
+.turn{max-width:82%}
+.turn.ta{align-self:flex-end;background:var(--accent-soft);border-radius:8px 8px 2px 8px;padding:9px 13px}
+.turn.bot{align-self:flex-start;background:var(--sunk);border-radius:8px 8px 8px 2px;padding:12px 14px;width:82%}
+.trace{font-size:12px;color:var(--muted);margin-top:10px;padding-top:8px;border-top:1px dashed var(--line)}
+.trace>div{margin-top:5px}
+.trace code{font-family:Consolas,ui-monospace,monospace;font-size:11.5px;background:var(--surface);padding:1px 6px;border-radius:4px;color:var(--ink);word-break:break-all}
+.chg{margin-top:8px;background:var(--surface);border-radius:8px}
+.chg th,.chg td{padding:6px 8px;font-size:12.5px}
+/* AI 도우미 패널: 어느 화면에서나 오른쪽에서 열린다 */
+.fabs{position:fixed;right:24px;bottom:24px;z-index:30;display:flex;flex-direction:column;align-items:flex-end;gap:10px}
+.botfab,.ttfab{display:flex;align-items:center;gap:12px;border:0;border-radius:10px;padding:9px 20px 9px 9px;background:var(--accent);color:var(--accent-ink);cursor:pointer;text-align:left;box-shadow:0 4px 14px rgba(0,0,0,.18);transition:transform .15s}
+.ttfab{background:var(--surface);color:var(--ink);border:1px solid var(--line)}
+.ttfab .ic{background:var(--accent-soft)!important;color:var(--accent)!important}
+.botfab:hover,.ttfab:hover{transform:translateY(-1px);filter:brightness(1.04)}
+.botfab:focus-visible,.ttfab:focus-visible{outline:3px solid var(--ink);outline-offset:3px}
+.botfab .ic,.ttfab .ic{width:38px;height:38px;border-radius:7px;background:var(--accent-ink);color:var(--accent);display:flex;align-items:center;justify-content:center;flex:none}
+.botfab b,.ttfab b{display:block;font-size:15px;line-height:1.25}
+.botfab small,.ttfab small{display:block;font-size:12.5px;font-weight:500;opacity:.85}
+.botfab.new{animation:fabpulse 2.2s ease-out infinite}
+@keyframes fabpulse{0%{box-shadow:0 4px 14px rgba(0,0,0,.18),0 0 0 0 rgba(47,74,115,.35)}100%{box-shadow:0 4px 14px rgba(0,0,0,.18),0 0 0 12px rgba(47,74,115,0)}}
+@media (prefers-reduced-motion:reduce){.botfab.new{animation:none}.botfab,.ttfab{transition:none}}
+@media (max-width:820px){.fabs{right:16px;bottom:16px}.botfab,.ttfab{padding-right:16px}.botfab small,.ttfab small{display:none}}
+.botpanel{position:fixed;top:0;right:0;bottom:0;width:400px;max-width:100%;z-index:40;background:var(--surface);border-left:1px solid var(--line);box-shadow:-8px 0 24px rgba(0,0,0,.12);display:flex;flex-direction:column}
+.bph{display:flex;align-items:center;gap:8px;padding:12px 14px;border-bottom:1px solid var(--line)}
+.bph b{font-size:15px}
+.botpanel .chat{flex:1;max-height:none;padding:14px}
+.botpanel form{border-top:1px solid var(--line);padding:10px 14px 14px}
+.botpanel .turn{max-width:90%}
+.botpanel .turn.bot{width:100%;max-width:100%}
+.botex{display:flex;gap:6px;overflow-x:auto;padding-bottom:6px;margin-bottom:6px}
+/* 컴퓨터 화면 전용: 오른쪽 패널(AI 도우미·현재 시간표)을 열면 본문이 그만큼 비켜 선다 */
+:root{--ttw:clamp(500px,44vw,680px)}
+#app.botopen{padding-right:400px}#app.botopen .fabs{right:424px}
+/* 현재 시간표 패널: AI 도우미처럼 어느 화면에서나 오른쪽에서 열린다 (둘 중 하나만 열림) */
+.ttpanel{position:fixed;top:0;right:0;bottom:0;width:var(--ttw);z-index:40;background:var(--surface);border-left:1px solid var(--line);box-shadow:-8px 0 24px rgba(0,0,0,.12);display:flex;flex-direction:column}
+.ttpanel .bph{flex-wrap:wrap}
+.ttpanel .ttbody{flex:1;overflow-y:auto;padding:12px 14px 16px}
+.ttpanel .tt{min-width:0;grid-template-columns:46px repeat(5,minmax(0,1fr));gap:3px}
+.ttpanel .tt .cell{min-height:44px;padding:3px;gap:3px}
+.ttpanel .blk{padding:3px 5px;font-size:11px;line-height:1.3;overflow-wrap:anywhere}
+.ttpanel .blk b{font-size:11.5px}
+.ttpanel .tt .t{font-size:11px}
+#app.ttopen{padding-right:var(--ttw)}
+#app.ttopen .fabs{right:calc(var(--ttw) + 24px)}
+#app.ttopen .cols,#app.botopen .cols{grid-template-columns:minmax(0,1fr)}
+#app.ttopen .kpis{grid-template-columns:repeat(2,1fr)}
+.blk.ghost.bad{background:var(--bad-soft);border-color:var(--bad);color:var(--bad)}
+.badge.new{animation:fabpulse 1.6s ease-out 3}
+.blk.leave{opacity:.55;border-style:dashed}
+.blk.ghost{background:var(--accent-soft);border:1.5px dashed var(--accent);color:var(--accent)}
+/* v3에서 가져온 것: 확인창, 알림, 막힌 칸, 묶기, API 값 보기, 인쇄 */
+.pc.blocked{background:repeating-linear-gradient(135deg,var(--line) 0 2px,var(--sunk) 2px 6px);color:var(--muted);font-weight:600;font-size:10.5px;cursor:not-allowed}
+.blk.gen{background:repeating-linear-gradient(135deg,var(--line) 0 2px,var(--sunk) 2px 7px);border-style:dashed;color:var(--muted);text-align:center}
+.legend i.blocked{background:repeating-linear-gradient(135deg,var(--line) 0 2px,var(--sunk) 2px 4px)}
+.tog{border:1px solid var(--line);background:var(--surface);border-radius:8px;padding:4px 10px;font-size:12.5px;font-weight:600;cursor:pointer;color:var(--muted)}
+.tog[aria-pressed="true"]{background:var(--accent-soft);border-color:var(--accent);color:var(--accent)}
+.stub{font-size:11px;font-weight:700;border:1px dashed var(--muted);color:var(--muted);border-radius:5px;padding:0 6px;white-space:nowrap;cursor:help}
+.prob{font-size:12.5px;color:var(--bad);margin:3px 0}
+textarea.msgedit{min-height:220px;font-size:13.5px;line-height:1.65;background:var(--sunk)}
+#toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);z-index:60;background:var(--ink);color:var(--bg);border-radius:10px;padding:9px 16px;font-size:13.5px;font-weight:600;box-shadow:0 6px 20px rgba(0,0,0,.25);max-width:calc(100% - 32px);display:none}
+#toast.on{display:block}
+dialog#dlg{border:1px solid var(--line);border-radius:8px;background:var(--surface);color:var(--ink);padding:20px;width:min(460px,calc(100% - 32px));box-shadow:0 20px 50px rgba(0,0,0,.3)}
+dialog#dlg::backdrop{background:rgba(15,18,22,.45)}
+dialog#dlg h2{margin-bottom:8px}
+.sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+.skip{position:absolute;left:8px;top:-40px;z-index:70;background:var(--accent);color:var(--accent-ink);padding:6px 12px;border-radius:8px;font-weight:700}
+.skip:focus{top:8px}
+nav button[aria-current="page"]{color:var(--ink)}
+@media print{
+  .top .seg,.top select,.top .tog,nav,.fabs,.botpanel,.ttpanel,#toast,.no-print,button{display:none!important}
+  body{background:#fff;color:#000}.main{display:block}.card{border-color:#999;break-inside:avoid}
+  .tt{min-width:0}.blk{border-color:#666}#app.botopen{padding-right:0}
+}
+@media (max-width:820px){
+  .main{grid-template-columns:minmax(0,1fr)}
+  nav{flex-direction:row;overflow-x:auto;position:static}
+  nav button{white-space:nowrap;gap:6px}
+  nav button.on{box-shadow:inset 0 -3px 0 var(--accent)}
+  .cols,.pw{grid-template-columns:minmax(0,1fr)}
+  .kpis{grid-template-columns:repeat(2,1fr)}
+  .turn,.turn.bot{max-width:100%;width:100%}
+}
+</style>
+</head>
+<body>
+<div id="app"></div>
+<dialog id="dlg" aria-labelledby="dlg-t"></dialog>
+<div id="toast" role="status" aria-live="polite"></div>
+<script>
+// ---------------- 기본 값 ----------------
+const SLOTS=['09:00','10:30','12:00','13:30','15:00','16:30','18:00','19:30'];   // 75분 수업 (API 명세와 같은 8교시)
+const DAYN='월화수목금';
+const D5=[0,1,2,3,4];
+// 주 2회 수업: 월~금 중 두 요일을 자유롭게 묶고, 두 번 다 같은 시각에 75분씩 (키 '02' = 월·수, '14' = 화·금)
+const PAT={};for(let a=0;a<5;a++)for(let b=a+1;b<5;b++)PAT[`${a}${b}`]={days:[a,b],label:DAYN[a]+'·'+DAYN[b]};
+const PKEYS=Object.keys(PAT);
+const patOf=(a,b)=>a<b?`${a}${b}`:`${b}${a}`;
+const CHAPEL={day:3,slot:2};   // 1학년 채플 (목 12:00, 가정)
+const GEN={days:[1,3],slot:2};   // 교양필수 (화·목 12:00, 가상 규칙): 모든 학년 전공을 두지 않는다
+const isGenCell=(d,s)=>GEN.days.includes(d)&&s===GEN.slot;
+const EARLY_END_MIN=15;   // 고른 안이 이만큼 이내로만 넘기면 종료 조건으로 넣지 않는다 (API 명세)
+const PARTNER={0:2,2:0,1:3,3:1};   // 묶어 칠하기 짝: 월↔수, 화↔목
+const toMin=t=>{const [h,m]=t.split(':').map(Number);return h*60+m};
+const toHM=v=>`${String(Math.floor(v/60)).padStart(2,'0')}:${String(v%60).padStart(2,'0')}`;
+const ROOMS=[ // 순서 = 일반 강의는 문화관부터, 실습실은 305부터
+  {id:'문화관 201',bldg:'문화관',lab:false,cap:60},{id:'미래관 410',bldg:'미래관',lab:false,cap:60},{id:'정보관 210',bldg:'정보관',lab:false,cap:45},
+  {id:'정보관 305',bldg:'정보관',lab:true,cap:50},{id:'정보관 306',bldg:'정보관',lab:true,cap:50}];   // cap = 정원 (가상)
+const BLDGS=['문화관','미래관','정보관'];
+const PRIO=['그 시간 아니면 안 되는 교수님(꼭 표시)','실습실 필요','연구실 위치','집 위치','임용 날짜'];
+const RULES=['교수 겹침','강의실 겹침','같은 학년 전공필수 겹침','실습실이 필요하면 실습실로','강의실 정원 ≥ 인원','교수가 불가로 칠한 시간','1학년 채플 시간(목 12:00, 가정) 비우기','교양필수 시간(화·목 12:00, 가상 규칙) 비우기','단과대 건물(문화관·미래관·정보관)'];
+const MARKS=['희망','불가'];
+const CYC=[null,'희망','불가'];   // 칸을 누를 때마다 이 순서로 바뀜
+const MCLS={꼭:'m-must',희망:'m-want',불가:'m-no'};
+const mcls=m=>m?MCLS[m]||'':'';
+const CONSN={any:'상관없음',want:'연강 선호',avoid:'연강 피함'};
+const R=(a,b)=>Array.from({length:b-a+1},(_,i)=>a+i);
+const SIZES=R(6,12).map(i=>i*5);   // 인원: 30~60명, 5명 단위
+// 칠하기 값 만들기: [[요일들, 교시들, 표시], ...] 뒤에 오는 것이 앞의 것을 덮는다
+function P(spec){const p={};for(const [ds,ss,m] of spec)for(const d of ds)for(const s of ss)p[d+'-'+s]=m;return p}
+const F=(spec,o={})=>({paint:P(spec),lab:false,size:null,pref:null,must:false,etc:'',etcOk:false,...o});
+const emptyF=()=>F([]);
+
+// 가상 데이터: 12개 분반 + 아무도 안 고른 1개. f = 교수님이 선택칸으로 낸 희망 (솔버가 그대로 읽는 값)
+// 요일 0~4 = 월~금, 교시 0~7 = 09:00 10:30 12:00 13:30 15:00 16:30 18:00 19:30. 대부분 칸은 비워 둔다 (안 칠함 = 가능)
+const COURSES0=[
+ {id:'c1',name:'자료구조',sec:'01',prof:'가',year:2,req:true,f:F([[[0,2],[4],'희망']],{lab:true,pref:'정보관',must:true})},
+ {id:'c2',name:'객체지향프로그래밍',sec:'02',prof:'나',year:2,req:true,
+  f:F([[[0,2],[0,1],'불가'],[[0,2],[4],'희망']],{lab:true,pref:'정보관',etc:'실습 조교 1명 배정을 부탁드립니다.'})},
+ {id:'c3',name:'자연언어처리',sec:'01',prof:'다',year:3,req:false,f:F([[[1,3],[0,1],'희망']])},
+ {id:'c4',name:'운영체제',sec:'01',prof:'라',year:3,req:true,f:F([[[1,3],[0],'불가'],[[1,3],[3,4],'희망']],{pref:'정보관'})},
+ {id:'c5',name:'컴퓨터네트워크',sec:'01',prof:'마',year:3,req:false,f:F([[[0,2],[5],'희망']],{pref:'미래관'})},
+ {id:'c6',name:'인공지능',sec:'01',prof:'바',year:3,req:false,f:F([[[0,2],[1],'희망'],[[1,3],[0],'희망']])},
+ {id:'c7',name:'데이터베이스',sec:'01',prof:'사',year:3,req:true,
+  f:F([[[4],[4,5],'불가'],[[1,3],[4],'희망']],{lab:true,pref:'정보관',must:true,etc:'외부 강의가 있어 학기 중 두 번 대강이 필요합니다.'})},
+ {id:'c8',name:'알고리즘',sec:'01',prof:'다',year:2,req:true,f:F([[[1,3],[3,4],'희망']])},
+ {id:'c9',name:'기계학습',sec:'01',prof:'아',year:4,req:false,f:F([[[0,2],[1],'희망']])},
+ {id:'c10',name:'컴퓨터구조',sec:'02',prof:'자',year:2,req:true,f:F([[[4],[0],'불가'],[[0,2],[3],'희망']])},
+ {id:'c11',name:'소프트웨어공학',sec:'01',prof:'차',year:3,req:true,f:F([[[1,3],[6],'불가'],[[1,3],[4],'희망']],{lab:true,pref:'정보관'})},
+ {id:'c12',name:'이산수학',sec:'01',prof:'카',year:1,req:true,f:F([[[0],[0],'불가'],[[0,2],[1],'희망']])},
+ {id:'c13',name:'컴퓨터비전',sec:'01',prof:null,year:4,req:false},
+];
+// 담당 교수는 미리 정해지지 않는다. 위 prof는 그 분반을 고른 교수이고, 아래는 같은 분반을 고른 다른 교수 (담당 겹침 시연)
+const EXTRA_CLAIMS=[{cid:'c9',prof:'바',f:F([[[0,2],[3,4],'희망']],{etc:'인공지능 수업과 같은 요일이면 좋겠습니다.'})}];
+const CONSEC0={다:'avoid'};
+const CAP={c1:50,c2:45,c3:45,c4:60,c5:50,c6:55,c7:40,c8:60,c9:45,c10:60,c11:40,c12:50,c13:40};   // 교수님이 고르는 인원의 기본값 (가상)
+const PROFS=['가','나','다','라','마','바','사','아','자','차','카'];
+const kindOf=c=>c.year===1&&c.req?'전공기초':c.req?'전공필수':'전공선택';
+// 시연용 가상 회신 (차수 → 분반 → 답장)
+const SCRIPT={1:{c2:'A나 B 괜찮아요. 수요일은 17시 전에 끝나야 해요.',c11:'셋 다 어렵습니다. 화요일, 목요일 오전이면 됩니다.'},2:{c11:'A로 할게요.'}};
+const BOT_EX=['객체지향은 왜 밀렸어?','그 강의 C안으로 옮기면?','화요일 오전 비우면?','정보관 305 공사하면?','다 교수 강의 옮겨줘','알고리즘 화·목 16:30으로','지금 조율 중인 거 뭐 있어?','점심 메뉴 추천해줘'];
+
+// ---------------- 상태 ----------------
+const clone=o=>JSON.parse(JSON.stringify(o));
+const mkClaim=(cid,prof,f)=>({cid,prof,f:{...f,size:f.size||CAP[cid]||40}});
+function init(){
+  const src=clone(COURSES0);
+  const courses=src.map(({prof,f,...c})=>({...c}));
+  const claims=[...src.filter(c=>c.prof).map(c=>mkClaim(c.id,c.prof,c.f)),...clone(EXTRA_CLAIMS).map(x=>mkClaim(x.cid,x.prof,x.f))];
+  const s={role:'ta',prof:'나',view:'home',stage:'collect',round:0,courses,claims,pick:{},excl:{},consec:clone(CONSEC0),
+    assign:{},status:{},blocker:{},reason:{},why:{},conds:{},moved:{},msgs:[],log:[],lastChanged:[],reveal:true,editing:null,room:'all',
+    bot:{turns:[],last:null,pending:null},botOpen:false,botSeen:false,botFocus:false,
+    method:'llm',llmFail:false,pair:{},
+    ttOpen:false,peek:null,autoReply:true,confirms:[],mineOnly:false};   // method = 회신 해석 방식 (API: keyword | llm), peek = 시간표에 미리 볼 대안 {m,k}
+  s.log.push({at:'희망 수집',t:`교수 ${new Set(claims.map(x=>x.prof)).size}명이 개설 분반 ${courses.length}개 중 맡을 분반을 골라 희망 ${claims.length}건을 냈습니다 (가상).`});
+  return s;
+}
+// 담당 정리: 한 명만 고르면 그 교수, 여럿이면 조교가 고른 교수, 아무도 없으면 담당 없음
+function sync(){
+  for(const c of S.courses){
+    const cl=S.claims.filter(x=>x.cid===c.id);
+    const pick=S.excl[c.id]?null:(S.pick[c.id]&&cl.find(x=>x.prof===S.pick[c.id]))||(cl.length===1?cl[0]:null);
+    c.own=S.excl[c.id]?'excl':pick?'ok':cl.length>1?'dup':'none';
+    c.prof=pick?pick.prof:null;c.f=pick?pick.f:null;c.byTA=pick?!!pick.byTA:false;
+  }
+}
+const ACT=()=>S.courses.filter(c=>c.own==='ok');
+const claimOf=(cid,prof)=>S.claims.find(x=>x.cid===cid&&x.prof===prof);
+const etcTodo=()=>ACT().filter(c=>c.f.etc&&!c.f.etcOk).length;
+const todo=()=>S.courses.filter(c=>c.own==='dup'||c.own==='none').length+etcTodo();
+let S=init();sync();
+let BLOCK=null;   // AI 도우미의 가정 계산에서만 쓰는 임시 제약
+let FAIL=null;
+
+// ---------------- 도우미 ----------------
+const E=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const C=id=>S.courses.find(c=>c.id===id);
+const full=c=>`${c.name} ${c.sec}`;
+const ROOM=id=>ROOMS.find(r=>r.id===id);
+const mins=i=>{const [h,m]=SLOTS[i].split(':').map(Number);return h*60+m};
+const endMin=i=>mins(i)+75;
+const endOf=i=>{const t=endMin(i);return `${String(Math.floor(t/60)).padStart(2,'0')}:${String(t%60).padStart(2,'0')}`};
+const roomText=(p,rm)=>rm[0]===rm[1]?rm[0]:`${DAYN[PAT[p].days[0]]} ${rm[0]} / ${DAYN[PAT[p].days[1]]} ${rm[1]}`;
+const altLabel=a=>`${PAT[a.pat].label} ${SLOTS[a.slot]}~${endOf(a.slot)} · ${roomText(a.pat,a.rooms)}`;
+const chip=(t,k='')=>`<span class="chip ${k}">${E(t)}</span>`;
+const log=(at,t)=>S.log.push({at,t});
+const hr=h=>h<8?h+12:h;
+function slotOf(h,m=0){const t=h*60+m;let best=0,bd=1e9;SLOTS.forEach((_,i)=>{const d=Math.abs(mins(i)-t);if(d<bd){bd=d;best=i}});return best}
+const stageIdx=()=>({collect:0,draft:1,round:2,review:3,confirm:3,final:4})[S.stage];
+const openMsgs=()=>S.msgs.filter(m=>m.round===S.round&&S.stage==='round');
+// 조사 고르기 (받침 유무). 숫자는 읽는 소리로 본다
+function jong(w){const ch=String(w).trim().slice(-1);const dg={0:21,1:8,2:0,3:16,4:0,5:0,6:1,7:8,8:8,9:0};
+  if(ch in dg)return dg[ch];const k=ch.charCodeAt(0)-0xAC00;return k>=0&&k<11172?k%28:0}
+const jo=(w,a,b)=>w+(jong(w)?a:b);
+const ro=w=>{const j=jong(w);return w+(j&&j!==8?'으로':'로')};
+
+// ---------------- 희망 (선택칸 값을 그대로 읽는다) ----------------
+const mk=(f,d,s)=>f.paint[d+'-'+s]||null;
+const isWant=m=>m==='꼭'||m==='희망';
+const hardOk=(c,p,s)=>!PAT[p].days.some(d=>mk(c.f,d,s)==='불가');
+// 희망 자리: 두 요일 모두 꼭/희망인 (요일 짝, 시각). 없으면 한쪽만 칠한 것
+function wishedF(f){const both=[],part=[];
+  for(const p of PKEYS)for(let s=0;s<SLOTS.length;s++){
+    const ms=PAT[p].days.map(d=>mk(f,d,s));if(ms.includes('불가'))continue;
+    if(isWant(ms[0])&&isWant(ms[1]))both.push({pat:p,slot:s});else if(isWant(ms[0])||isWant(ms[1]))part.push({pat:p,slot:s});}
+  return both.length?both:part}
+const wished=c=>wishedF(c.f);
+const strengthF=f=>f.must?'꼭':'선호';
+const wishOkAt=(c,p,s)=>{const W=wished(c);return !W.length||W.some(w=>w.pat===p&&w.slot===s)};
+// 요일마다 희망 칸을 모으고, 희망 시각이 같은 요일끼리 묶어서 적는다 (예: 월·수 15:00)
+function wishText(f,room=true){
+  const groups=[];
+  for(const d of D5){const ss=R(0,SLOTS.length-1).filter(s=>isWant(mk(f,d,s)));if(!ss.length)continue;
+    const g=groups.find(x=>x.key===ss.join());if(g)g.days.push(d);else groups.push({key:ss.join(),days:[d],ss})}
+  if(!groups.length)return '희망 시간 없음';
+  const runs=ss=>{const o=[];let i=0;while(i<ss.length){let j=i;while(j+1<ss.length&&ss[j+1]===ss[j]+1)j++;o.push(i===j?SLOTS[ss[i]]:SLOTS[ss[i]]+'~'+endOf(ss[j]));i=j+1}return o.join(', ')};
+  return groups.map(g=>`${g.days.map(d=>DAYN[d]).join('·')} ${runs(g.ss)}`).join(' / ')+(room&&f.pref&&f.pref.includes(' ')?' · '+f.pref:'')}
+const wishLabel=c=>wishText(c.f);
+function cellsOf(f,m){return Object.entries(f.paint).filter(([,v])=>v===m).map(([k])=>{const [d,s]=k.split('-').map(Number);return `${DAYN[d]} ${SLOTS[s]}`})}
+function fJson(c){return JSON.stringify({분반:full(c),담당:c.prof+' 교수',희망자리:wishText(c.f,false),꼭:!!c.f.must,희망:cellsOf(c.f,'희망'),불가:cellsOf(c.f,'불가'),
+  인원:c.f.size+'명',실습실:c.f.lab?'필요':'필요 없음',건물선호:c.f.pref,연강:CONSN[S.consec[c.prof]||'any'],기타요청:c.f.etc?'조교가 직접 확인 (자동 배정에 안 들어감)':null},null,1)}
+function fChips(f,prof){const a=[],cnt=m=>Object.values(f.paint).filter(x=>x===m).length;
+  a.push(wishedF(f).length?chip('희망 '+wishText(f,false),'good'):chip('희망 시간 없음 (아무 때나)'));
+  if(f.must)a.push(chip('꼭 (희망 시간 아니면 어려움)','warn'));
+  if(cnt('불가'))a.push(chip(`불가 ${cnt('불가')}칸`,'bad'));
+  a.push(chip(`인원 ${f.size}명`));
+  if(f.lab)a.push(chip('실습실 필요','lab'));
+  if(f.pref)a.push(chip(f.pref.includes(' ')?f.pref:f.pref+' 선호'));
+  if(prof&&S.consec[prof]&&S.consec[prof]!=='any')a.push(chip(CONSN[S.consec[prof]]));
+  if(f.etc)a.push(chip(f.etcOk?'기타 요청 · 조교 확인함':'기타 요청 · 조교 확인 전',f.etcOk?'good':'warn'));
+  return a.join('');}
+function miniMap(f){let h=`<div class="mm" aria-hidden="true"><span></span>${D5.map(d=>`<span>${DAYN[d]}</span>`).join('')}`;
+  SLOTS.forEach((t,k)=>{h+=`<span>${t.slice(0,2)}</span>`+D5.map(d=>{const m=mk(f,d,k);return `<span class="mc ${mcls(m)}" title="${DAYN[d]} ${t} ${m||'가능'}"></span>`}).join('')});
+  return h+'</div>'}
+
+// ---------------- NLP: 조율 회신 해석 (시안: 키워드 규칙으로 흉내. 실제는 backend/app/nlp/coord.py parse_reply) ----------------
+// 돌려주는 모양은 API 명세 ReplyParse와 같다: {kind, picks, conditions:{day_slots, end_before}, note, method, fallback, fallback_reason}
+const emptyCond=()=>({day_slots:{},end_before:[]});
+const hasCond=k=>!!k&&(Object.keys(k.day_slots||{}).length>0||(k.end_before||[]).length>0);
+const NOTE_RE=/[^.。!?\n]*(강의실\s*\d{3}|계단식|PC|컴퓨터|빔\s*프로젝터|마이크|칠판|조정\s*희망)[^.。!?\n]*/;
+const winOf=t=>/늦은\s*오후/.test(t)?[5,7]:/오전/.test(t)?[0,1]:/저녁/.test(t)?[6,7]:/오후/.test(t)?[3,5]:null;
+function parseReply(text,choice,alts,method){
+  const t=(text||'').trim(),cond=emptyCond();
+  let rest=t,picks=[...t.matchAll(/(?<![A-Za-z])([ABC])(?![A-Za-z])/g)].map(m=>m[1]);
+  [...t.matchAll(/(첫|두|세)\s*번째/g)].forEach(m=>picks.push({첫:'A',두:'B',세:'C'}[m[1]]));
+  if(choice&&choice!=='none')picks.unshift(choice);
+  const none=choice==='none'||/(셋\s*다|모두|전부|다)\s*(어렵|안\s?되|안\s?돼|불가|힘들)/.test(t);
+  picks=none?[]:[...new Set(picks)];
+  for(const m of t.matchAll(/([월화수목금])요?일?[은는]?\s*(\d{1,2})시\s*(반)?\s*(?:전|이전|까지)/g)){
+    rest=rest.replace(m[0],' ');
+    const day=DAYN.indexOf(m[1]),lim=hr(+m[2])*60+(m[3]?30:0);
+    // 고른 안이 15분 이내로만 넘기면 교수 재량으로 보고 조건에 넣지 않는다 (EARLY_END_MIN)
+    const picked=picks.map(k=>(alts||[]).find(a=>a.k===k)).filter(a=>a&&PAT[a.pat].days.includes(day));
+    if(picked.length&&picked.every(a=>endMin(a.slot)<=lim+EARLY_END_MIN))continue;
+    cond.end_before.push({day,time:toHM(lim)});
+  }
+  if(!picks.length){
+    const ds=[];[...rest.matchAll(/([월화수목금])(?=[·\s,\/요]|$)/g)].forEach(m=>{const d=DAYN.indexOf(m[1]);if(!ds.includes(d))ds.push(d)});
+    const win=winOf(rest),ss=win?R(win[0],win[1]).map(i=>SLOTS[i]):[];
+    (ds.length?ds.sort():win?D5:[]).forEach(d=>{cond.day_slots[String(d)]=ss});   // 빈 목록 = 그 요일은 아무 교시나
+  }
+  const neg=/(어렵|안\s?되|안\s?돼|불가|힘들)/.test(t);
+  let kind=picks.length?(hasCond(cond)?'조건부':'수용'):(none||neg?'거절':hasCond(cond)?'조건부':'확인 필요');
+  // 언어 모델: 시연 화면은 부르지 않는다. 장비·강의실 요청 문장만 note로 흉내 내고, '실패 흉내'를 켜면 fallback 규칙을 보여 준다
+  let note='',used='keyword',fallback=false,fallback_reason='';
+  if(method==='llm'){
+    if(S.llmFail){fallback=true;fallback_reason='503 과부하';
+      if(!(choice&&choice!=='none')&&(kind==='수용'||kind==='조건부')){note=`AI 해석 실패(${fallback_reason}). 키워드 추정: ${picks.join('·')} ${kind}`;kind='확인 필요'}}
+    else{used='llm';const m=t.match(NOTE_RE);if(m){note=m[0].trim();if(kind==='수용')kind='조건부'}}
+  }
+  return {kind,picks,conditions:cond,note,method:used,fallback,fallback_reason};
+}
+function condLabel(k){const a=[],ds=(k&&k.day_slots)||{},keys=Object.keys(ds).map(Number).sort();
+  const sl=x=>!x.length?'':x.join()==='09:00,10:30'?' 오전':` ${x[0]}~${endOf(SLOTS.indexOf(x[x.length-1]))}`;
+  if(keys.length){const same=keys.every(d=>ds[d].join()===ds[keys[0]].join());
+    a.push(keys.length===5&&same?`요일 상관없이${sl(ds[keys[0]])}`:same?keys.map(d=>DAYN[d]).join('·')+'요일'+sl(ds[keys[0]]):keys.map(d=>DAYN[d]+sl(ds[d])).join(', '))}
+  ((k&&k.end_before)||[]).forEach(e=>a.push(`${DAYN[e.day]}요일 ${e.time} 전 종료`));
+  return a.join(', ');}
+// 조건 검사: 요일이 둘 이상이면 그 요일들 안에서만, 하나면 그 요일이 들어가기만 하면 된다 (API 명세 day_slots)
+function condOk(p,s,k){
+  const days=PAT[p].days,ds=(k&&k.day_slots)||{},keys=Object.keys(ds);
+  if(keys.length){const okDay=d=>(String(d) in ds)&&(!ds[d].length||ds[d].includes(SLOTS[s]));
+    if(!(keys.length>=2?days.every(okDay):days.some(okDay)))return {ok:false,why:`${condLabel({day_slots:ds})} 조건과 어긋남`}}
+  for(const e of (k&&k.end_before)||[])if(days.includes(e.day)&&endMin(s)>toMin(e.time))return {ok:false,why:`${DAYN[e.day]}요일 ${endOf(s)} 종료 → ${e.time} 전 종료 조건과 어긋남`};
+  return {ok:true,why:'조건과 맞음'};
+}
+function mergeCond(a,b){a=a||emptyCond();b=b||emptyCond();
+  const eb=[...a.end_before.filter(x=>!b.end_before.some(y=>y.day===x.day)),...b.end_before];
+  return {day_slots:Object.keys(b.day_slots).length?b.day_slots:a.day_slots,end_before:eb}}
+
+// ---------------- 솔버 (시안: 우선순위 순서 배정으로 흉내. 실제는 OR-Tools CP-SAT) ----------------
+// 강의실은 요일마다 기록한다 (rooms = [앞 요일, 뒤 요일]). 실습실이 필요하면 실습실만, 정원이 인원보다 작은 방은 뺀다
+const needLab=c=>!!c.f.lab;
+function pairsFor(c){return ROOMS.filter(r=>r.cap>=(c.f.size||0)&&(!c.f.lab||r.lab)).map(r=>[r.id,r.id])}
+// 희망 강의실을 콕 집어 적은 경우, 초안에서는 그 강의실만 본다 (못 쓰면 조율로)
+function strictPairs(c){const pr=c.f.pref;if(!pr||!pr.includes(' '))return pairsFor(c);const P=ROOM(pr);
+  return pairsFor(c).filter(rm=>rm.every((r,i)=>(needLab(c,i)||!P.lab)?r===pr:true));}
+function clash(cid,p,s,rm){
+  const c=C(cid),days=PAT[p].days;
+  if(c.year===1&&s===CHAPEL.slot&&days.includes(CHAPEL.day))return {why:'채플 시간'};
+  if(days.some(d=>isGenCell(d,s)))return {why:'교양필수 시간'};
+  if(BLOCK){if(BLOCK.room&&rm.includes(BLOCK.room))return {why:'못 쓰는 강의실'};
+    if(BLOCK.cells&&days.some(d=>BLOCK.cells.has(d+'-'+s)))return {why:'비우기로 한 시간'};}
+  for(const o of S.courses){
+    if(o.id===cid)continue;const a=S.assign[o.id];
+    if(!a||a.slot!==s)continue;
+    const od=PAT[a.pat].days,share=days.filter(d=>od.includes(d));if(!share.length)continue;   // 겹치는 요일이 있을 때만
+    if(share.some(d=>a.rooms[od.indexOf(d)]===rm[days.indexOf(d)]))return {why:'강의실 겹침',by:o.id};
+    if(o.prof&&o.prof===c.prof)return {why:'교수 겹침',by:o.id};
+    if(o.year===c.year&&o.req&&c.req)return {why:'같은 학년 전공필수 겹침',by:o.id};
+  }
+  return null;
+}
+// 소프트 비용: 칠한 칸 + 희망 자리와의 거리 + 강의실 + 연강
+// 희망 자리와의 거리: 시각 차이 + 희망에 없는 요일 하나당 3
+function dist(c,p,s){const W=wished(c);if(!W.length)return 0;
+  return Math.min(...W.map(w=>Math.abs(w.slot-s)+3*PAT[p].days.filter(d=>!PAT[w.pat].days.includes(d)).length));}
+function roomCost(c,rm){let v=0;const pr=c.f.pref;
+  rm.forEach((r,i)=>{const X=ROOM(r),nl=needLab(c,i);
+    if(!nl&&X.lab)v+=3;
+    if(pr){if(pr.includes(' ')){const Q=ROOM(pr);if(nl||!Q.lab)v+=r===pr?0:X.bldg===Q.bldg?2.25:3;else v+=X.bldg===Q.bldg?0:1.5}
+      else v+=X.bldg===pr?0:1.5}
+    v+=ROOMS.indexOf(X)*0.01;});
+  return v+(rm[0]!==rm[1]?0.3:0);}
+function consecCost(c,p,s){const k=S.consec[c.prof]||'any';if(k==='any')return 0;
+  const adj=S.courses.some(o=>o.id!==c.id&&o.prof===c.prof&&S.assign[o.id]&&PAT[S.assign[o.id].pat].days.some(d=>PAT[p].days.includes(d))&&Math.abs(S.assign[o.id].slot-s)===1);
+  return adj?(k==='avoid'?3:-1):0;}
+function cost(c,p,s,rm){const cc=m=>isWant(m)?0:1;
+  return PAT[p].days.reduce((v,d)=>v+cc(mk(c.f,d,s)),0)+dist(c,p,s)+roomCost(c,rm)+consecCost(c,p,s);}
+function genAlts(c,k=emptyCond()){
+  const list=[];
+  for(const p of PKEYS)for(const s of R(0,SLOTS.length-1)){
+    if(!hardOk(c,p,s)||!condOk(p,s,k).ok)continue;
+    for(const rm of pairsFor(c)){if(clash(c.id,p,s,rm))continue;list.push({pat:p,slot:s,rooms:rm,score:cost(c,p,s,rm)})}}
+  list.sort((a,b)=>a.score-b.score||a.slot-b.slot);
+  const out=[],seen=new Set();
+  for(const a of list){const key=a.pat+a.slot;if(!seen.has(key)){seen.add(key);out.push(a)}if(out.length===3)break}
+  for(const a of list){if(out.length>=3)break;if(!out.includes(a))out.push(a)}
+  return out.slice(0,3).map((a,i)=>({pat:a.pat,slot:a.slot,rooms:a.rooms,k:'ABC'[i]}));
+}
+function makeDraft(){
+  S.assign={};S.status={};S.blocker={};S.reason={};S.why={};S.conds={};S.moved={};
+  const allSpots=c=>PKEYS.flatMap(p=>R(0,SLOTS.length-1).map(s=>({pat:p,slot:s})));
+  const spots=c=>{const W=wished(c);return W.length?W:allSpots(c)};
+  const key=c=>(strengthF(c.f)==='꼭'?0:100)+(c.f.lab?0:50)+spots(c).length;
+  const order=ACT().sort((a,b)=>key(a)-key(b)||S.courses.indexOf(a)-S.courses.indexOf(b));
+  const bumped=[];
+  for(const c of order){
+    let best=null;
+    for(const w of spots(c)){if(!hardOk(c,w.pat,w.slot))continue;
+      for(const rm of strictPairs(c)){if(clash(c.id,w.pat,w.slot,rm))continue;const sc=cost(c,w.pat,w.slot,rm);
+        if(!best||sc<best.sc)best={pat:w.pat,slot:w.slot,rooms:rm,sc};}}
+    if(best){S.assign[c.id]={pat:best.pat,slot:best.slot,rooms:best.rooms};S.status[c.id]='done'}else bumped.push(c);
+  }
+  for(const c of bumped){
+    const w=spots(c).filter(x=>hardOk(c,x.pat,x.slot))[0];
+    const xs=w?strictPairs(c).map(rm=>clash(c.id,w.pat,w.slot,rm)).filter(Boolean):[];   // 어느 강의실이든 걸리는 이유(교수·전공필수)를 먼저 알린다
+    const x=xs.find(y=>y.why!=='강의실 겹침')||xs[0]||{why:'자리 없음'};
+    const b=x.by?C(x.by):null;
+    const pr=!b?'':strengthF(b.f)==='꼭'&&strengthF(c.f)!=='꼭'?"상대 희망에 '꼭' 표시":b.f.lab&&!c.f.lab?'상대 강의가 실습실 필요':'종합 우선순위';
+    S.blocker[c.id]=x.by||null;S.why[c.id]={by:x.by||null,why:x.why,pr};
+    S.reason[c.id]=b?`${full(b)}(${b.prof} 교수)와 ${x.why} · 우선순위: ${pr}`:x.why;
+    const alts=genAlts(c);
+    if(alts.length){S.assign[c.id]={pat:alts[0].pat,slot:alts[0].slot,rooms:alts[0].rooms,temp:true};S.status[c.id]='open'}
+  }
+  S.stage='draft';S.lastChanged=[];
+  log('초안',`초안을 자동으로 만들었습니다. 희망대로 ${ACT().length-bumped.length}개, 조율 필요 ${bumped.length}개 (${bumped.map(full).join(', ')}).`);
+}
+// ---------------- NLP: 조율 메시지 (시안: 틀에 값을 넣어 흉내. 실제는 LLM이 쓰고 코드가 검사) ----------------
+function msgText(c,round,alts,b,k){
+  const L=[`${c.prof} 교수님, 안녕하세요. 학과사무실입니다.`,`2027-1학기 ${full(c)} 분반 시간표 ${round}차 조율 안내드립니다.`,''];
+  if(round===1)L.push(`희망하신 시간(${wishLabel(c)})이 ${S.reveal&&b?`${b.prof} 교수님의 ${b.name} ${b.sec} 분반과`:'다른 강의와'} 겹칩니다.`);
+  else{L.push(hasCond(k)?`지난 회신에서 주신 조건(${condLabel(k)})을 반영해 대안을 다시 드립니다.`:'지난 차수 이후 바뀐 시간표를 반영해 대안을 다시 드립니다.');
+    L.push(`처음 희망하신 시간: ${wishLabel(c)}`);}
+  L.push('');
+  alts.forEach(a=>L.push(`${a.k}  ${altLabel(a)}`));
+  L.push('','가능한 안을 골라 주시거나, 모두 어려우시면 가능한 시간을 적어 주세요. 회신 기한은 1주이며, 기한 전에 한 번 더 알려 드립니다.');
+  return L.join('\n');
+}
+function sendMsg(cid){
+  const c=C(cid),b=S.blocker[cid]?C(S.blocker[cid]):null,alts=genAlts(c,S.conds[cid]||emptyCond());
+  const text=msgText(c,S.round,alts,b,S.conds[cid]);
+  S.msgs.push({id:'m'+(S.msgs.length+1),cid,round:S.round,alts,blocker:b?b.id:null,text,text0:text,sent:false,reply:null,parsed:null,decision:null});
+}
+// NLP: 메시지 검사 (API check_message 흉내). 빈 목록 = 통과
+function checkMessage(text,m){
+  const c=C(m.cid),b=m.blocker?C(m.blocker):null,p=[];
+  if(/연차|임용|우선순위|경력|꼭 표시/.test(text))p.push('연차·임용·우선순위 같은 이유가 들어 있습니다');
+  if(b&&b.f&&b.f.etc&&text.includes(b.f.etc))p.push('상대 교수의 기타 요청(메시지에 나오면 안 되는 글)이 들어 있습니다');
+  if(!S.reveal&&b&&(text.includes(`${b.prof} 교수님`)||text.includes(full(b))))p.push('이름 숨김 설정인데 상대 교수·분반 이름이 들어 있습니다');
+  if(!text.includes(full(c)))p.push(`과목·분반(${full(c)})이 빠졌습니다`);
+  if(!text.includes(wishLabel(c)))p.push('본인 희망 시간이 빠졌습니다');
+  const bad=m.alts.filter(a=>!text.includes(`${a.k}  ${altLabel(a)}`)).map(a=>a.k);
+  if(bad.length)p.push(`대안 줄이 빠지거나 바뀌었습니다 (${bad.join('·')}안)`);
+  return p;
+}
+function publish(){
+  S.stage='round';S.round=1;
+  Object.keys(S.status).filter(id=>S.status[id]==='open').forEach(sendMsg);
+  log('1차 조율',`초안을 모든 교수에게 공개했습니다. 밀린 분반 ${openMsgs().length}건의 조율 메시지 초안을 만들었습니다. 조교가 확인하고 [보내기]를 눌러야 갑니다.`);
+}
+// ---------------- 최종 시간표 확정 요청 → 교수 [확정] 회신 ----------------
+const profsWithCourses=()=>[...new Set(ACT().filter(c=>S.assign[c.id]).map(c=>c.prof))];
+function confirmText(prof){
+  const cs=ACT().filter(c=>c.prof===prof&&S.assign[c.id]);
+  return [`${prof} 교수님, 안녕하세요. 학과사무실입니다.`,'2027-1학기 시간표 조율이 끝나 최종 시간표를 보내 드립니다.','',
+    ...cs.map(c=>`- ${full(c)} · ${altLabel(S.assign[c.id])}`),'',
+    '내용이 맞으면 [확정]을 눌러 회신해 주세요. 바꿔야 할 것이 있으면 회신에 적어 주시면 학과사무실에서 연락드리겠습니다.'].join('\n');
+}
+function sendConfirms(){
+  S.confirms=profsWithCourses().map((prof,i)=>({id:'k'+(i+1),prof,text:confirmText(prof),reply:null,seen:false}));
+  S.stage='confirm';
+  log('확정 요청',`교수님 ${S.confirms.length}명께 최종 시간표와 확정 요청 메시지를 보냈습니다.`);
+  S.confirms.forEach((k,i)=>later(()=>autoConfirm(k),i));
+}
+function receiveConfirm(k,note,from){
+  if(k.reply)return;k.reply={note:note||'',from};
+  log('확정 요청',`${k.prof} 교수님 확정${note?` · 메모 "${note}"`:''}${from==='조교 직접 처리'?' (조교가 직접 처리)':''}`);
+  if(S.confirms.every(x=>x.reply)){S.stage='final';log('확정','모든 교수님이 확정했습니다. 엑셀로 내보내 SAP에 입력하면 됩니다.');toast('모든 교수님이 확정했습니다 · 내보낼 수 있습니다')}
+}
+// ---------------- 가상 회신 자동 도착 (시연용): 다른 화면에 있어도 알림과 메뉴 숫자로 알려 준다 ----------------
+const AUTO_MS=4000,AUTO_GAP=2500;
+function later(fn,i=0){if(S.autoReply)setTimeout(fn,AUTO_MS+i*AUTO_GAP)}
+function busyRetry(fn){if(PAINT){setTimeout(fn,600);return true}return false}
+function autoReply(m){
+  if(!S.msgs.includes(m)||m.reply||!m.sent||S.stage!=='round'||m.round!==S.round||!S.autoReply)return;
+  const c=C(m.cid);if(S.role==='prof'&&S.prof===c.prof)return;   // 교수 화면에서 직접 답장하는 중이면 기다린다
+  if(busyRetry(()=>autoReply(m)))return;
+  receive(m,(SCRIPT[m.round]||{})[m.cid]||'A로 할게요.',null,'가상 회신');
+  log(`${m.round}차 조율`,`${full(c)}: ${c.prof} 교수님 답장 도착`);
+  toast(`${c.prof} 교수님이 회신했습니다 · ${full(c)}`);render({keep:true});
+}
+function autoConfirm(k){
+  if(!S.confirms.includes(k)||k.reply||S.stage!=='confirm'||!S.autoReply)return;
+  if(S.role==='prof'&&S.prof===k.prof)return;
+  if(busyRetry(()=>autoConfirm(k)))return;
+  receiveConfirm(k,'','가상 회신');
+  if(S.stage!=='final')toast(`${k.prof} 교수님이 시간표를 확정했습니다`);
+  render({keep:true});
+}
+// 조건 대조 → 처리안. 모양은 API 명세 Proposal과 같다: {action:'move'|'next'|'decide', key, conditions, text, checks:[{key,ok,why}]}
+function check(m){
+  const r=m.parsed,cond=r.conditions,last=S.round>=3;
+  const decide=(checks,text)=>({action:'decide',key:null,conditions:cond,checks,text});
+  const LAST='3차라 더 묻지 않습니다. [수정]이나 [현재대로 유지]로 정해 주세요.';
+  if(r.kind==='확인 필요')return decide([],r.fallback?'AI 해석이 실패해 키워드로만 읽었습니다. [수정]으로 직접 정해 주세요.':'AI가 답장을 확실히 읽지 못했습니다. [수정]으로 직접 정해 주세요.');
+  if(r.picks.length){
+    const checks=r.picks.map(key=>{const a=m.alts.find(x=>x.k===key);if(!a)return {key,ok:false,why:'없는 안'};
+      const fit=condOk(a.pat,a.slot,cond);
+      return fit.ok&&clash(m.cid,a.pat,a.slot,a.rooms)?{key,ok:false,why:'그사이 다른 강의가 들어감'}:{key,...fit}});
+    const g=checks.find(x=>x.ok);
+    if(g)return {action:'move',key:g.key,conditions:cond,checks,text:`${g.key}안(${altLabel(m.alts.find(x=>x.k===g.key))})으로 옮길까요?`};
+    return last?decide(checks,LAST):{action:'next',key:null,conditions:cond,checks,text:'고른 안이 모두 조건과 어긋납니다. 조건을 넣어 다음 차수 대안을 만들까요?'};
+  }
+  if(last)return decide([],LAST);
+  return {action:'next',key:null,conditions:cond,checks:[],text:hasCond(cond)?`새 조건(${condLabel(cond)})으로 다음 차수 대안을 만들까요?`:'다른 조건 없이 거절했습니다. 다음 차수 대안을 만들까요?'};
+}
+// 처리안 → 조교 결정 (내부 값)
+const toDecision=(pr,kind)=>({kind,action:pr.action==='move'?{type:'move',k:pr.key}:{type:'next',conds:pr.conditions}});
+function receive(m,text,choice,from){m.reply={text,choice:choice||null,from};m.parsed=parseReply(text,choice,m.alts,S.method);m.decision=null}
+const sameSpot=(a,b)=>a.pat===b.pat&&a.slot===b.slot&&a.rooms.join()===b.rooms.join();
+function resolveRound(){
+  const prev=clone(S.assign),next=[],rd=S.round;S.peek=null;
+  for(const m of openMsgs()){
+    const c=C(m.cid),d=m.decision;
+    if(!d){next.push(c.id);log(`${rd}차 재배정`,`${full(c)}: ${m.sent?'처리안 미확정':'메시지를 보내지 않음'} → 다음 차수에 다시 묻기`);continue}
+    if(d.action.type==='move'){
+      const a=m.alts.find(x=>x.k===d.action.k);
+      if(!clash(c.id,a.pat,a.slot,a.rooms)){S.assign[c.id]={pat:a.pat,slot:a.slot,rooms:a.rooms};S.status[c.id]='done'}
+      else{next.push(c.id);log(`${rd}차 재배정`,`${full(c)}: ${a.k}안 자리가 찼음 → 다음 차수`)}
+    }else if(d.action.type==='keep'){S.assign[c.id].temp=false;S.status[c.id]='done'}
+    else{S.conds[c.id]=mergeCond(S.conds[c.id],d.action.conds);next.push(c.id)}
+  }
+  S.lastChanged=S.courses.filter(c=>{const a=prev[c.id],b=S.assign[c.id];return a&&b&&!sameSpot(a,b)}).map(c=>c.id);
+  log(`${rd}차 재배정`,`확인된 처리안만 반영하고 나머지 배정은 유지했습니다. 바뀐 분반 ${S.lastChanged.length}개${S.lastChanged.length?' ('+S.lastChanged.map(id=>full(C(id))).join(', ')+')':''}.`);
+  if(next.length&&S.round<3){S.round++;next.forEach(sendMsg);log(`${S.round}차 조율`,`남은 ${next.length}건의 ${S.round}차 메시지 초안을 만들었습니다.`)}
+  else{
+    next.forEach(id=>{S.assign[id].temp=false;S.status[id]='done';log('확정',`${full(C(id))}: 3차 후 조교가 결정 (임시 배치 유지)`)});
+    S.stage='review';log('조율 끝','남은 겹침이 없습니다. 최종 시간표를 교수님께 보내 확정을 받아 주세요.');
+  }
+}
+function violations(){const set=new Set();
+  for(const c of ACT()){const a=S.assign[c.id];if(!a)continue;const x=clash(c.id,a.pat,a.slot,a.rooms);
+    if(x)set.add(x.by?[c.id,x.by].sort().join():c.id+x.why);if(!hardOk(c,a.pat,a.slot))set.add(c.id+'불가')}
+  return set.size}
+function exportCsv(){
+  const rows=[['학년','과목','분반','교수','요일','시작','종료','강의실','비고']];
+  ACT().forEach(c=>{const a=S.assign[c.id];if(!a)return;rows.push([c.year,c.name,c.sec,c.prof+' 교수',PAT[a.pat].label,SLOTS[a.slot],endOf(a.slot),roomText(a.pat,a.rooms),S.moved[c.id]?'AI 도우미로 조정':S.reason[c.id]?'조율 후 확정':''])});
+  const csv='\uFEFF'+rows.map(r=>r.map(v=>`"${String(v).replace(/"/g,'""')}"`).join(',')).join('\r\n');
+  const u=URL.createObjectURL(new Blob([csv],{type:'text/csv'}));const a=document.createElement('a');a.href=u;a.download='SSUroom_2027-1_시간표_가상.csv';a.click();setTimeout(()=>URL.revokeObjectURL(u),1000);
+}
+
+// ---------------- NLP: AI 도우미 (시안: 키워드 규칙으로 흉내. 실제는 LLM이 의도·정보를 JSON으로 뽑고 솔버 도구를 부름) ----------------
+const ALIAS={객프:'c2',객체지향:'c2',자구:'c1',소공:'c11',운체:'c4',컴네:'c5',네트워크:'c5',자연어:'c3',인공지능:'c6',데베:'c7',디비:'c7',알고리즘:'c8',기계학습:'c9',머신러닝:'c9',컴구:'c10',이산:'c12',비전:'c13'};
+function parseCmd(t){
+  const q={intent:null,courses:[],prof:null,coref:false,alt:null,pat:null,day:null,slot:null,win:null,room:null,raw:t};
+  for(const c of S.courses)if(t.includes(c.name))q.courses.push(c.id);
+  for(const [a,id] of Object.entries(ALIAS))if(t.includes(a)&&!q.courses.includes(id))q.courses.push(id);
+  const pm=t.match(/([가나다라마바사아자차카])\s*교수/);if(pm)q.prof=pm[1];
+  q.coref=/그\s*(강의|수업|과목|분반|거)|그거|아까\s*(그|거|강의)|방금\s*(그|거|강의)/.test(t);
+  const am=t.match(/(?<![A-Za-z])([ABC])(?![A-Za-z])/);if(am)q.alt=am[1];
+  const pp=t.match(/([월화수목금])(?:요일)?\s*(?:과|와|하고|[·,\/])?\s*([월화수목금])(?!업|정|강|학)/);
+  if(pp&&pp[1]!==pp[2])q.pat=patOf(DAYN.indexOf(pp[1]),DAYN.indexOf(pp[2]));
+  else{const dm=t.match(/([월화수목금])요일/)||t.match(/(?:^|\s)([월화수목금])(?=\s|$)/);if(dm)q.day=DAYN.indexOf(dm[1])}
+  const tm=t.match(/(\d{1,2})(?::(\d{2})|\s*시(\s*반)?)/);if(tm)q.slot=slotOf(hr(+tm[1]),tm[2]?+tm[2]:tm[3]?30:0);
+  if(/오전/.test(t))q.win=[0,1];else if(/저녁/.test(t))q.win=[6,7];else if(/오후/.test(t))q.win=[3,5];
+  const rm=t.match(/(201|410|210|305|306)/);if(rm)q.room=ROOMS.find(r=>r.id.endsWith(rm[1])).id;
+  if(/왜|이유|어째서/.test(t))q.intent='explain';
+  else if(q.room&&/(못\s*쓰|공사|막|빼|없으면|안\s*되|닫)/.test(t))q.intent='room';
+  else if((q.day!=null||q.pat)&&!q.courses.length&&!q.coref&&!q.prof&&/(비우|빼|막|안\s*되|없애|쉬)/.test(t))q.intent='block';
+  else if(/(옮기|옮겨|바꾸|바꿔|이동|넣어|넣으)/.test(t))q.intent=/(면|어때|될까|\?)/.test(t)?'whatif':'move';
+  else if(/(뭐|몇|목록|남은|현황|상황|어디|있어|알려)/.test(t))q.intent='status';
+  return q;
+}
+const hasInfo=q=>q.courses.length||q.prof||q.coref||q.alt||q.room||q.slot!=null||q.pat||q.day!=null||q.win;
+function botRun(text){
+  const b=S.bot;b.turns.push({who:'ta',text});
+  let q=parseCmd(text);
+  if(!q.intent&&b.pending&&hasInfo(q)){const p=b.pending;
+    q={...p,courses:q.courses.length?q.courses:p.courses,prof:q.prof||p.prof,coref:q.coref||p.coref,alt:q.alt||p.alt,pat:q.pat||p.pat,
+       day:q.day??p.day,slot:q.slot??p.slot,win:q.win||p.win,room:q.room||p.room,raw:p.raw+' → '+text,merged:true};}
+  b.pending=null;
+  b.turns.push(botAnswer(q));
+}
+// 지금 시간표에서 바뀐 것만 고치기: 고정한 분반은 두고, 규칙에 걸리는 분반만 가장 가까운 대안으로 옮긴다
+function repair(fixed){
+  for(let it=0;it<8;it++){let moved=false;
+    for(const o of ACT()){
+      if(fixed.has(o.id))continue;const a=S.assign[o.id];if(!a)continue;
+      if(!clash(o.id,a.pat,a.slot,a.rooms)&&hardOk(o,a.pat,a.slot))continue;
+      const alts=genAlts(o,S.conds[o.id]||{});if(!alts.length){FAIL=o.id;return false}
+      S.assign[o.id]={pat:alts[0].pat,slot:alts[0].slot,rooms:alts[0].rooms,temp:a.temp};fixed.add(o.id);moved=true;}
+    if(!moved)return true;}
+  return false;
+}
+function sim(fn){
+  const base=clone(S.assign);FAIL=null;let ok=false,after;
+  try{ok=fn()}finally{after=clone(S.assign);S.assign=base;BLOCK=null}
+  const changes=ACT().filter(c=>base[c.id]&&after[c.id]&&!sameSpot(base[c.id],after[c.id])).map(c=>({cid:c.id,from:base[c.id],to:after[c.id]}));
+  S.assign=after;const v=violations();S.assign=base;
+  return {ok,after,changes,v};
+}
+function bestRooms(c,p,s,want){let ps=pairsFor(c);if(want)ps=ps.filter(rm=>rm.includes(want));if(!ps.length)return null;
+  const free=ps.filter(rm=>!clash(c.id,p,s,rm)),pool=free.length?free:ps;
+  return pool.slice().sort((x,y)=>cost(c,p,s,x)-cost(c,p,s,y))[0];}
+function explainText(c){
+  const a=S.assign[c.id];if(!a)return `${jo(full(c),'은','는')} 아직 배정 전입니다.`;
+  const here=altLabel(a),w=S.why[c.id];
+  if(S.moved[c.id])return `${jo(full(c),'은','는')} 조교가 AI 도우미로 ${ro(here)} 옮겼습니다 (${S.moved[c.id]}).`;
+  if(w){const b=w.by?C(w.by):null,first=`희망하신 ${wishLabel(c)}`;
+    const HIT={'강의실 겹침':'강의실이 겹쳤습니다','교수 겹침':'담당 교수가 같아 시간이 겹쳤습니다','같은 학년 전공필수 겹침':'같은 학년 전공필수라 시간이 겹쳤습니다'};
+    const hit=b?`${full(b)}(${b.prof} 교수)와 ${HIT[w.why]||w.why}`:`${w.why} 때문에 자리가 없었습니다`;
+    if(S.status[c.id]==='open')return `${full(c)}: ${jo(first,'이','가')} ${hit}. 우선순위(${w.pr})에 따라 이 강의가 밀렸고, 지금은 ${here}에 임시로 두고 ${S.stage==='round'?S.round+'차 조율 중':'조율을 기다리는 중'}입니다.`;
+    return `${full(c)}: ${jo(first,'이','가')} ${hit}. 조율을 거쳐 지금 자리(${here})로 정했습니다.`;}
+  const notes=[];
+  if(c.f.pref&&c.f.pref.includes(' ')&&a.rooms.includes(c.f.pref))notes.push('희망 강의실도 그대로입니다');
+  return `${jo(full(c),'은','는')} ${c.prof} 교수님이 칠한 희망 시간(${wishText(c.f,false)}) 안에서 규칙에 걸리지 않는 자리라 ${here}에 배정했습니다.${notes.length?' '+notes.join(', ')+'.':''}`;
+}
+function statusText(c,prof){
+  const spot=x=>{const a=S.assign[x.id];return a?`${altLabel(a)}${S.status[x.id]==='open'?' (조율 중, 임시)':''}`:'배정 전'};
+  if(c)return `${jo(full(c),'은','는')} 지금 ${spot(c)}입니다.`;
+  if(prof){const cs=ACT().filter(x=>x.prof===prof);return cs.length?`${prof} 교수님 강의는 ${cs.length}개입니다. `+cs.map(x=>`${full(x)}: ${spot(x)}`).join(' / '):`${prof} 교수님이 맡은 강의가 없습니다.`}
+  const dup=S.courses.filter(x=>x.own==='dup').length,none=S.courses.filter(x=>x.own==='none').length;
+  if(S.stage==='collect')return `희망 수집 중입니다. 담당 겹침 ${dup}건, 담당 없음 ${none}건, 기타 요청 확인 ${etcTodo()}건이 남았습니다.`;
+  const open=ACT().filter(x=>S.status[x.id]==='open');
+  return `조율 중인 분반은 ${open.length}개${open.length?` (${open.map(x=>`${full(x)} · ${x.prof} 교수`).join(', ')})`:''}이고, 하드 규칙 위반은 ${violations()}건입니다.`+(S.stage==='round'?` ${S.round}차 회신 대기 ${openMsgs().filter(m=>!m.reply).length}건.`:'');
+}
+function withPreview(T,r,lead,target,raw){
+  T.solver=r.ok?`바뀌는 분반 ${r.changes.length}개 · 하드 규칙 위반 ${r.v}건`:'계산 실패';
+  if(!r.ok){T.text=FAIL?`${lead} ${jo(full(C(FAIL)),'을','를')} 둘 다른 자리가 없어서 할 수 없습니다.`:`${lead} 규칙을 지키는 배치를 찾지 못했습니다.`;return T}
+  if(!r.changes.length){T.text=`${lead} 바뀌는 분반이 없습니다.`;return T}
+  const miss=r.changes.filter(x=>!wishOkAt(C(x.cid),x.to.pat,x.to.slot));
+  const notice=r.changes.filter(x=>x.cid!==target&&S.status[x.cid]==='done');
+  T.text=`${lead} ${r.changes.length}개 분반이 바뀌고 하드 규칙 위반은 ${r.v}건입니다. `
+    +(miss.length?`희망 시간 밖으로 가는 분반은 ${miss.length}개(${miss.map(x=>full(C(x.cid))).join(', ')})입니다.`:'바뀌는 분반은 모두 교수님 희망 시간 안입니다.')
+    +(notice.length?` ${notice.map(x=>`${full(C(x.cid))}(${C(x.cid).prof} 교수)`).join(', ')}는 이미 정해진 강의라, 적용하면 교수님께 변경 안내가 필요합니다.`:'');
+  T.preview={changes:r.changes,after:r.after,base:JSON.stringify(S.assign),state:null,target,raw,v:r.v,notice:notice.length};
+  return T;
+}
+function botAnswer(q){
+  const IN={explain:'이유 설명',room:'가정 실행',block:'가정 실행',whatif:'가정 실행',move:'이동',status:'현황 조회'};
+  const T={who:'bot',intent:q.intent?IN[q.intent]:'범위 밖',info:{},tool:null,solver:null,text:''};
+  if(!q.intent){
+    if(hasInfo(q)){T.intent='확인 필요';T.text='무엇을 할지 알려 주세요. 예: "왜 여기야?", "B안으로 옮겨", "화·목 10:30으로 옮기면?"';S.bot.pending=q;return T}
+    T.text='시간표 편성·조율과 관련된 요청만 처리합니다. 예: "객체지향은 왜 밀렸어?", "화요일 오전 비우면?"';return T}
+  let ids=q.courses.slice();
+  if(!ids.length&&q.coref&&S.bot.last){ids=[S.bot.last];T.info['그 강의']=full(C(S.bot.last))}
+  if(!ids.length&&q.prof){ids=S.courses.filter(c=>c.prof===q.prof).map(c=>c.id);T.info.교수=q.prof+' 교수'}
+  if(['explain','whatif','move'].includes(q.intent)&&ids.length!==1){
+    T.ask=true;S.bot.pending={...q,courses:[],prof:null,coref:false};
+    T.text=ids.length>1?`${q.prof?q.prof+' 교수님 강의가':'해당하는 강의가'} ${ids.length}개입니다: ${ids.map(id=>full(C(id))).join(', ')}. 어느 강의인가요?`:'어느 강의인가요? 과목 이름으로 알려 주세요.';
+    return T}
+  if(q.intent==='status'&&!q.courses.length&&!T.info['그 강의']&&q.prof){
+    T.tool=`status(교수="${q.prof}")`;T.solver='현재 시간표 조회';T.text=statusText(null,q.prof);return T}
+  const c=ids.length===1?C(ids[0]):null;
+  if(c){if(!T.info['그 강의'])T.info.분반=full(c);S.bot.last=c.id}
+  if(q.intent==='status'){
+    T.tool=c?`status(분반="${full(c)}")`:'status()';T.solver='현재 시간표 조회';
+    T.text=statusText(c,null);return T}
+  if(S.stage==='collect'){T.text='아직 초안이 없습니다. 희망 확인을 마치고 초안을 만든 뒤에 계산할 수 있습니다.';return T}
+  if(c&&c.own!=='ok'){T.text=`${jo(full(c),'은','는')} 담당 교수가 정해지지 않아 배정 전입니다.`;return T}
+  if(q.intent==='explain'){T.tool=`explain(분반="${full(c)}")`;T.solver='배정 기록 조회';T.text=explainText(c);return T}
+  if(q.intent==='whatif'||q.intent==='move'){
+    const cur=S.assign[c.id];let tgt=null;
+    if(q.alt){const m=S.msgs.filter(x=>x.cid===c.id).slice(-1)[0],alts=m?m.alts:genAlts(c,S.conds[c.id]||{}),a=alts.find(x=>x.k===q.alt);
+      T.info.대안=q.alt+'안';if(!a){T.text=`${full(c)}에는 ${q.alt}안이 없습니다.`;return T}tgt={pat:a.pat,slot:a.slot,rooms:a.rooms}}
+    else if(q.slot!=null||q.pat||q.day!=null||q.room||q.win){
+      if(q.day!=null&&!q.pat&&!PAT[cur.pat].days.includes(q.day)){T.ask=true;S.bot.pending={...q,courses:[c.id],day:null};
+        T.text=`수업이 주 2회라 요일이 두 개 필요합니다. ${DAYN[q.day]}요일과 어느 요일로 할까요? 예: "${PAT[patOf(q.day,q.day===4?1:4)].label}"`;return T}
+      const pat=q.pat||cur.pat;
+      tgt={pat,slot:q.slot??(q.win?q.win[0]:cur.slot),room:q.room}}
+    if(!tgt){T.ask=true;S.bot.pending={...q,courses:[c.id]};T.text=`${jo(full(c),'을','를')} 어디로 옮길까요? 예: "화·목 10:30", "B안"`;return T}
+    const lbl=`${PAT[tgt.pat].label} ${SLOTS[tgt.slot]}${tgt.room?' · '+tgt.room:''}`;T.info.목표=lbl;
+    T.tool=`move(분반="${full(c)}", 요일="${PAT[tgt.pat].label}", 시작="${SLOTS[tgt.slot]}"${tgt.room?`, 강의실="${tgt.room}"`:''})`;
+    if(!hardOk(c,tgt.pat,tgt.slot)){T.solver='거부: 교수 불가 시간';T.text=`${PAT[tgt.pat].label} ${SLOTS[tgt.slot]}은 ${c.prof} 교수님이 불가로 칠한 시간이라 옮길 수 없습니다.`;return T}
+    if(c.year===1&&tgt.slot===CHAPEL.slot&&PAT[tgt.pat].days.includes(CHAPEL.day)){T.solver='거부: 채플 시간';T.text='1학년 채플 시간(목 12:00)이라 옮길 수 없습니다.';return T}
+    if(PAT[tgt.pat].days.some(d=>isGenCell(d,tgt.slot))){T.solver='거부: 교양필수 시간';T.text='화·목 12:00은 교양필수 시간(가상 규칙)이라 전공을 둘 수 없습니다.';return T}
+    const rm=tgt.rooms||bestRooms(c,tgt.pat,tgt.slot,tgt.room);
+    if(!rm){T.solver='거부: 강의실 조건';T.text=`${jo(tgt.room,'은','는')} ${c.f.lab?'실습실이 아니거나 ':''}정원이 인원(${c.f.size}명)보다 작아 ${full(c)}을(를) 둘 수 없습니다.`;return T}
+    const r=sim(()=>{S.assign[c.id]={pat:tgt.pat,slot:tgt.slot,rooms:rm,temp:false};return repair(new Set([c.id]))});
+    const to=r.after[c.id];
+    return withPreview(T,r,`${jo(full(c),'을','를')} ${q.alt?`${q.alt}안(${altLabel(to)})으로`:ro(altLabel(to))} 옮기면`,c.id,q.raw);
+  }
+  if(q.intent==='block'){
+    const days=q.pat?PAT[q.pat].days:[q.day],ss=q.slot!=null?[q.slot]:q.win?R(q.win[0],q.win[1]):R(0,SLOTS.length-1);
+    const lbl=`${days.map(d=>DAYN[d]).join('·')}요일 ${ss.length===SLOTS.length?'전체':ss.length===1?SLOTS[ss[0]]:SLOTS[ss[0]]+'~'+endOf(ss[ss.length-1])}`;
+    T.info['비울 시간']=lbl;T.tool=`what_if(비울 시간="${lbl}")`;
+    const r=sim(()=>{BLOCK={cells:new Set(days.flatMap(d=>ss.map(s=>d+'-'+s)))};return repair(new Set())});
+    return withPreview(T,r,`${jo(lbl,'을','를')} 비우면`,null,q.raw);
+  }
+  if(q.intent==='room'){
+    T.info.강의실=q.room;T.tool=`what_if(못 쓰는 강의실="${q.room}")`;
+    const r=sim(()=>{BLOCK={room:q.room};return repair(new Set())});
+    return withPreview(T,r,`${jo(q.room,'을','를')} 못 쓰면`,null,q.raw);
+  }
+  return T;
+}
+
+// ---------------- 화면 ----------------
+// 아직 적용하지 않은 가장 최근 AI 도우미 미리보기 (패널이 열려 있고 시간표가 그대로일 때만)
+function livePreview(){
+  if(S.role!=='ta'||!S.botOpen)return null;
+  for(let i=S.bot.turns.length-1;i>=0;i--){const p=S.bot.turns[i].preview;if(p)return !p.state&&p.base===JSON.stringify(S.assign)?p:null}
+  return null;
+}
+// 조율 대안 미리 보기: 조교가 고른 안으로 옮기면 어디로 가는지 (아직 반영 전)
+function peekInfo(){
+  if(!S.peek||S.stage!=='round')return null;
+  const m=S.msgs.find(x=>x.id===S.peek.m);if(!m||!openMsgs().includes(m))return null;
+  const a=m.alts.find(x=>x.k===S.peek.k);if(!a)return null;
+  const to={pat:a.pat,slot:a.slot,rooms:a.rooms},cur=S.assign[m.cid],hit=clash(m.cid,a.pat,a.slot,a.rooms);
+  return {m,cid:m.cid,k:a.k,to,same:!!cur&&sameSpot(cur,to),hit};
+}
+function grid(opt={}){
+  const pv=opt.prof?null:livePreview(),pk=opt.prof?null:peekInfo();
+  const moving=new Set([...(pv?pv.changes.map(x=>x.cid):[]),...(pk&&!pk.same?[pk.cid]:[])]);
+  const ghostList=[...(pv?pv.changes.map(x=>({cid:x.cid,to:x.to,tag:'AI 도우미 미리보기',bad:false})):[]),
+    ...(pk?[{cid:pk.cid,to:pk.to,tag:pk.same?`${pk.k}안 = 지금 자리`:`${pk.k}안으로 옮기면${pk.hit?` · ${pk.hit.why}`:''}`,bad:!!pk.hit}]:[])];
+  const head=`<div></div>${D5.map(d=>`<div class="h">${DAYN[d]}</div>`).join('')}`;
+  let body='';
+  SLOTS.forEach((s,i)=>{
+    body+=`<div class="t">${s}<br><span>~${endOf(i)}</span></div>`;
+    for(const d of D5){
+      const blks=S.courses.map(c=>{const a=S.assign[c.id];if(!a||a.slot!==i)return '';const k=PAT[a.pat].days.indexOf(d);if(k<0)return '';
+        if(opt.mine&&c.prof!==opt.prof)return '';
+        const room=a.rooms[k];if(S.room!=='all'&&room!==S.room)return '';
+        const cls=[a.temp?'temp':'',S.lastChanged.includes(c.id)?'changed':'',moving.has(c.id)?'leave':'',opt.prof?(c.prof===opt.prof?'mine':'dim'):''].join(' ');
+        return `<div class="blk ${cls}"><b>${E(full(c))}</b>${E(room)}<br><span class="muted">${E(c.prof)} 교수 · ${c.year}학년${c.req?' 전필':''}${a.temp?' · 조율 중':''}${moving.has(c.id)?' · 옮겨질 자리':''}</span></div>`}).join('');
+      const ghosts=ghostList.map(x=>{const k=PAT[x.to.pat].days.indexOf(d);if(x.to.slot!==i||k<0)return '';const room=x.to.rooms[k];if(S.room!=='all'&&room!==S.room)return '';
+        return `<div class="blk ghost${x.bad?' bad':''}"><b>→ ${E(full(C(x.cid)))}</b>${E(room)}<br><span>${E(x.tag)}</span></div>`}).join('');
+      const gen=isGenCell(d,i)&&!blks&&!ghosts?'<div class="blk gen">교양필수<br><span class="small">가상 규칙</span></div>':'';
+      body+=`<div class="cell">${blks}${ghosts}${gen}</div>`;
+    }
+  });
+  const filt=`<div class="row" style="margin-bottom:10px"><label class="small muted" for="roomsel${opt.drawer?'-d':''}">강의실</label><select id="roomsel${opt.drawer?'-d':''}" data-chg="room"><option value="all">전체</option>${ROOMS.map(r=>`<option ${S.room===r.id?'selected':''}>${r.id}</option>`).join('')}</select>
+    <span class="chip warn">조율 중(임시 배치)</span>${S.lastChanged.length?'<span class="chip good">방금 바뀜</span>':''}${opt.prof&&!opt.mine?'<span class="chip accent">내 강의</span>':''}${pv?'<span class="chip accent">점선 = AI 도우미 미리보기 (적용 전)</span>':''}${pk?`<span class="chip accent">점선 = ${E(full(C(pk.cid)))} ${pk.k}안 미리 보기 (반영 전)</span>`:''}</div>`;
+  return filt+`<div class="ttwrap"><div class="tt">${head}${body}</div></div>`;
+}
+function stepsBar(){
+  const names=['희망 수집','초안','조율 중','확정'],k=stageIdx();
+  const sub=i=>i===2&&S.stage==='round'?`${S.round}차`:i===3&&S.stage==='confirm'?`${S.confirms.filter(x=>x.reply).length}/${S.confirms.length}`:i===3&&S.stage==='review'?'요청 전':'';
+  return `<ol class="steps" aria-label="진행 단계">${names.map((n,i)=>`<li class="${i<k?'done':i===k?'now':''}"><span class="st" ${i===k?'aria-current="step"':''}>${n}${sub(i)?`<small>${sub(i)}</small>`:''}${i<k?'<span class="sr"> (끝남)</span>':''}</span>${i<names.length-1?'<span class="ln" aria-hidden="true"></span>':''}</li>`).join('')}</ol>`;
+}
+function navItems(){
+  if(S.role==='ta'){
+    const flags=S.stage==='collect'?todo():0, pend=openMsgs().filter(m=>m.reply&&!m.decision).length;
+    const conf=S.confirms.filter(k=>k.reply&&!k.seen).length;
+    return [['home','현황'],['wishes','희망 확인',flags],['draft','시간표'],['coord','조율',pend],['final','확정·내보내기',conf],['settings','설정']];
+  }
+  const unread=S.msgs.filter(m=>m.sent&&C(m.cid).prof===S.prof&&m.round===S.round&&S.stage==='round'&&!m.reply).length
+    +S.confirms.filter(k=>k.prof===S.prof&&!k.reply&&S.stage==='confirm').length;
+  return [['pwish','희망 입력'],['ptable','공개 시간표'],['pmsg','조율 메시지',unread]];
+}
+const legend=()=>`<div class="legend">${MARKS.map(m=>`<span><i class="${mcls(m)}"></i>${m}</span>`).join('')}<span><i></i>가능 (안 칠함)</span><span><i class="blocked"></i>고를 수 없음 (교양필수·채플)</span></div>`;
+const STUB=(t='시연용 흉내',tip='시연 화면은 언어 모델·배정 엔진을 부르지 않고 키워드 규칙으로 흉내 냅니다. 실제 값의 모양은 API 명세와 같습니다.')=>`<span class="stub" title="${E(tip)}" tabindex="0">${E(t)}</span>`;
+
+function vHome(){
+  const flags=S.stage==='collect'?todo():0, open=Object.values(S.status).filter(s=>s==='open').length;
+  return `<h1>현황</h1><p class="lead">2027-1학기 AI소프트웨어학부 편성 (가상 데이터 ${S.courses.length}개 분반)</p>
+  <div class="kpis">
+    <div class="kpi"><div class="n">${ACT().length}<span class="small muted">/${S.courses.length}</span></div><div class="l">담당 정해진 분반</div></div>
+    <div class="kpi"><div class="n">${flags}</div><div class="l">조교가 확인할 것</div></div>
+    <div class="kpi"><div class="n">${S.stage==='collect'?'–':open}</div><div class="l">조율 중인 분반</div></div>
+    <div class="kpi"><div class="n">${S.stage==='collect'?'–':violations()}</div><div class="l">하드 규칙 위반</div></div>
+  </div>
+  <div class="card"><h2>기록</h2><ul class="log small">${S.log.slice().reverse().map(l=>`<li><b>${E(l.at)}</b> · ${E(l.t)}</li>`).join('')}</ul></div>`;
+}
+function ownerCard(){
+  const dup=S.courses.filter(c=>c.own==='dup'),none=S.courses.filter(c=>c.own==='none'),ex=S.courses.filter(c=>c.own==='excl');
+  const picked=S.courses.filter(c=>c.own==='ok'&&S.pick[c.id]);
+  if(!dup.length&&!none.length&&!ex.length&&!picked.length)return '';
+  const rawLine=x=>`<div class="raw"><div><span>희망</span>${E(wishText(x.f))}</div><div><span>인원</span>${x.f.size}명${x.f.lab?' · 실습실 필요':''}</div>${x.f.etc?`<div><span>기타</span>${E(x.f.etc)}</div>`:''}</div>${miniMap(x.f)}`;
+  const locked=S.stage!=='collect';
+  return `<div class="card"><h2>담당 확인</h2><p class="small muted" style="margin:-4px 0 12px">교수님이 개설 과목에서 맡을 분반을 직접 고릅니다. 선착순이 아니라서, 같은 분반을 여럿이 고르거나 아무도 안 고르면 조교가 정합니다. 담당 교수는 AI나 자동 배정이 정하지 않습니다.</p>
+  ${dup.map(c=>`<div class="note" style="margin-bottom:8px;background:var(--warn-soft)"><b style="color:var(--ink)">${E(full(c))}</b> ${chip('담당 겹침','warn')}<span class="small">${S.claims.filter(x=>x.cid===c.id).length}명이 골랐습니다</span>
+    <div class="cols" style="margin-top:8px">${S.claims.filter(x=>x.cid===c.id).map(x=>`<div class="card" style="margin:0;padding:12px"><b>${E(x.prof)} 교수</b>${rawLine(x)}
+      <div><button class="btn small primary" style="margin-top:8px" data-act="pick" data-c="${c.id}" data-p="${x.prof}" ${locked?'disabled':''}>${E(x.prof)} 교수로 정하기</button></div></div>`).join('')}</div></div>`).join('')}
+  ${none.map(c=>`<div class="note" style="margin-bottom:8px;background:var(--warn-soft)"><b style="color:var(--ink)">${E(full(c))}</b> ${chip('담당 없음','warn')}<span class="small">아무도 고르지 않았습니다</span>
+    <div class="row" style="margin-top:8px"><select id="np-${c.id}" aria-label="담당 교수">${PROFS.map(p=>`<option value="${p}">${p} 교수</option>`).join('')}</select>
+    <button class="btn small primary" data-act="assignNone" data-c="${c.id}" ${locked?'disabled':''}>담당 지정 (희망 없음 → 아무 시간)</button>
+    <button class="btn small" data-act="excl" data-c="${c.id}" ${locked?'disabled':''}>이번 학기 제외</button></div></div>`).join('')}
+  ${picked.map(c=>`<div class="small" style="margin-bottom:4px">✓ ${E(full(c))} · ${E(c.prof)} 교수 ${chip('조교가 정함','good')}${!locked?`<button class="btn small" data-act="unpick" data-c="${c.id}">되돌리기</button>`:''}</div>`).join('')}
+  ${ex.map(c=>`<div class="small muted" style="margin-bottom:4px">– ${E(full(c))} · 이번 학기 제외${!locked?` <button class="btn small" data-act="unexcl" data-c="${c.id}">되돌리기</button>`:''}</div>`).join('')}
+  </div>`;
+}
+function etcCell(c){
+  if(!c.f.etc)return '<span class="small muted">없음</span>';
+  const locked=S.stage!=='collect';
+  return `<div class="small" style="margin-bottom:6px">${E(c.f.etc)}</div>`+(c.f.etcOk?`${chip('조교 확인함','good')}${!locked?`<button class="btn small" data-act="etcUndo" data-c="${c.id}">되돌리기</button>`:''}`
+    :`<button class="btn small primary" data-act="etcOk" data-c="${c.id}" ${locked?'disabled':''}>확인함</button>`);
+}
+function vWishes(){
+  const flags=todo();
+  const etcFirst=ACT().map((c,i)=>({c,i})).sort((a,b)=>(b.c.f.etc?1:0)-(a.c.f.etc?1:0)||a.i-b.i).map(x=>x.c);   // 기타 요청이 있는 분반부터 (확인해도 자리는 그대로)
+  const etcN=ACT().filter(c=>c.f.etc).length;
+  const rows=etcFirst.map((c,i)=>(i===etcN&&etcN?`<tr><td colspan="4" class="small muted" style="background:var(--sunk);padding:6px 8px">기타 요청 없는 분반</td></tr>`:'')+`<tr class="${c.f.etc&&!c.f.etcOk?'flag':''}">
+    <td><b>${E(full(c))}</b><div class="small muted">${E(c.prof)} 교수 · ${c.year}학년${c.req?' 전필':''}</div>${c.byTA?chip('조교가 담당 지정'):''}</td>
+    <td>${miniMap(c.f)}</td>
+    <td>${fChips(c.f,c.prof)}<details><summary>배정에 쓰는 값 보기</summary><pre>${E(fJson(c))}</pre></details></td>
+    <td style="min-width:170px">${etcCell(c)}</td></tr>`).join('');
+  return `<h1>희망 확인</h1><p class="lead">교수님이 선택칸으로 낸 희망입니다. 이 값으로 바로 시간표를 배정합니다. 기타 요청은 자동 배정에 들어가지 않아서 조교가 직접 확인합니다.</p>
+  ${ownerCard()}
+  <div class="card"><div style="margin-bottom:10px">${legend()}</div><div class="tblwrap"><table><tr><th style="width:150px">분반</th><th style="width:110px">시간 칠하기</th><th>배정 조건</th><th>기타 요청 (조교 확인)</th></tr>${etcN?`<tr><td colspan="4" class="small" style="background:var(--warn-soft);padding:6px 8px"><b>기타 요청이 있는 분반 ${etcN}개</b> · 먼저 확인해 주세요 (남은 것 ${etcTodo()}개)</td></tr>`:''}${rows}</table></div>
+  <div class="row" style="margin-top:14px"><button class="btn primary" data-act="draft" ${flags||S.stage!=='collect'?'disabled':''}>초안 만들기</button>
+  <span class="small muted">${S.stage!=='collect'?'초안을 이미 만들었습니다.':flags?`담당·기타 요청 확인 ${flags}건을 먼저 정해 주세요.`:'규칙을 지키는 초안을 만듭니다.'}</span></div></div>
+  <p class="note">기타 요청 예: 실습 조교 배정, 대강 일정, 다른 강의와 같은 요일. 시간표에 넣어야 하는 내용이면 조교가 교수님께 칠하기를 고쳐 달라고 요청합니다.</p>`;
+}
+function vDraft(){
+  if(S.stage==='collect')return `<h1>시간표</h1><div class="card">아직 초안이 없습니다. 희망을 확인한 뒤 초안을 만듭니다.</div>`;
+  const open=S.courses.filter(c=>S.status[c.id]==='open');
+  const side=open.map(c=>{const m=S.msgs.filter(x=>x.cid===c.id).slice(-1)[0];const alts=m?m.alts:genAlts(c,S.conds[c.id]||{});
+    return `<div class="card" style="margin-bottom:10px;padding:14px"><b>${E(full(c))}</b> <span class="muted small">${E(c.prof)} 교수</span>
+      <div class="small" style="margin:6px 0">희망: ${E(wishLabel(c))}</div>
+      <div class="small muted">${E(S.reason[c.id]||'')}</div>
+      <div class="lbl">대안</div>${alts.map(a=>`<div class="small">${a.k} · ${E(altLabel(a))}</div>`).join('')}${m&&openMsgs().includes(m)?peekBtns(m):''}</div>`}).join('');
+  return `<h1>시간표</h1><p class="lead">${STUB('배정 엔진 흉내','실제는 OR-Tools CP-SAT 배정 엔진입니다. 시연 화면은 우선순위 순서 배정으로 흉내 냅니다.')} ${S.stage==='draft'?'자동으로 만든 초안입니다. 밀린 분반은 대안 A에 임시로 두었습니다.':S.stage==='round'?`${S.round}차 조율 중인 시간표입니다.`:S.stage==='final'?'모든 교수님이 확정한 시간표입니다.':'조율이 끝난 시간표입니다. 교수님 확정을 받으면 끝납니다.'}</p>
+  <div class="row" style="margin-bottom:12px"><span class="chip ${violations()?'bad':'good'}">하드 규칙 위반 ${violations()}건</span><span class="chip warn">조율 중 ${open.length}개</span>${S.lastChanged.length?`<span class="chip good">방금 바뀐 분반 ${S.lastChanged.length}개</span>`:''}</div>
+  <div class="card">${grid()}</div>
+  ${open.length?`<h2>조율이 필요한 분반 <span class="small muted">(조교만 보는 이유 포함)</span></h2>${side}`:''}
+  ${S.stage==='draft'?`<div class="card"><div class="row"><button class="btn primary" data-act="publish">초안 공개 + 1차 조율 메시지 보내기</button><span class="small muted">초안은 모든 교수에게 공개하고, 메시지는 밀린 분반 교수에게만 보냅니다.</span></div></div>`:''}`;
+}
+const KINDC={수용:'good',조건부:'accent',거절:'bad','확인 필요':'warn'};
+function peekBtns(m){
+  return `<div class="row" style="gap:6px;margin-top:8px"><span class="small muted">시간표에서 보기</span>${m.alts.map(a=>{const on=!!S.peek&&S.peek.m===m.id&&S.peek.k===a.k;
+    return `<button type="button" class="tog" data-act="peek" data-m="${m.id}" data-v="${a.k}" aria-pressed="${on}" title="${E(altLabel(a))}">${a.k}안</button>`}).join('')}</div>`;
+}
+function probsHTML(m){const ps=checkMessage(m.text,m);
+  return ps.length?ps.map(t=>`<div class="prob">✗ ${E(t)}</div>`).join(''):'<div class="chk ok">✓ 메시지 검사 통과 (check_message)</div>'}
+function methodChip(r){
+  if(r.fallback)return chip(`AI 실패 → 키워드 (${r.fallback_reason})`,'bad');
+  return r.method==='llm'?chip('언어 모델로 해석','accent'):chip('키워드로 해석');
+}
+// API 모양 그대로 보여 주기 (ReplyParse, Proposal)
+const toApiAlt=a=>({key:a.k,meetings:PAT[a.pat].days.map((d,i)=>({day:d,start:SLOTS[a.slot],end:endOf(a.slot),room:a.rooms[i]}))});
+function apiDetails(m,ck){
+  return `<details style="margin-top:8px"><summary>API 응답 보기 (ReplyParse · Proposal)</summary><pre>${E(JSON.stringify({ReplyParse:m.parsed,Proposal:ck},null,1))}</pre><pre>${E(JSON.stringify({alternatives:m.alts.map(toApiAlt)}))}</pre></details>`;
+}
+function decisionBox(m){
+  if(!m.sent)return `<div class="note">아직 보내지 않았습니다. 메시지를 확인하고 [보내기]를 누르면 교수님께 갑니다.</div>`;
+  if(!m.reply)return `<div class="note">회신 대기 중 · 기한 1주, 기한 전 자동 재알림</div>`;
+  const ck=check(m),r=m.parsed,ch=m.reply.choice,pick=ch?(ch==='none'?'모두 어려움':ch+'안'):'';
+  const said=m.reply.text?`"${E(m.reply.text)}"${pick?` <span class="muted small">(${pick} 버튼)</span>`:''}`:pick+' 버튼';
+  const read=`<div class="row" style="margin-top:8px;gap:4px">${chip(r.kind,KINDC[r.kind])}${r.picks.length?chip('고른 안 '+r.picks.join('·')):''}${hasCond(r.conditions)?chip('조건: '+condLabel(r.conditions),'accent'):''}${methodChip(r)}${STUB()}</div>
+    ${r.note?`<div class="small" style="margin-top:4px"><b>교수님 요청(note)</b> · ${E(r.note)} <span class="muted">— 배정 엔진은 읽지 않고 조교가 확인합니다</span></div>`:''}`;
+  const drop=ck.checks.filter(x=>!x.ok).map(x=>`${x.key}안: ${x.why}`);
+  let h=`<div class="lbl">교수님 답장</div><div class="msg">${said}</div>${read}
+   <div class="prop"><div class="big">${E(ck.text)}</div>${ck.action==='move'?`<button type="button" class="btn small" style="margin-top:6px" data-act="peek" data-m="${m.id}" data-v="${ck.key}">시간표에서 ${ck.key}안 보기</button>`:''}${drop.map(t=>`<div class="small" style="margin-top:4px">${E(t)}</div>`).join('')}${r.note&&ck.action!=='decide'?`<div class="small" style="margin-top:4px">교수님 요청: ${E(r.note)}</div>`:''}`;
+  if(m.decision){
+    const d=m.decision,what=d.action.type==='move'?`${d.action.k}안으로 이동`:d.action.type==='keep'?'현재 배치 유지':'다음 차수에 다시 묻기';
+    h+=`<div class="decided">${E(d.kind)} · ${E(what)}${d.reason?` · 사유: ${E(d.reason)}`:''} <button class="btn small" data-act="undo" data-m="${m.id}" style="margin-left:6px">되돌리기</button></div>`;
+    return h+apiDetails(m,ck)+'</div>';
+  }
+  const ed=S.editing&&S.editing.m===m.id?S.editing.mode:null;
+  h+=`<div class="row" style="margin-top:10px"><button class="btn primary small" data-act="confirm" data-m="${m.id}" ${ck.action==='decide'?'disabled aria-disabled="true"':''}>확인</button>
+     <button class="btn small" data-act="edit" data-m="${m.id}">수정</button><button class="btn small" data-act="keep" data-m="${m.id}">현재대로 유지</button></div>
+     ${ck.action==='decide'?'<div class="small muted" style="margin-top:4px">처리안이 "직접 결정"이라 [확인]을 쓸 수 없습니다.</div>':''}`;
+  if(ed){
+    const sel=S.editing.sel;
+    h+=`<div style="margin-top:10px">${ed==='edit'?`<label class="lbl" for="ed-sel">어떻게 처리할까요? <span class="muted small">(고르면 아래 시간표에 점선으로 보입니다)</span></label><select id="ed-sel" data-chg="edsel" data-m="${m.id}">${m.alts.map(a=>`<option value="${a.k}" ${sel===a.k?'selected':''}>${a.k}안 · ${E(altLabel(a))}</option>`).join('')}${S.round<3?`<option value="next" ${sel==='next'?'selected':''}>다음 차수에 다시 묻기</option>`:''}</select>`:''}
+      <label class="lbl" for="ed-why">사유 (필수, 기록에 남음)</label><input type="text" id="ed-why" placeholder="${ed==='edit'?'예: 교수님과 통화로 B안 확인':'예: 교수님이 임시 배치도 괜찮다고 하심'}"><div class="prob" id="ed-err" role="alert"></div>
+      <div class="row" style="margin-top:8px"><button class="btn primary small" data-act="save" data-m="${m.id}">저장</button><button class="btn small" data-act="cancel">취소</button></div></div>`;
+  }
+  return h+apiDetails(m,ck)+'</div>';
+}
+function msgPart(m){
+  if(m.sent)return `<div class="lbl">보낸 조율 메시지 ${chip('키워드 틀 문장')}</div><div class="msg">${E(m.text)}</div>`;
+  return `<label class="lbl" for="mt-${m.id}">조율 메시지 미리 보기 <span class="muted small">(고칠 수 있음 · 보내기 전에 검사)</span></label>
+    <textarea class="msgedit" id="mt-${m.id}" data-inp="msgtext" data-m="${m.id}">${E(m.text)}</textarea>
+    <div data-probs="${m.id}" aria-live="polite">${probsHTML(m)}</div>
+    <div class="row" style="margin-top:8px"><button class="btn primary small" data-act="sendOne" data-m="${m.id}">보내기</button><button class="btn small" data-act="msgReset" data-m="${m.id}">처음 문장으로</button></div>`;
+}
+function vCoord(){
+  if(S.stage==='collect'||S.stage==='draft')return `<h1>조율</h1><div class="card">초안을 공개하면 밀린 분반의 조율 메시지 초안이 만들어집니다.</div>`;
+  const ms=S.stage==='round'?openMsgs():[];
+  const past=S.msgs.filter(m=>!(S.stage==='round'&&m.round===S.round));
+  const unsent=ms.filter(m=>!m.sent),allDecided=ms.every(m=>m.decision);
+  const cards=ms.map(m=>{const c=C(m.cid);return `<div class="card"><div class="row" style="justify-content:space-between;margin-bottom:10px"><div><b>${E(full(c))}</b> <span class="muted">→ ${E(c.prof)} 교수님</span></div><span class="row" style="gap:4px">${m.sent?chip('보냄','good'):chip('보내기 전','warn')}${chip(m.round+'차')}</span></div>
+    <div class="cols"><div>${msgPart(m)}${peekBtns(m)}</div>
+    <div>${decisionBox(m)}</div></div></div>`}).join('');
+  const seg=`<div class="row"><span class="small" id="meth-l"><b>회신 해석 방식</b></span><div class="seg" role="group" aria-labelledby="meth-l">${[['keyword','키워드 (기준선)'],['llm','언어 모델']].map(([k,t])=>`<button type="button" data-act="method" data-v="${k}" aria-pressed="${S.method===k}" class="${S.method===k?'on':''}">${t}</button>`).join('')}</div>
+    <label class="switch small" style="gap:6px"><input type="checkbox" data-chg="llmFail" ${S.llmFail?'checked':''} ${S.method==='llm'?'':'disabled'}>언어 모델 실패 흉내 (fallback)</label>${STUB()}</div>
+    <p class="small muted" style="margin:6px 0 0">언어 모델이 실패하면 키워드 결과를 돌려주고 <b>fallback</b>을 표시합니다. 버튼(A/B/C) 없이 글만 보고 수용·조건부가 나오면 "확인 필요"로 낮춥니다. 방식을 바꾸면 아직 정하지 않은 답장을 다시 해석합니다.</p>`;
+  return `<h1>조율</h1><p class="lead">${S.stage==='round'?`${S.round}차 조율 · 회신 기한 1주 · 최대 3차`:'조율이 끝났습니다.'}</p>
+  ${S.stage==='round'?`<div class="card">${seg}<div class="row" style="margin-top:12px;border-top:1px solid var(--line);padding-top:12px">
+    <button class="btn" data-act="sendAll" ${unsent.length?'':'disabled'}>전체 보내기${unsent.length?` (${unsent.length})`:''}</button>
+    <button class="btn" data-act="fake" ${ms.some(m=>m.sent&&!m.reply)?'':'disabled'}>가상 회신 받기 (시연용)</button>
+    <button class="btn primary" data-act="resolve" ${ms.length?'':'disabled'}>재배정 (최소 변경)</button>
+    <span class="small muted">${allDecided?'모든 처리안을 정했습니다.':'처리안을 정하지 않은 건은 다음 차수로 넘어갑니다.'}</span></div>
+    <label class="switch small" style="margin-top:10px;gap:6px"><input type="checkbox" data-chg="autoReply" ${S.autoReply?'checked':''}>가상 회신 자동 도착 (보내고 몇 초 뒤 · 다른 화면에 있어도 알림과 메뉴 숫자로 알려 줌)</label>
+    <p class="small muted" style="margin:6px 0 0">교수 화면에서 직접 답장해도 됩니다. 위에서 역할을 '교수'로 바꾸세요.</p></div>`:''}
+  ${cards}
+  ${past.length?`<div class="card"><h2>지난 메시지</h2>${past.map(m=>`<div class="small" style="margin-bottom:6px"><b>${m.round}차 · ${E(full(C(m.cid)))}</b> · ${!m.sent?'보내지 않음':m.reply?`답장 "${E(m.reply.text)}" → ${m.decision?E(m.decision.kind):'처리 안 함'}`:'회신 없음'}</div>`).join('')}</div>`:''}`;
+}
+function botTurn(t,i){
+  const info=Object.entries(t.info).map(([k,v])=>chip(`${k}: ${v}`)).join('');
+  const ik=t.intent==='범위 밖'||t.intent==='확인 필요'?'warn':'accent';
+  const trace=`<details class="trace"><summary>AI가 읽은 내용</summary><div><span class="who ai">AI</span>의도 ${chip(t.intent,ik)}${t.ask?chip('되묻기','warn'):''}${info}</div>
+    ${t.tool?`<div><span class="who ai">AI</span>도구 호출 <code>${E(t.tool)}</code></div>`:''}
+    ${t.solver?`<div><span class="who sv">계산</span>${E(t.solver)}</div>`:''}</details>`;
+  let h=`<div class="turn bot"><div>${E(t.text)}</div>`;
+  if(t.preview){const p=t.preview;
+    h+=`<div class="tblwrap"><table class="chg"><tr><th>분반</th><th>지금 → 바꾸면</th><th>희망</th></tr>${p.changes.map(x=>{const c=C(x.cid),ok=wishOkAt(c,x.to.pat,x.to.slot);
+      return `<tr><td style="min-width:104px"><b>${E(full(c))}</b><div class="small muted">${E(c.prof)} 교수</div></td><td><span class="muted">${E(altLabel(x.from))}</span><br>→ <b>${E(altLabel(x.to))}</b></td><td>${chip(ok?'안':'밖',ok?'good':'warn')}</td></tr>`}).join('')}</table></div>`;
+    h+=p.state==='applied'?'<div class="decided">적용했습니다</div>':p.state==='cancel'?'<div class="note" style="margin-top:8px">취소했습니다</div>'
+      :p.state==='stale'?'<div class="note" style="margin-top:8px">그사이 시간표가 바뀌어 다시 계산해야 합니다</div>'
+      :`<div class="row" style="margin-top:10px"><button class="btn primary small" data-act="botApply" data-i="${i}">적용</button><button class="btn small" data-act="botCancel" data-i="${i}">취소</button>${S.view!=='draft'?`<button class="btn small" data-act="go" data-v="draft">시간표에서 보기</button>`:''}</div><div class="small muted" style="margin-top:6px">적용을 누르면 사유를 받고 다시 확인합니다. 그전에는 시간표가 바뀌지 않습니다.</div>`;
+  }
+  return h+trace+'</div>';
+}
+function botPanel(){
+  const turns=S.bot.turns.map((t,i)=>t.who==='ta'?`<div class="turn ta">${E(t.text)}</div>`:botTurn(t,i)).join('');
+  const pre=S.stage==='collect'?'<div class="note" style="margin-bottom:8px">초안을 만든 뒤에 옮기기·가정 질문을 할 수 있습니다. 지금은 현황 질문만 됩니다.</div>':'';
+  return `<aside class="botpanel" role="complementary" aria-labelledby="bot-t">
+  <div class="bph"><b id="bot-t">AI 도우미</b>${STUB()}<span class="small muted">[적용]을 눌러야 바뀝니다</span><div class="spacer"></div><button class="btn small" data-act="botClose" aria-label="AI 도우미 닫기">닫기</button></div>
+  <div class="chat" id="chat" role="log" aria-live="polite">${turns||'<div class="muted small">말로 물어보면 AI가 뜻을 읽고 시간표를 다시 계산해 결과를 알려 줍니다. 아래 예시를 눌러 보거나 직접 물어보세요.</div>'}</div>
+  <form data-form="bot">${pre}<div class="botex">${BOT_EX.map(x=>`<button type="button" class="btn small" data-act="botEx" data-v="${E(x)}">${E(x)}</button>`).join('')}</div>
+    <div class="row" style="flex-wrap:nowrap"><input type="text" name="q" id="botq" autocomplete="off" aria-label="AI 도우미에게 물어보기" placeholder="예: 화요일 오전 비우면?"><button class="btn primary" type="submit">보내기</button></div></form>
+  </aside>`;
+}
+function vFinal(){
+  const rows=S.courses.map(c=>{const a=S.assign[c.id];if(!a)return '';return `<tr><td>${c.year}</td><td>${E(c.name)}</td><td>${c.sec}</td><td>${E(c.prof)} 교수</td><td>${PAT[a.pat].label}</td><td>${SLOTS[a.slot]}~${endOf(a.slot)}</td><td>${E(roomText(a.pat,a.rooms))}</td><td>${S.moved[c.id]?chip('AI 도우미로 조정','accent'):S.reason[c.id]?chip('조율 후 확정','good'):''}</td></tr>`}).join('');
+  const LEAD={collect:'아직 초안이 없습니다.',draft:'아직 조율 전입니다.',round:'조율 중입니다. 조율이 끝나면 교수님께 확정을 요청합니다.',
+    review:'조율이 끝났습니다. 최종 시간표를 교수님께 보내 확정을 받아 주세요.',confirm:'교수님 확정을 기다리고 있습니다. 모두 확정하면 내보낼 수 있습니다.',final:'모든 교수님이 확정한 시간표입니다. 엑셀로 내보내 SAP에 직접 입력합니다.'};
+  return `<h1>확정·내보내기</h1><p class="lead">${LEAD[S.stage]}</p>
+  ${confirmCard()}
+  <div class="card">${S.stage==='collect'?'초안이 없습니다.':`<div class="tblwrap"><table><tr><th>학년</th><th>과목</th><th>분반</th><th>교수</th><th>요일</th><th>시간</th><th>강의실</th><th>비고</th></tr>${rows}</table></div>`}
+  <div class="row" style="margin-top:14px"><button class="btn primary" data-act="csv" ${S.stage==='final'?'':'disabled'}>엑셀(CSV) 내보내기</button><button class="btn" data-act="print" ${S.stage==='collect'?'disabled':''}>인쇄</button><span class="small muted">${S.stage==='final'?'':'교수님이 모두 확정해야 내보낼 수 있습니다. '}SAP 직접 연동은 범위 밖입니다. 엑셀(.xlsx) 내보내기는 서버 연결 뒤에 붙입니다 (API는 아직 501).</span></div></div>`;
+}
+// 확정 요청: 보내기 전엔 미리 보기, 보낸 뒤엔 교수님별 확정 현황
+function confirmCard(){
+  if(S.stage==='review'){const ps=profsWithCourses();
+    return `<div class="card"><h2>최종 시간표 확정 요청</h2><p class="small muted" style="margin:-4px 0 10px">강의가 있는 교수님 ${ps.length}명께 각자의 최종 시간표와 확정 요청 메시지를 보냅니다. 교수님이 [확정]을 눌러 회신하면 끝납니다.</p>
+      <div class="lbl">메시지 예시 (${E(ps[0])} 교수님)</div><div class="msg">${E(confirmText(ps[0]))}</div>
+      <div class="row" style="margin-top:12px"><button class="btn primary" data-act="sendConfirm">확정 요청 보내기 (${ps.length}명)</button></div></div>`}
+  if(S.stage!=='confirm'&&S.stage!=='final')return '';
+  const done=S.confirms.filter(k=>k.reply).length;
+  const rows=S.confirms.map(k=>`<tr><td><b>${E(k.prof)} 교수</b></td><td class="small">${ACT().filter(c=>c.prof===k.prof).map(c=>E(full(c))).join(', ')}</td>
+    <td>${k.reply?chip(k.reply.from==='조교 직접 처리'?'확정 (조교 처리)':'확정함','good'):chip('회신 대기','warn')}${k.reply&&k.reply.note?`<div class="small">메모: ${E(k.reply.note)}</div>`:''}${k.reply&&k.reply.reason?`<div class="small muted">사유: ${E(k.reply.reason)}</div>`:''}</td>
+    <td>${!k.reply&&S.stage==='confirm'?`<button class="btn small" data-act="confirmManual" data-v="${k.id}">직접 확정 처리</button>`:''}</td></tr>`).join('');
+  return `<div class="card"><div class="row" style="justify-content:space-between"><h2 style="margin:0">교수님 확정 ${done}/${S.confirms.length}</h2>
+    ${S.stage==='confirm'?`<button class="btn" data-act="fakeConfirm" ${done<S.confirms.length?'':'disabled'}>가상 확정 받기 (시연용)</button>`:chip('모두 확정','good')}</div>
+    <div class="tblwrap" style="margin-top:8px"><table><tr><th>교수</th><th>강의</th><th>상태</th><th></th></tr>${rows}</table></div>
+    <p class="small muted" style="margin:8px 0 0">회신이 없으면 전화 등으로 확인한 뒤 [직접 확정 처리]를 누릅니다. 사유는 기록에 남습니다.</p></div>`;
+}
+function vSettings(){
+  return `<h1>설정</h1><p class="lead">학과마다 다른 규칙은 여기서 바꿉니다.</p>
+  <div class="card"><h2>조율 메시지</h2>
+    <label class="switch"><input type="checkbox" data-chg="reveal" ${S.reveal?'checked':''}><span><b>겹친 상대 교수 이름 알리기</b><br><span class="small muted">켜면 "가 교수님의 자료구조 01 분반과 겹칩니다", 끄면 "다른 강의와 겹칩니다". 연차·우선순위 이유와 상대의 사정은 어느 쪽이든 쓰지 않습니다. 이미 보낸 메시지는 바뀌지 않습니다.</span></span></label>
+    <div class="row" style="margin-top:14px"><span class="chip">회신 기한 1주</span><span class="chip">기한 전 자동 재알림</span><span class="chip">최대 3차</span><span class="chip">메시지는 밀린 분반 교수에게만</span></div></div>
+  <div class="cols"><div class="card"><h2>하드 규칙 (반드시 지킴)</h2>${RULES.map(r=>`<div class="small" style="margin-bottom:4px">✓ ${E(r)}</div>`).join('')}</div>
+  <div class="card"><h2>겹칠 때 우선순위 (예)</h2>${PRIO.map((p,i)=>`<div class="small" style="margin-bottom:4px">${i+1}. ${E(p)}</div>`).join('')}<p class="small muted" style="margin:8px 0 0">항목과 가중치는 학과에서 정합니다. 교수에게 보내는 메시지에는 나오지 않습니다.</p></div></div>
+  <div class="card"><h2>AI 도우미</h2><div class="small" style="margin-bottom:4px">✓ 시간표는 배정 규칙으로 계산하고, AI 도우미는 그 결과만 전합니다</div><div class="small" style="margin-bottom:4px">✓ 바꾸는 요청은 결과를 먼저 보여 주고, 조교가 [적용]을 눌러야 반영합니다</div><div class="small" style="margin-bottom:4px">✓ 교수가 불가로 칠한 시간으로는 옮기지 않습니다</div><div class="small">✓ 시간표와 상관없는 질문에는 답하지 않습니다</div>
+    <p class="note" style="margin:10px 0 0">AI 도우미가 하는 일: 의도 파악(이유 설명 · 이동 · 가정 실행 · 현황) → 정보 뽑기(과목 · 교수 · 요일 · 시각 · 강의실, "그 강의" 같은 말 포함) → 모자라면 되묻기 → 시간표 계산 → 결과 설명. 답 아래 'AI가 읽은 내용'을 펼치면 이 과정이 보입니다. 시안에서는 키워드 규칙으로 흉내 냅니다.</p></div>
+  <div class="card"><h2>강의실 목록</h2><p class="small muted" style="margin:-4px 0 10px">학과사무실이 미리 넣어 둡니다. 실습실 여부와 정원을 보고 호수를 자동으로 정합니다. 바꿀 때는 AI 도우미에게 말하면 됩니다 (예: "알고리즘 미래관 410으로").</p>
+    <div class="tblwrap"><table><tr><th>강의실</th><th>건물</th><th>실습실</th><th>정원</th></tr>${ROOMS.map(r=>`<tr><td><b>${E(r.id)}</b></td><td>${E(r.bldg)}</td><td>${r.lab?chip('실습실','lab'):'<span class="muted">일반</span>'}</td><td>${r.cap}명</td></tr>`).join('')}</table></div></div>
+  <div class="card"><h2>화면</h2><div class="row"><span class="small">테마</span>${themeSeg()}</div><p class="small muted" style="margin:8px 0 0">시간표·확정 화면은 인쇄하면 메뉴와 버튼을 빼고 찍힙니다.</p></div>
+  <div class="card"><h2>시연</h2><button class="btn" data-act="reset">처음부터 다시</button></div>`;
+}
+const blockedCell=(year,d,s)=>isGenCell(d,s)?'교양':year===1&&d===CHAPEL.day&&s===CHAPEL.slot?'채플':'';
+function paintGrid(cid,f,locked){
+  const dis=locked?'disabled':'';
+  let h=`<div class="pg" role="group" aria-label="${E(full(C(cid)))} 수업 가능 시간 (화살표로 이동)"><div></div>${D5.map(d=>`<div class="pgh">${DAYN[d]}</div>`).join('')}`;
+  SLOTS.forEach((t,k)=>{h+=`<div class="pgt">${t}</div>`;
+    for(const d of D5){const bl=blockedCell(C(cid).year,d,k);
+      if(bl){h+=`<button type="button" class="pc blocked" disabled aria-label="${DAYN[d]} ${t} ${bl} 시간이라 고를 수 없음">${bl}</button>`;continue}
+      const m=mk(f,d,k);h+=`<button type="button" class="pc ${mcls(m)}" data-paint="${cid}" data-d="${d}" data-s="${k}" ${dis} aria-label="${DAYN[d]} ${t} ${m||'가능'}">${m||''}</button>`}});
+  return h+'</div>';
+}
+function vPWish(){
+  const locked=S.stage!=='collect', mineIds=S.claims.filter(x=>x.prof===S.prof).map(x=>x.cid);
+  const forms=(locked?ACT().filter(c=>c.prof===S.prof).map(c=>c.id):mineIds).map(id=>({c:C(id),x:claimOf(id,S.prof)}));
+  const lost=locked?mineIds.filter(id=>C(id).prof!==S.prof):[];
+  const dis=locked?'disabled':'';
+  const list=`<div class="card"><h2>2027-1학기 개설 과목</h2><p class="small muted" style="margin:-4px 0 10px">${locked?'접수가 마감되었습니다.':'맡을 분반을 체크하면 아래에 희망 입력 칸이 생깁니다. 선착순이 아니며, 같은 분반을 여러 분이 고르면 학과사무실에서 정합니다.'}</p>
+    <div class="tblwrap"><table><tr><th>과목</th><th>분반</th><th>학년</th><th>구분</th><th style="width:80px">맡기</th></tr>
+    ${S.courses.map(c=>`<tr><td><b>${E(c.name)}</b></td><td>${c.sec}</td><td>${c.year}</td><td>${kindOf(c)}</td>
+      <td><input type="checkbox" data-chg="claim" data-c="${c.id}" ${mineIds.includes(c.id)?'checked':''} ${dis} aria-label="${E(full(c))} 맡기" style="width:18px;height:18px;accent-color:var(--accent)"></td></tr>`).join('')}</table></div></div>`;
+  const consec=forms.length>=2?`<div class="card"><div class="row"><b>연강</b><select data-chg="consec" ${dis} aria-label="연강">${Object.entries(CONSN).map(([k,v])=>`<option value="${k}" ${(S.consec[S.prof]||'any')===k?'selected':''}>${v}</option>`).join('')}</select><span class="small muted">맡은 강의를 이어서 하는 것</span></div></div>`:'';
+  const prefOpts=f=>`<option value="">상관없음</option>${BLDGS.map(b=>`<option value="${b}" ${f.pref===b?'selected':''}>${b}</option>`).join('')}`;
+  return `<h1>희망 입력</h1><p class="lead">${S.prof} 교수님 · ${locked?`담당 확정 ${forms.length}개 · 읽기만 됩니다`:`고른 분반 ${forms.length}개 · 입력하면 바로 저장됩니다`}</p>
+  ${list}
+  ${lost.length?`<div class="note" style="margin-bottom:14px">${lost.map(id=>E(full(C(id)))).join(', ')}: 학과사무실에서 다른 교수님으로 정했습니다.</div>`:''}
+  ${!forms.length?`<div class="card muted">${locked?'담당 분반이 없습니다.':'위 목록에서 맡을 분반을 골라 주세요.'}</div>`:consec}
+  ${forms.map(({c,x})=>`<div class="card"><h2>${E(full(c))} <span class="small muted">${c.year}학년 ${kindOf(c)}</span></h2>
+    <div class="pw"><div><div class="row" style="justify-content:space-between;margin-bottom:6px"><span class="lbl" style="margin:0">수업 가능 시간</span>${locked?'':`<span class="row" style="gap:6px">${[['mw','월·수 묶기'],['tt','화·목 묶기']].map(([k,t])=>`<button type="button" class="tog" data-act="pair" data-c="${c.id}" data-v="${k}" aria-pressed="${!!(S.pair[c.id]||{})[k]}">${t}</button>`).join('')}</span>`}</div>${paintGrid(c.id,x.f,locked)}<div style="margin-top:8px">${legend()}</div>
+      <p class="small muted" style="margin:6px 0 0">안 칠한 칸은 수업 가능입니다. 누를 때마다 희망 → 불가 → 빈칸으로 바뀌고, 끌면 여러 칸을 한 번에 칠합니다. 묶기를 켜면 짝 요일 칸도 같이 바뀝니다. 키보드는 화살표로 옮기고 Enter로 바꿉니다.</p></div>
+    <div>
+      <label class="switch"><input type="checkbox" data-chg="fmust" data-c="${c.id}" ${x.f.must?'checked':''} ${dis}>희망 시간이 아니면 수업이 어렵습니다 (꼭)</label>
+      <div class="row" style="gap:14px;align-items:flex-end;margin-top:4px">
+        <div><div class="lbl">인원</div><select data-chg="fsize" data-c="${c.id}" ${dis} aria-label="인원">${SIZES.map(n=>`<option value="${n}" ${x.f.size===n?'selected':''}>${n}명</option>`).join('')}</select></div>
+        <div><div class="lbl">실습실</div><select data-chg="flab" data-c="${c.id}" ${dis} aria-label="실습실"><option value="0" ${x.f.lab?'':'selected'}>필요 없음</option><option value="1" ${x.f.lab?'selected':''}>필요</option></select></div></div>
+      <div class="lbl">건물 선호 <span class="muted small">(강의실 호수는 학과사무실에서 정합니다)</span></div><select data-chg="fpref" data-c="${c.id}" ${dis} aria-label="건물 선호">${prefOpts(x.f)}</select>
+      <div class="lbl">기타 요청 <span class="muted small">(위 칸으로 정할 수 없는 것만)</span></div><textarea data-inp="fetc" data-c="${c.id}" ${dis} placeholder="예: 학기 중 두 번 대강이 필요합니다. 학과사무실에서 직접 확인합니다.">${E(x.f.etc)}</textarea>
+      <div class="lbl">접수 내용</div><div data-sum="${c.id}">${fChips(x.f,S.prof)}</div>
+    </div></div></div>`).join('')}`;
+}
+function vPTable(){
+  if(S.stage==='collect'||S.stage==='draft')return `<h1>공개 시간표</h1><div class="card">조교가 초안을 확인하고 있습니다. 공개되면 여기서 볼 수 있습니다.</div>`;
+  const mine=ACT().filter(c=>c.prof===S.prof&&S.assign[c.id]);
+  const seg=`<div class="seg" role="group" aria-label="보기">${[[false,'전체 보기'],[true,'내 강의만']].map(([v,t])=>`<button type="button" data-act="mineOnly" data-v="${v?1:0}" class="${S.mineOnly===v?'on':''}" aria-pressed="${S.mineOnly===v}">${t}</button>`).join('')}</div>`;
+  const list=S.mineOnly?`<div class="card"><h2>${S.prof} 교수님 강의 ${mine.length}개</h2>${mine.length?mine.map(c=>`<div class="small" style="margin-bottom:4px"><b>${E(full(c))}</b> · ${E(altLabel(S.assign[c.id]))}${S.status[c.id]==='open'?' '+chip('조율 중','warn'):''}</div>`).join(''):'<div class="small muted">배정된 강의가 없습니다.</div>'}</div>`:'';
+  return `<h1>공개 시간표</h1><p class="lead">모든 교수님께 같은 시간표가 공개됩니다.</p><div class="row" style="margin-bottom:12px">${seg}</div>${list}<div class="card">${grid({prof:S.prof,mine:S.mineOnly})}</div>`;
+}
+function confirmForm(k){
+  return `<form class="card" data-form="confirm" data-k="${k.id}" style="border-color:var(--accent)"><div class="row" style="justify-content:space-between"><b>최종 시간표 확정 요청</b>${k.reply?chip('확정함','good'):chip('확정 필요','warn')}</div>
+    <div class="msg" style="margin-top:10px">${E(k.text)}</div>
+    ${k.reply?`<div class="note" style="margin-top:10px">확정했습니다${k.reply.note?` · 메모: ${E(k.reply.note)}`:''}.</div>`
+      :`<label class="lbl" for="ct-${k.id}">하실 말씀 (선택)</label><textarea id="ct-${k.id}" name="text" placeholder="예: 확인했습니다."></textarea>
+      <div class="row" style="margin-top:10px"><button class="btn primary" type="submit">확정</button><span class="small muted">누르면 학과사무실에 확정 회신이 갑니다.</span></div>`}</form>`;
+}
+function vPMsg(){
+  const ms=S.msgs.filter(m=>m.sent&&C(m.cid).prof===S.prof),k=S.confirms.find(x=>x.prof===S.prof);
+  if(!ms.length&&!k)return `<h1>조율 메시지</h1><div class="card">받은 조율 메시지가 없습니다. ${S.stage!=='collect'&&S.stage!=='draft'?'희망하신 대로 배정되었습니다.':''}</div>`;
+  return `<h1>조율 메시지</h1><p class="lead">${S.prof} 교수님께 온 메시지입니다.</p>`+(k?confirmForm(k):'')+ms.slice().reverse().map(m=>{
+    const live=S.stage==='round'&&m.round===S.round&&!m.reply;
+    return `<form class="card" data-form="reply" data-m="${m.id}"><div class="row" style="justify-content:space-between"><b>${m.round}차 조율 · ${E(full(C(m.cid)))}</b>${m.reply?chip('답장함','good'):live?chip('답장 필요','warn'):chip('지난 차수')}</div>
+      <div class="msg" style="margin-top:10px">${E(m.text)}</div>
+      ${live?`<div class="lbl">안 고르기</div>${m.alts.map(a=>`<label class="alt"><input type="radio" name="ch" value="${a.k}"><span class="k">${a.k}</span>${E(altLabel(a))}</label>`).join('')}
+        <label class="alt"><input type="radio" name="ch" value="none"><span class="k" style="background:var(--muted)">–</span>모두 어려움</label>
+        <label class="lbl" for="rt-${m.id}">하실 말씀 (선택)</label><textarea id="rt-${m.id}" name="text" placeholder="예: A나 B 괜찮아요. 수요일은 17시 전에 끝나야 해요."></textarea>
+        <div class="row" style="margin-top:10px"><button class="btn primary" type="submit">보내기</button>${SCRIPT[m.round]&&SCRIPT[m.round][m.cid]?`<button class="btn small" type="button" data-act="example" data-m="${m.id}">예시 답장 넣기</button>`:''}</div>`
+      :m.reply?`<div class="note" style="margin-top:10px">보낸 답장: ${m.reply.choice?(m.reply.choice==='none'?'모두 어려움':m.reply.choice+'안')+' · ':''}${E(m.reply.text||'')} · 조교 확인 후 반영됩니다.</div>`:''}
+    </form>`}).join('');
+}
+
+// ---------------- 테마 (시스템 · 라이트 · 다크, 이 브라우저에만 기억) ----------------
+const THEME_KEY='ssuroom-v4-theme';
+function savedTheme(){try{const v=localStorage.getItem(THEME_KEY);return v==='light'||v==='dark'?v:'system'}catch(_){return 'system'}}
+function applyTheme(v){const r=document.documentElement;if(v==='system')delete r.dataset.theme;else r.dataset.theme=v;
+  try{if(v==='system')localStorage.removeItem(THEME_KEY);else localStorage.setItem(THEME_KEY,v)}catch(_){}}
+const THEMES=[['system','시스템'],['light','라이트'],['dark','다크']];
+const themeSeg=()=>`<div class="seg" role="group" aria-label="테마">${THEMES.map(([k,t])=>`<button type="button" data-act="theme" data-v="${k}" class="${savedTheme()===k?'on':''}" aria-pressed="${savedTheme()===k}">${t}</button>`).join('')}</div>`;
+applyTheme(savedTheme());
+
+// ---------------- 알림 · 확인창 · 포커스 ----------------
+let TOAST_T=null;
+function toast(msg){const el=document.getElementById('toast');el.textContent=msg;el.classList.add('on');clearTimeout(TOAST_T);TOAST_T=setTimeout(()=>el.classList.remove('on'),2800)}
+let DLG=null;
+// o = {title, body, ok, reason(사유 필수), placeholder}. 확인을 누르면 onOk(사유)
+function askConfirm(o,onOk){
+  const d=document.getElementById('dlg');
+  d.innerHTML=`<form data-form="dlg"><h2 id="dlg-t">${E(o.title)}</h2><p class="small" style="margin:0 0 6px;white-space:pre-line">${E(o.body)}</p>
+    ${o.reason?`<label class="lbl" for="dlg-r">사유 (필수, 기록에 남음)</label><input type="text" id="dlg-r" autocomplete="off" placeholder="${E(o.placeholder||'')}"><div class="prob" id="dlg-e" role="alert"></div>`:''}
+    <div class="row" style="justify-content:flex-end;margin-top:14px"><button type="button" class="btn" data-act="dlgNo">취소</button><button type="submit" class="btn primary">${E(o.ok||'확인')}</button></div></form>`;
+  DLG={onOk,reason:!!o.reason,ret:focusKey(document.activeElement)};
+  d.showModal();(o.reason?d.querySelector('#dlg-r'):d.querySelector('[type=submit]')).focus();
+}
+function closeDlg(){const d=document.getElementById('dlg');if(d.open)d.close()}
+// 다시 그린 뒤 같은 버튼에 포커스를 돌려준다 (없으면 본문 제목)
+function focusKey(el){
+  if(!el||el===document.body||!document.getElementById('app').contains(el))return null;
+  if(el.id)return '#'+CSS.escape(el.id);
+  const ks=['act','v','m','c','i','paint','d','s','chg','inp'].filter(k=>el.dataset[k]!=null);
+  return ks.length?el.tagName.toLowerCase()+ks.map(k=>`[data-${k}="${CSS.escape(el.dataset[k])}"]`).join(''):null;
+}
+function restoreFocus(key){
+  if(!key)return;const n=document.querySelector(key);
+  if(n&&!n.disabled){n.focus();return}
+  const h=document.querySelector('main h1');if(h)h.focus();
+}
+
+// 다른 일 중에 다시 그릴 때(가상 회신 도착 등) 입력 중인 글·고른 값을 지키기
+function fieldKey(el){if(el.id)return '#'+CSS.escape(el.id);const f=el.closest('form[data-m]');
+  return f&&el.name?`form[data-m="${f.dataset.m}"] [name="${el.name}"]`+(el.type==='radio'?`[value="${CSS.escape(el.value)}"]`:''):null}
+function snapFields(){const out=[];document.querySelectorAll('#app input,#app textarea,#app select').forEach(el=>{
+  if(el.type==='checkbox')return;const k=fieldKey(el);if(k)out.push([k,el.type==='radio'?el.checked:el.value])});
+  const a=document.activeElement;return {out,sel:a&&'selectionStart' in a&&a.type!=='radio'?[a.selectionStart,a.selectionEnd]:null}}
+function restoreFields(sn){for(const [k,v] of sn.out){const el=document.querySelector(k);if(!el)continue;if(el.type==='radio')el.checked=v;else el.value=v}
+  const a=document.activeElement;if(sn.sel&&a&&'setSelectionRange' in a){try{a.setSelectionRange(sn.sel[0],sn.sel[1])}catch(_){}}}
+const ttDrawer=()=>{const pk=peekInfo();
+  return `<aside class="ttpanel" role="complementary" aria-labelledby="ttd-t"><div class="bph"><b id="ttd-t">현재 시간표</b><span class="small muted">${S.stage==='round'?`${S.round}차 조율 중`:S.stage==='draft'?'초안':S.stage==='final'?'확정':'조율 끝'} · 하드 규칙 위반 ${violations()}건</span>
+    ${pk?`<button class="btn small" data-act="peekOff">미리 보기 끄기</button>`:''}<div class="spacer"></div><button class="btn small" data-act="go" data-v="draft">시간표 화면</button><button class="btn small" data-act="ttClose" aria-label="현재 시간표 닫기">닫기</button></div>
+    <div class="ttbody">${grid({drawer:true})}</div></aside>`};
+const TT_ICON='<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="17" rx="2"/><path d="M3 9h18M8 4v17M13 4v17"/></svg>';
+function render(opt={}){
+  const fk=focusKey(document.activeElement),sn=opt.keep?snapFields():null;
+  if(S.role==='ta'&&S.view==='final')S.confirms.forEach(k=>{if(k.reply)k.seen=true});
+  const items=navItems(); if(!items.some(i=>i[0]===S.view))S.view=items[0][0];
+  const V={home:vHome,wishes:vWishes,draft:vDraft,coord:vCoord,final:vFinal,settings:vSettings,pwish:vPWish,ptable:vPTable,pmsg:vPMsg}[S.view];
+  const cur=THEMES.find(x=>x[0]===savedTheme());
+  const showTT=S.role==='ta'&&S.stage!=='collect'&&S.view!=='draft';
+  const badgeN=items.reduce((v,x)=>v+(x[2]||0),0);
+  document.title=(badgeN&&S.role==='ta'?`(${badgeN}) `:'')+'SSU:room 시연 v4';
+  document.getElementById('app').innerHTML=`<a class="skip" href="#main">본문으로 건너뛰기</a>
+  <header class="top"><div class="wrap"><div class="logo">SSU<b>:</b>room</div><span class="sub">강의시간표 편성·조율 도우미 · 시연 v4</span><span class="virt">가상 데이터</span><div class="spacer"></div>
+    <button type="button" class="tog" data-act="themeNext" aria-label="테마 바꾸기, 지금 ${cur[1]}">테마: ${cur[1]}</button>
+    <div class="seg" role="group" aria-label="역할"><button class="${S.role==='ta'?'on':''}" data-act="role" data-v="ta" aria-pressed="${S.role==='ta'}">조교</button><button class="${S.role==='prof'?'on':''}" data-act="role" data-v="prof" aria-pressed="${S.role==='prof'}">교수</button></div>
+    ${S.role==='prof'?`<select data-chg="prof" aria-label="교수 고르기">${PROFS.map(p=>`<option value="${p}" ${p===S.prof?'selected':''}>${p} 교수</option>`).join('')}</select>`:''}</div></header>
+  <div class="wrap">${stepsBar()}<div class="main"><nav aria-label="메뉴">${items.map(([k,t,n])=>`<button class="${S.view===k?'on':''}" data-act="go" data-v="${k}" ${S.view===k?'aria-current="page"':''}><span>${t}</span>${n?`<span class="badge${k==='coord'||k==='final'||k==='pmsg'?' new':''}" aria-label="${n}건">${n}</span>`:''}</button>`).join('')}</nav>
+  <main id="main" tabindex="-1">${V()}</main></div></div>
+  ${showTT&&S.ttOpen?ttDrawer():''}
+  ${S.role!=='ta'?'':`<div class="fabs">${showTT&&!S.ttOpen?`<button class="ttfab" data-act="ttOpen" aria-label="현재 시간표 열기"><span class="ic">${TT_ICON}</span><span><b>현재 시간표</b><small>오른쪽에 열어 두고 보기</small></span></button>`:''}
+    ${S.botOpen?'':`<button class="botfab${S.botSeen?'':' new'}" data-act="botOpen" aria-label="AI 도우미 열기"><span class="ic"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a8 8 0 0 1-11.6 7.1L4 20l1-4.6A8 8 0 1 1 21 12z"/><path d="M8.5 12h.01M12 12h.01M15.5 12h.01"/></svg></span><span><b>AI 도우미</b><small>시간표를 말로 물어보기</small></span></button>`}</div>
+    ${S.botOpen?botPanel():''}`}`;
+  const app=document.getElementById('app');app.className=[S.role==='ta'&&S.botOpen?'botopen':'',showTT&&S.ttOpen?'ttopen':''].join(' ').trim();
+  document.querySelectorAll('main h1').forEach(h=>h.setAttribute('tabindex','-1'));
+  if(!document.getElementById('dlg').open)restoreFocus(fk);
+  if(sn)restoreFields(sn);
+  if(S.role==='ta'&&S.botOpen){const ch=document.getElementById('chat');if(ch)ch.scrollTop=ch.scrollHeight;if(S.botFocus){const i=document.getElementById('botq');if(i)i.focus()}}
+  S.botFocus=false;
+}
+
+// ---------------- 시간 칠하기 ----------------
+let PAINT=null;
+function setOne(x,d,k,mark){const key=d+'-'+k;if(mark)x.f.paint[key]=mark;else delete x.f.paint[key];
+  const e=document.querySelector(`[data-paint="${x.cid}"][data-d="${d}"][data-s="${k}"]`);
+  if(e){e.className='pc '+mcls(mark);e.textContent=mark||'';e.setAttribute('aria-label',`${DAYN[d]} ${SLOTS[k]} ${mark||'가능'}`)}}
+// 묶기를 켰으면 짝 요일(월↔수, 화↔목) 칸도 같은 값으로. 교양필수·채플 칸은 건너뛴다
+function setMark(x,d,k,mark){setOne(x,d,k,mark);
+  const pr=S.pair[x.cid]||{},q=PARTNER[d];if(q==null)return;
+  if(((d===0||d===2)&&pr.mw)||((d===1||d===3)&&pr.tt)){if(!blockedCell(C(x.cid).year,q,k))setOne(x,q,k,mark)}}
+function paintCell(el){const x=claimOf(el.dataset.paint,S.prof);if(!x)return;setMark(x,+el.dataset.d,+el.dataset.s,PAINT.mark);PAINT.dirty=true}
+function startPaint(el){const x=claimOf(el.dataset.paint,S.prof);if(!x)return false;const cur=mk(x.f,+el.dataset.d,+el.dataset.s);
+  PAINT={cid:el.dataset.paint,mark:CYC[(CYC.indexOf(cur)+1)%CYC.length],dirty:false,last:el};paintCell(el);return true}
+function endPaint(){if(!PAINT)return;const p=PAINT;PAINT=null;if(p.dirty)render()}
+document.addEventListener('pointerdown',e=>{const el=e.target.closest('[data-paint]');if(!el||el.disabled)return;e.preventDefault();startPaint(el)});
+document.addEventListener('pointermove',e=>{if(!PAINT)return;const hit=document.elementFromPoint(e.clientX,e.clientY);const el=hit&&hit.closest('[data-paint]');
+  if(!el||el===PAINT.last||el.dataset.paint!==PAINT.cid||el.disabled)return;PAINT.last=el;paintCell(el)});
+document.addEventListener('pointerup',endPaint);
+document.addEventListener('pointercancel',endPaint);
+
+// ---------------- 이벤트 ----------------
+function applyBot(i,reason){
+  const p=S.bot.turns[i].preview;
+  if(JSON.stringify(S.assign)!==p.base){p.state='stale';toast('그사이 시간표가 바뀌어 다시 계산해야 합니다');return}
+  S.assign=clone(p.after);
+  for(const ch of p.changes){const id=ch.cid;S.assign[id].temp=false;S.moved[id]=`요청 "${p.raw}" · 사유 "${reason}"`;
+    if(S.status[id]==='open'){S.status[id]='done';openMsgs().filter(x=>x.cid===id&&!x.decision).forEach(x=>x.decision={kind:'AI 도우미로 옮김',action:{type:'keep'},reason})}}
+  S.lastChanged=p.changes.map(x=>x.cid);p.state='applied';
+  log('AI 도우미',`"${p.raw}" 적용 · 사유 "${reason}" · 바뀐 분반 ${p.changes.length}개 (${p.changes.map(x=>full(C(x.cid))).join(', ')}).`);
+  toast(`적용했습니다 · 바뀐 분반 ${p.changes.length}개`);
+}
+function sendOne(m,i=0){const ps=checkMessage(m.text,m);if(ps.length)return false;m.sent=true;log(`${m.round}차 조율`,`${full(C(m.cid))}: ${C(m.cid).prof} 교수님께 조율 메시지를 보냈습니다.`);later(()=>autoReply(m),i);return true}
+function reparse(){openMsgs().filter(m=>m.reply&&!m.decision).forEach(m=>{m.parsed=parseReply(m.reply.text,m.reply.choice,m.alts,S.method)})}
+document.addEventListener('click',e=>{
+  const pe=e.target.closest('[data-paint]');
+  if(pe){if(e.detail===0&&!pe.disabled&&startPaint(pe))endPaint();return}   // 키보드로 누른 경우
+  const t=e.target.closest('[data-act]');if(!t)return;
+  const a=t.dataset.act,m=t.dataset.m?S.msgs.find(x=>x.id===t.dataset.m):null;
+  if(a==='dlgNo'){closeDlg();return}
+  if(a==='role'){S.role=t.dataset.v;S.view=S.role==='ta'?'home':'pwish'}
+  else if(a==='go')S.view=t.dataset.v;
+  else if(a==='theme'){applyTheme(t.dataset.v)}
+  else if(a==='themeNext'){const k=THEMES.findIndex(x=>x[0]===savedTheme()),n=THEMES[(k+1)%THEMES.length];applyTheme(n[0]);toast(`테마: ${n[1]}`)}
+  else if(a==='pair'){const c=t.dataset.c,k=t.dataset.v;S.pair={...S.pair,[c]:{...(S.pair[c]||{}),[k]:!(S.pair[c]||{})[k]}}}
+  else if(a==='etcOk'){const c=C(t.dataset.c);c.f.etcOk=true;log('희망 수집',`${full(c)}: 기타 요청 "${c.f.etc}"을(를) 조교가 확인했습니다.`)}
+  else if(a==='etcUndo'){C(t.dataset.c).f.etcOk=false}
+  else if(a==='pick'){S.pick[t.dataset.c]=t.dataset.p;sync();log('희망 수집',`${full(C(t.dataset.c))}: 담당 겹침 → 조교가 ${t.dataset.p} 교수로 정했습니다.`)}
+  else if(a==='unpick'){delete S.pick[t.dataset.c];S.claims=S.claims.filter(x=>!(x.cid===t.dataset.c&&x.byTA));sync()}
+  else if(a==='assignNone'){const cid=t.dataset.c,p=document.getElementById('np-'+cid).value;
+    S.claims.push({...mkClaim(cid,p,emptyF()),byTA:true});S.pick[cid]=p;sync();log('희망 수집',`${full(C(cid))}: 담당 없음 → 조교가 ${p} 교수로 지정했습니다 (희망 없음).`)}
+  else if(a==='excl'){S.excl[t.dataset.c]=true;sync();log('희망 수집',`${full(C(t.dataset.c))}: 이번 학기 제외`)}
+  else if(a==='unexcl'){delete S.excl[t.dataset.c];sync()}
+  else if(a==='draft'){makeDraft();S.view='draft';toast('초안을 만들었습니다')}
+  else if(a==='publish'){askConfirm({title:'초안을 공개할까요?',body:'모든 교수님께 초안을 공개하고, 밀린 분반의 조율 메시지 초안을 만듭니다.\n메시지는 조율 화면에서 확인하고 [보내기]를 눌러야 갑니다.',ok:'공개'},()=>{publish();S.view='coord';toast('초안을 공개했습니다')});return}
+  else if(a==='sendOne'){if(!sendOne(m)){toast('메시지 검사에 걸려 보내지 않았습니다');const ta=document.getElementById('mt-'+m.id);if(ta)ta.focus();return}toast('보냈습니다')}
+  else if(a==='sendAll'){const us=openMsgs().filter(x=>!x.sent);let n=0;const ok=us.filter(x=>sendOne(x,n)&&++n).length;toast(ok===us.length?`${ok}건 보냈습니다`:`${ok}건 보냄 · ${us.length-ok}건은 검사에 걸려 남겼습니다`)}
+  else if(a==='msgReset'){m.text=m.text0}
+  else if(a==='method'){S.method=t.dataset.v;if(S.method!=='llm')S.llmFail=false;reparse();toast(`회신 해석: ${S.method==='llm'?'언어 모델':'키워드'}`)}
+  else if(a==='fake'){openMsgs().filter(x=>x.sent&&!x.reply).forEach(x=>receive(x,(SCRIPT[S.round]||{})[x.cid]||'A로 할게요.',null,'가상 회신'));toast('가상 회신을 받았습니다')}
+  else if(a==='confirm'){const pr=check(m);if(pr.action==='decide')return;
+    askConfirm({title:'처리안을 확인할까요?',body:`${full(C(m.cid))} · ${pr.text}\n[재배정]을 누를 때 시간표에 반영됩니다.`},()=>{m.decision=toDecision(pr,'확인');S.editing=null;log(`${S.round}차 조율`,`${full(C(m.cid))}: 조교 확인 · ${pr.text}`)});return}
+  else if(a==='edit'||a==='keep'){const k0=check(m).key||m.alts[0].k;S.editing={m:m.id,mode:a,sel:k0};if(a==='edit'){S.peek={m:m.id,k:k0};S.ttOpen=true;S.botOpen=false}}
+  else if(a==='peek'){const on=S.peek&&S.peek.m===m.id&&S.peek.k===t.dataset.v;S.peek=on?null:{m:m.id,k:t.dataset.v};if(!on&&S.view!=='draft'){S.ttOpen=true;S.botOpen=false}}
+  else if(a==='peekOff'){S.peek=null}
+  else if(a==='ttOpen'){S.ttOpen=true;S.botOpen=false}
+  else if(a==='ttClose'){S.ttOpen=false;render();const f=document.querySelector('.ttfab');if(f)f.focus();return}
+  else if(a==='mineOnly'){S.mineOnly=t.dataset.v==='1'}
+  else if(a==='sendConfirm'){askConfirm({title:'확정 요청을 보낼까요?',body:`교수님 ${profsWithCourses().length}명께 최종 시간표와 확정 요청 메시지를 보냅니다.\n모두 [확정]을 누르면 내보낼 수 있습니다.`,ok:'보내기'},()=>{sendConfirms();toast('확정 요청을 보냈습니다')});return}
+  else if(a==='fakeConfirm'){S.confirms.filter(k=>!k.reply).forEach(k=>receiveConfirm(k,'','가상 회신'))}
+  else if(a==='confirmManual'){const k=S.confirms.find(x=>x.id===t.dataset.v);
+    askConfirm({title:`${k.prof} 교수님 확정을 직접 처리할까요?`,body:'회신 없이 확정한 것으로 기록합니다.',ok:'확정 처리',reason:true,placeholder:'예: 전화로 확인함'},reason=>{receiveConfirm(k,'','조교 직접 처리');k.reply.reason=reason;log('확정 요청',`${k.prof} 교수님: 조교 직접 처리 · 사유 "${reason}"`)});return}
+  else if(a==='cancel')S.editing=null;
+  else if(a==='save'){
+    const why=(document.getElementById('ed-why').value||'').trim();
+    if(!why){document.getElementById('ed-err').textContent='사유를 적어 주세요.';document.getElementById('ed-why').focus();return}
+    if(S.editing.mode==='keep')m.decision={kind:'현재대로 유지',action:{type:'keep'},reason:why};
+    else{const v=document.getElementById('ed-sel').value;m.decision={kind:'수정',action:v==='next'?{type:'next',conds:m.parsed?m.parsed.conditions:emptyCond()}:{type:'move',k:v},reason:why}}
+    log(`${S.round}차 조율`,`${full(C(m.cid))}: 조교 ${m.decision.kind} · 사유 "${why}"`);S.editing=null;
+  }
+  else if(a==='undo')m.decision=null;
+  else if(a==='resolve'){const ms=openMsgs(),done=ms.filter(x=>x.decision).length;
+    askConfirm({title:`${S.round}차 재배정을 할까요?`,body:`확인한 처리안 ${done}건만 반영하고 나머지 배정은 그대로 둡니다.${ms.length-done?`\n정하지 않은 ${ms.length-done}건은 ${S.round<3?'다음 차수로 넘어갑니다':'임시 배치로 확정됩니다'}.`:''}`,ok:'재배정'},
+      ()=>{resolveRound();S.view=S.stage==='review'?'final':'coord';toast(S.stage==='review'?'조율이 끝났습니다 · 교수님께 확정을 요청하세요':`${S.round}차 조율로 넘어갔습니다`)});return}
+  else if(a==='botOpen'){S.botOpen=true;S.ttOpen=false;S.botSeen=true;S.botFocus=true}
+  else if(a==='botClose'){S.botOpen=false;render();const f=document.querySelector('.botfab');if(f)f.focus();return}
+  else if(a==='botEx'){botRun(t.dataset.v);S.botFocus=true}
+  else if(a==='botApply'){const i=+t.dataset.i,p=S.bot.turns[i].preview;
+    askConfirm({title:'시간표에 적용할까요?',body:`바뀌는 분반 ${p.changes.length}개 · 하드 규칙 위반 ${p.v}건${p.notice?`\n이미 정해진 강의 ${p.notice}개가 바뀌어 교수님께 변경 안내가 필요합니다.`:''}`,ok:'적용',reason:true,placeholder:'예: 305 공사 일정이 확정됨'},reason=>applyBot(i,reason));return}
+  else if(a==='botCancel'){S.bot.turns[+t.dataset.i].preview.state='cancel'}
+  else if(a==='csv'){try{exportCsv();toast('CSV 파일을 내려받았습니다')}catch(err){toast('내려받지 못했습니다. 다시 눌러 주세요')}return}
+  else if(a==='print'){window.print();return}
+  else if(a==='reset'){askConfirm({title:'처음부터 다시 할까요?',body:'시연 상태를 모두 지웁니다.',ok:'다시 시작'},()=>{S=init();sync();toast('처음 상태로 돌렸습니다')});return}
+  else if(a==='example'){const f=t.closest('form');f.querySelector('textarea[name=text]').value=SCRIPT[m.round][m.cid];return}
+  render();
+});
+document.addEventListener('keydown',e=>{
+  if(e.key==='Escape'&&S.botOpen&&S.role==='ta'&&!document.getElementById('dlg').open){S.botOpen=false;render();const f=document.querySelector('.botfab');if(f)f.focus();return}
+  if(e.key==='Escape'&&S.ttOpen&&S.role==='ta'&&!document.getElementById('dlg').open&&document.querySelector('.ttpanel')){S.ttOpen=false;render();const f=document.querySelector('.ttfab');if(f)f.focus();return}
+  // 칠하기 칸: 화살표로 옮기기 (막힌 칸은 건너뜀)
+  const el=e.target.closest&&e.target.closest('.pg .pc');
+  const MV={ArrowLeft:[-1,0],ArrowRight:[1,0],ArrowUp:[0,-1],ArrowDown:[0,1]}[e.key];
+  if(!el||!MV||!el.dataset.paint)return;
+  e.preventDefault();let d=+el.dataset.d,k=+el.dataset.s;
+  for(;;){d+=MV[0];k+=MV[1];if(d<0||d>4||k<0||k>=SLOTS.length)return;
+    const n=document.querySelector(`[data-paint="${el.dataset.paint}"][data-d="${d}"][data-s="${k}"]`);if(n&&!n.disabled){n.focus();return}}
+});
+document.addEventListener('change',e=>{
+  const k=e.target.dataset.chg;if(!k)return;
+  const x=e.target.dataset.c?claimOf(e.target.dataset.c,S.prof):null;
+  if(k==='room')S.room=e.target.value;
+  if(k==='prof'){S.prof=e.target.value}
+  if(k==='fmust'&&x)x.f.must=e.target.checked;
+  if(k==='consec'){S.consec[S.prof]=e.target.value;log('희망 수집',`${S.prof} 교수님 연강: ${CONSN[e.target.value]}`)}
+  if(k==='flab'&&x)x.f.lab=e.target.value==='1';
+  if(k==='fsize'&&x)x.f.size=+e.target.value;
+  if(k==='fpref'&&x)x.f.pref=e.target.value||null;
+  if(k==='claim'){const cid=e.target.dataset.c;
+    if(e.target.checked){if(!claimOf(cid,S.prof))S.claims.push(mkClaim(cid,S.prof,emptyF()))}
+    else{S.claims=S.claims.filter(y=>!(y.cid===cid&&y.prof===S.prof));if(S.pick[cid]===S.prof)delete S.pick[cid]}
+    sync();log('희망 수집',`${S.prof} 교수님이 ${full(C(cid))}을(를) ${e.target.checked?'골랐습니다':'뺐습니다'}.`)}
+  if(k==='reveal'){S.reveal=e.target.checked;log('설정',`상대 교수 이름 알리기: ${S.reveal?'켬':'끔'}`)}
+  if(k==='llmFail'){S.llmFail=e.target.checked;reparse();toast(S.llmFail?'언어 모델 실패를 흉내 냅니다 (fallback)':'언어 모델 실패 흉내를 껐습니다')}
+  if(k==='autoReply'){S.autoReply=e.target.checked;if(S.autoReply)openMsgs().filter(m=>m.sent&&!m.reply).forEach((m,i)=>later(()=>autoReply(m),i))}
+  if(k==='edsel'){const v=e.target.value;if(S.editing)S.editing.sel=v;S.peek=v==='next'?null:{m:e.target.dataset.m,k:v};if(v!=='next'){S.ttOpen=true;S.botOpen=false}render({keep:true});return}
+  render();
+});
+document.addEventListener('input',e=>{
+  const k=e.target.dataset.inp;
+  if(k==='msgtext'){const m=S.msgs.find(x=>x.id===e.target.dataset.m);if(!m)return;m.text=e.target.value;
+    const box=document.querySelector(`[data-probs="${m.id}"]`);if(box)box.innerHTML=probsHTML(m);return}
+  if(k!=='fetc')return;const x=claimOf(e.target.dataset.c,S.prof);if(!x)return;
+  x.f.etc=e.target.value;x.f.etcOk=false;const sum=document.querySelector(`[data-sum="${x.cid}"]`);if(sum)sum.innerHTML=fChips(x.f,S.prof);
+});
+document.addEventListener('submit',e=>{
+  const f=e.target;e.preventDefault();
+  if(f.dataset.form==='dlg'){
+    let reason='';
+    if(DLG.reason){reason=(f.querySelector('#dlg-r').value||'').trim();if(!reason){f.querySelector('#dlg-e').textContent='사유를 적어 주세요.';f.querySelector('#dlg-r').focus();return}}
+    const cb=DLG.onOk;closeDlg();cb(reason);render();return}
+  if(f.dataset.form==='bot'){const v=f.q.value.trim();if(!v){f.q.focus();return}botRun(v);S.botFocus=true}
+  if(f.dataset.form==='reply'){const m=S.msgs.find(x=>x.id===f.dataset.m),ch=f.querySelector('input[name=ch]:checked'),txt=f.text.value.trim();
+    if(!ch&&!txt){f.text.focus();return}
+    receive(m,txt,ch?ch.value:null,`${C(m.cid).prof} 교수님`);log(`${m.round}차 조율`,`${full(C(m.cid))}: ${C(m.cid).prof} 교수님 답장 도착`);toast('답장을 보냈습니다')}
+  if(f.dataset.form==='confirm'){const k=S.confirms.find(x=>x.id===f.dataset.k);if(k&&!k.reply){receiveConfirm(k,f.text.value.trim(),`${k.prof} 교수님`);if(S.stage!=='final')toast('확정 회신을 보냈습니다')}}
+  render();
+});
+document.getElementById('dlg').addEventListener('close',()=>{const k=DLG&&DLG.ret;DLG=null;if(k)restoreFocus(k)});
+render();
+</script>
+</body>
+</html>

@@ -20,7 +20,8 @@ from pydantic import BaseModel
 
 from .. import engine
 from ..contracts import (
-    DAYS, LATE_SLOT, STARTS, AssistantCommand, Block, Day, alternative, dump, late_penalty, no_long_at_1800,
+    DAYS, LATE_SLOT, STARTS, AssistantCommand, Block, Day, alternative, block_room, dump, late_penalty,
+    no_long_at_1800,
 )
 from .llm import LLMUnavailable, generate_json, load_prompt
 
@@ -115,8 +116,22 @@ def _block_text(b: Block) -> str:
     return f"{b.day} {b.start}~{_to_hhmm(e)}"
 
 
-def _place_text(blocks: List[Block], room: Optional[str]) -> str:
-    return f"{' / '.join(_block_text(b) for b in blocks) or '시간 없음'} · {room or '강의실 미정'}"
+def _place_text(blocks: List[Block], room: Optional[str] = None) -> str:
+    """수업마다 강의실이 같으면 "화 13:30~14:45 / 목 13:30~14:45 · 문화관 03407",
+    다르면 "화 13:30~14:45 문화관 03407 / 목 13:30~14:45 정보과학관 21304".
+    room을 주면 모든 수업을 그 강의실로 본다 (Block.room이 비었을 때도 room)."""
+    rooms = [room or b.room for b in blocks]
+    if len(set(rooms)) > 1:
+        return " / ".join(f"{_block_text(b)} {r or '강의실 미정'}" for b, r in zip(blocks, rooms))
+    one = rooms[0] if rooms else room
+    return f"{' / '.join(_block_text(b) for b in blocks) or '시간 없음'} · {one or '강의실 미정'}"
+
+
+def _asg_text(a) -> str:
+    """배정 하나를 글로 (수업마다 그 수업의 강의실)."""
+    if not a.blocks:
+        return _place_text([], a.room)
+    return _place_text([b.model_copy(update={"room": block_room(a, b)}) for b in a.blocks])
 
 
 def section_label(sec) -> str:
@@ -537,7 +552,7 @@ def _new_blocks(cur: List[Block], cmd: AssistantQuery) -> Tuple[Optional[List[Bl
     days = cmd.days
     if len(days) > len(cur):
         return None, f"이 분반은 주 {len(cur)}번 수업이에요. 요일을 {len(cur)}개만 알려 주세요."
-    out = [Block(day=b.day, start=b.start, slots=b.slots) for b in cur]
+    out = [Block(day=b.day, start=b.start, slots=b.slots, room=b.room) for b in cur]   # 수업마다 강의실 유지
     if len(days) == len(cur):
         for b, d in zip(out, days):
             b.day = d
@@ -598,19 +613,21 @@ def _forbidden(blocks: List[Block], sec, wish, fixed_blocks: List[dict]) -> Tupl
     return None, note
 
 
-def _pick_room(cmd: AssistantQuery, store, current: Optional[str]) -> Optional[str]:
+def _pick_room(cmd: AssistantQuery, store, a) -> Optional[str]:
+    """바꿀 강의실. None = 수업마다 지금 강의실 그대로, 값 = 분반의 모든 수업을 그 강의실로."""
     if cmd.room:
         return cmd.room
     if cmd.building:
-        if current and current.startswith(cmd.building + " "):
-            return current
+        current = [block_room(a, b) for b in a.blocks]
+        if current and all(r and r.startswith(cmd.building + " ") for r in current):
+            return None
         sec = store.get_section(cmd.section_id) if cmd.section_id else None
         need_lab = sec is not None and sec.lab_need == "MUST"
         size = (sec.enrollment or 0) if sec else 0
         rooms = [r for r in store.list_rooms() if r.building == cmd.building
                  and (r.is_lab or not need_lab) and (r.capacity is None or r.capacity >= size)]
-        return rooms[0].id if rooms else current
-    return current
+        return rooms[0].id if rooms else None
+    return None
 
 
 def _explain(cmd: AssistantQuery, store) -> dict:
@@ -625,7 +642,7 @@ def _explain(cmd: AssistantQuery, store) -> dict:
             lines.append("아직 초안이 없어 배정 자리가 없어요. 초안을 만든 뒤 다시 물어봐 주세요.")
         return _result(" ".join(lines) or f"{title}의 배정 정보가 없어요.")
 
-    lines.append(f"{title} 지금 배정: {_place_text(a.blocks, a.room)}.")
+    lines.append(f"{title} 지금 배정: {_asg_text(a)}.")
     if sec.shape != "MANUAL":
         wish = store.get_wish(sec.id)
         if wish is None or not wish.cells:
@@ -681,7 +698,7 @@ def _what_if(cmd: AssistantQuery, store, as_move: bool) -> dict:
         a = by_id.get(sid)
         sec = store.get_section(sid)
         return {"section_id": sid, "name": section_title(sec) if sec else sid,
-                "before": _place_text(a.blocks, a.room) if a else None, "after": after, "note": note}
+                "before": _asg_text(a) if a else None, "after": after, "note": note}
 
     # 분반 없이: 시간 비우기 / 강의실 못 씀
     if not cmd.section_id:
@@ -709,21 +726,25 @@ def _what_if(cmd: AssistantQuery, store, as_move: bool) -> dict:
     blocks, ask = _new_blocks(a.blocks, cmd)
     if ask:
         return _result(ask)
-    room = _pick_room(cmd, store, a.room)
-    if [dump(b) for b in blocks] == [dump(b) for b in a.blocks] and room == a.room:
-        return _result(f"{title}은(는) 이미 그 자리예요: {_place_text(a.blocks, a.room)}.")
+    room = _pick_room(cmd, store, a)
+    if room:
+        blocks = [b.model_copy(update={"room": room}) for b in blocks]
+    else:
+        blocks = [b.model_copy(update={"room": b.room or a.room}) for b in blocks]
+    if [dump(b) for b in blocks] == [dump(b.model_copy(update={"room": block_room(a, b)})) for b in a.blocks]:
+        return _result(f"{title}은(는) 이미 그 자리예요: {_asg_text(a)}.")
     why_not, chapel_note = _forbidden(blocks, sec, store.get_wish(sec.id), store.fixed_blocks)
     if why_not:   # 교수 불가 시간·채플·18:00 연강으로는 옮기지 않는다 (미리 보기도 하지 않음)
-        return _result(f"{title}을(를) {_place_text(blocks, room)}(으)로는 옮기지 않아요. {why_not}")
+        return _result(f"{title}을(를) {_place_text(blocks)}(으)로는 옮기지 않아요. {why_not}")
 
     change = {"kind": "move", "section_id": sec.id, "day": blocks[0].day, "start": blocks[0].start,
               "room": room, "blocks": [dump(b) for b in blocks]}
     res = engine.what_if(tt, change)
     others = [s for s in res["changed"] if s != sec.id and s in by_id]
-    rows = [row(sec.id, _place_text(blocks, room), "옮김")]
+    rows = [row(sec.id, _place_text(blocks), "옮김")]
     rows += [row(s, "겹침 → 다시 배정 필요", "영향 받음") for s in others]
 
-    lines = [f"{title}을(를) {_place_text(blocks, room)}(으)로 옮기면"]
+    lines = [f"{title}을(를) {_place_text(blocks)}(으)로 옮기면"]
     lines.append(f"같이 바뀌어야 하는 다른 분반 {len(others)}개, 규칙 위반 {res['violations']}건이에요.")
     if late_penalty(blocks):
         lines.append(f"{LATE_SLOT} 교시는 다른 방법이 없을 때만 쓰는 늦은 교시예요(큰 감점).")
@@ -738,9 +759,9 @@ def _what_if(cmd: AssistantQuery, store, as_move: bool) -> dict:
     _PROPOSALS[pid] = {
         "proposal_id": pid,
         "section_id": sec.id,
-        "alternative": alternative("A", blocks, room),
+        "alternative": alternative("A", blocks),   # 수업마다 강의실 (Meeting.room)
         "base": timetable_key(tt),
-        "summary": f"{title}: {_place_text(a.blocks, a.room)} → {_place_text(blocks, room)}",
+        "summary": f"{title}: {_asg_text(a)} → {_place_text(blocks)}",
         "violations": res["violations"],
     }
     lines.append("아직 반영하지 않았어요. [적용]을 누르고 사유를 적으면 반영돼요.")

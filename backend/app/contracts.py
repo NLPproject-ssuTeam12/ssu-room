@@ -67,6 +67,7 @@ class Block(BaseModel):
     day: BlockDay
     start: str
     slots: int = Field(..., ge=1)   # 1 = 75분, 2 = 연강
+    room: Optional[str] = None      # 이 수업의 강의실. 비면 Assignment.room (block_room으로 읽는다)
 
     _start = validator("start", allow_reuse=True)(_check_hhmm)
 
@@ -92,11 +93,47 @@ class Wish(BaseModel):
 
 
 class Assignment(BaseModel):
+    """한 분반의 배정. 수업(회차)마다 강의실이 다를 수 있어서 강의실은 blocks[].room에 둔다.
+    room은 화면 호환용 대표 강의실(첫 수업의 강의실). 만들 때 fill_rooms로 둘을 맞춘다."""
     section_id: str
     blocks: List[Block] = []
-    room: Optional[str] = None
+    room: Optional[str] = None     # 대표 강의실 = 첫 수업의 강의실
     status: Literal["DONE", "COORD", "MANUAL"] = "DONE"
     reason: Optional[str] = None   # 밀린 이유 (COORD일 때)
+
+    @model_validator(mode="after")
+    def _fill(self):
+        return fill_rooms(self)
+
+
+def block_room(asg: "Assignment", block: Block) -> Optional[str]:
+    """그 수업의 강의실. Block.room이 비어 있으면 Assignment.room으로 본다 (이 규칙은 여기 한 곳)."""
+    return block.room or asg.room
+
+
+def fill_rooms(asg: "Assignment") -> "Assignment":
+    """빈 Block.room을 대표 강의실로 채우고, 대표 강의실이 비었으면 첫 수업의 강의실로 채운다."""
+    if asg.room is None:
+        asg.room = next((b.room for b in asg.blocks if b.room), None)
+    for b in asg.blocks:
+        if b.room is None:
+            b.room = asg.room
+    return asg
+
+
+def set_place(asg: "Assignment", blocks: List[Block], room: Optional[str] = None) -> "Assignment":
+    """수업 칸을 바꾼다. room을 주면 모든 수업을 그 강의실로, 안 주면 blocks[].room을 그대로 쓴다."""
+    asg.blocks = [b.model_copy(update={"room": room}) if room else b.model_copy() for b in blocks]
+    asg.room = room if room else next((b.room for b in asg.blocks if b.room), None)
+    return fill_rooms(asg)
+
+
+def set_room(asg: "Assignment", room: Optional[str]) -> "Assignment":
+    """강의실만 바꾼다: 분반의 모든 수업에 적용."""
+    asg.room = room
+    for b in asg.blocks:
+        b.room = room
+    return asg
 
 
 class Timetable(BaseModel):
@@ -365,26 +402,28 @@ def block_minutes(b: Block) -> Tuple[int, int]:
     return s, s + 75 * b.slots + 15 * (b.slots - 1)
 
 
-def blocks_to_meetings(blocks: List[Block], room: Optional[str]) -> List[Meeting]:
+def blocks_to_meetings(blocks: List[Block], room: Optional[str] = None) -> List[Meeting]:
+    """room을 주면 모든 수업을 그 강의실로, 안 주면 수업마다 Block.room."""
     out = []
     for b in blocks:
         _, e = block_minutes(b)
         out.append(Meeting(day=DAYS.index(b.day), start=b.start, end=f"{e // 60:02d}:{e % 60:02d}",
-                           room=room or "강의실 미정"))
+                           room=room or b.room or "강의실 미정"))
     return out
 
 
 def meetings_to_blocks(meetings) -> Tuple[List[Block], Optional[str]]:
-    """Meeting 목록 → (Block 목록, 강의실). 배정(Assignment)은 강의실이 하나라 첫 수업의 강의실을 쓴다."""
+    """Meeting 목록 → (Block 목록, 대표 강의실). 수업마다 강의실은 Block.room에 그대로 둔다.
+    대표 강의실은 첫 수업의 강의실 (Assignment.room과 같은 규칙)."""
     blocks = []
     for m in meetings:
         h0, m0 = map(int, m.start.split(":"))
         h1, m1 = map(int, m.end.split(":"))
         slots = 1 if (h1 * 60 + m1) - (h0 * 60 + m0) <= 75 else 2
-        blocks.append(Block(day=DAYS[m.day], start=m.start, slots=slots))
-    room = meetings[0].room if meetings else None
-    return blocks, (None if room == "강의실 미정" else room)
+        room = None if m.room == "강의실 미정" else m.room
+        blocks.append(Block(day=DAYS[m.day], start=m.start, slots=slots, room=room))
+    return blocks, (blocks[0].room if blocks else None)
 
 
-def alternative(key: str, blocks: List[Block], room: Optional[str]):
+def alternative(key: str, blocks: List[Block], room: Optional[str] = None):
     return Alternative(key=key, meetings=blocks_to_meetings(blocks, room))

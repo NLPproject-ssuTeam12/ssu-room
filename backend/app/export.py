@@ -5,12 +5,13 @@
 - write_xlsx: 행 목록 → .xlsx 바이트
 
 SAP 실제 입력 양식은 받지 못했다. 열은 제안 양식이고, 시트 맨 위에 그렇게 적는다.
+수업(회차)마다 강의실이 다르면 '요일·시간'과 '강의실'을 같은 순서로 " / "로 이어 짝지어 보인다.
 """
 
 import io
 from typing import Dict, Iterable, List
 
-from .contracts import DAYS, Section, Timetable
+from .contracts import DAYS, Assignment, Section, Timetable, block_room
 
 COLUMNS = ["과목 코드", "과목명", "분반", "교수", "요일·시간", "강의실"]
 NOTICE = "가상/가명 데이터, SAP 실제 양식 아님(제안 양식). 교수 이름은 가명이다."
@@ -27,10 +28,21 @@ def _day_order(day: str) -> int:
     return DAYS.index(day) if day in DAYS else len(DAYS)    # 토요일(MANUAL)은 맨 뒤
 
 
+def _sorted(blocks):
+    return sorted(blocks, key=lambda b: (_day_order(b.day), b.start))
+
+
 def time_text(blocks) -> str:
     """수업 칸 → "화 10:30~11:45 / 목 10:30~11:45". 칸이 없으면 "미배정"."""
-    bs = sorted(blocks, key=lambda b: (_day_order(b.day), b.start))
-    return " / ".join(f"{b.day} {b.start}~{_end(b.start, b.slots)}" for b in bs) or "미배정"
+    return " / ".join(f"{b.day} {b.start}~{_end(b.start, b.slots)}" for b in _sorted(blocks)) or "미배정"
+
+
+def room_text(a: Assignment) -> str:
+    """수업마다 같은 강의실이면 하나, 다르면 time_text와 같은 순서로 "문화관 03407 / 정보과학관 21304"."""
+    rooms = [block_room(a, b) or "미정" for b in _sorted(a.blocks)]
+    if len(set(rooms)) > 1:
+        return " / ".join(rooms)
+    return rooms[0] if rooms else (a.room or "미정")
 
 
 def timetable_rows(timetable: Timetable, sections: Iterable[Section]) -> List[Dict[str, str]]:
@@ -48,7 +60,7 @@ def timetable_rows(timetable: Timetable, sections: Iterable[Section]) -> List[Di
             "분반": sec.code[-2:] + (f" {div}" if div else ""),
             "교수": sec.professor or "담당 미정",
             "요일·시간": time_text(a.blocks),
-            "강의실": a.room or "미정",
+            "강의실": room_text(a),
         })
     rows.sort(key=lambda r: (r["과목 코드"], r["분반"]))
     return rows
