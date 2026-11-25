@@ -232,10 +232,13 @@ class ReplyParse(BaseModel):
     """parse_reply 결과."""
     kind: Kind
     picks: List[Key] = []          # 고른 안, 선호 순서
+    ordered: bool = False          # 교수가 글로 선호 순서를 밝혔는가 (picks 둘 이상일 때만). pick_best respect_order
+    keep: bool = False             # '지금 자리 그대로' (KEEP 버튼 또는 can_keep일 때 글). 처리안 keep
     conditions: Conditions = Conditions()
     note: str = ""                 # 조교가 확인하거나 바꿔야 할 요청 (강의실 변경·장비·정원·교시 조정 희망). 배정 엔진은 읽지 않고 조교가 본다
     method: Literal["keyword", "llm"] = "keyword"
     fallback: bool = False         # 언어 모델이 실패해서 키워드 방식으로 대신 처리했으면 True
+    fallback_reason: str = ""      # 넘어간 이유 ("503 과부하" 등)
 
 
 class MessageInput(BaseModel):
@@ -251,6 +254,9 @@ class MessageInput(BaseModel):
     reveal: bool = True                    # 상대 교수 이름 알리기 (학과 설정)
     prev_conditions: Optional[Conditions] = None   # 지난 차수 답장에서 받은 조건
     hidden: List[str] = []         # 메시지에 나오면 안 되는 글 (상대 교수의 기타 요청 등)
+    current: Optional[str] = None  # 지금 배정된 자리 (alt_label 모양). 못 놓인 분반은 None. 있으면 교수 화면에 KEEP
+    off: Literal["time", "building", "both"] = "time"   # 희망에서 어긋난 것 (엔진 coord_targets time_off·building_off)
+    wish_building: Optional[str] = None   # 희망 건물. off가 building·both면 필수
 
 
 class Message(BaseModel):
@@ -269,7 +275,7 @@ class PickCheck(BaseModel):
 
 class Proposal(BaseModel):
     """match_conditions 결과 = 조교에게 보여 줄 처리안. 조교가 [확인]을 눌러야 실행된다."""
-    action: Literal["move", "next", "decide"]   # move = 고른 안으로 옮김, next = 조건 넣어 다음 차수, decide = 조교가 직접
+    action: Literal["move", "next", "decide", "keep"]   # move = 고른 안으로, next = 조건 넣어 다음 차수, decide = 조교가 직접, keep = 지금 자리 그대로
     key: Optional[Key] = None
     conditions: Conditions = Conditions()
     text: str

@@ -397,14 +397,18 @@ fetch(`http://localhost:8000/coord/${encodeURIComponent(sectionId)}/message`, { 
 
 ### `POST /coord/{id}/reply`
 교수 답장을 해석해 처리안을 만든다. **반영은 안 한다.** ROUND에서만, 메시지를 보낸 뒤.
-함수: `parse_reply(text, choice, alternatives=…, message=…, method=…)` → `match_conditions(parse, alternatives, round, unavailable)`.
+함수: `parse_reply(text, choice, choices=…, alternatives=…, message=…, method=…, can_keep=…)` → `match_conditions(parse, alternatives, round, unavailable)`.
 
-요청:
+요청 (11/25 재성 #19, 하윤 #17):
 ```json
-{ "text": "A나 C 다 괜찮아요. 수요일은 17시 전에 끝나야 해요", "choice": null, "method": "keyword" }
+{ "text": "A나 C 다 괜찮아요. 수요일은 17시 전에 끝나야 해요", "choices": ["A", "C", "ETC"], "method": "keyword" }
 ```
-- `choice`: 교수가 화면 버튼으로 고른 안 `"A"`/`"B"`/`"C"`, 모두 어려움 `"none"`, 안 누름 `null`(기본). 버튼이 글보다 먼저다.
-- `text`와 `choice` 중 하나는 있어야 한다(둘 다 비면 422).
+- `choices`: 교수 답장 화면에서 누른 값 `"A"`·`"B"`·`"C"`·`"ETC"`(기타)·`"KEEP"`(지금 자리 그대로) 중 **하나 이상**, 여러 개 가능.
+  - `ETC`면 `text`(기타 글) 필수. 비면 422.
+  - `KEEP`은 지금 자리가 있는 분반만(조율 목록의 `current`가 있음). A·B·C와 같이 못 고른다(혼자 또는 기타와만). 어기면 422.
+  - 버튼이 글보다 먼저다. 여러 개를 누르고 글로 순서를 밝히면 `parse.ordered: true`.
+- 예전 값 `choice`(`"A"`/`"B"`/`"C"`, 모두 어려움 `"none"`)도 받는다. `choices`가 있으면 `choices`를 쓴다. 둘 다 없으면 `text`가 있어야 한다(422).
+- `can_keep`은 서버가 채운다(지금 자리가 있으면 true). 그러면 글로 "지금 그대로 괜찮아요"라고 써도 `keep`.
 - `alternatives`·`message`는 서버가 조율 목록의 대안과 보낸 글로 넣는다.
 - `unavailable`: 서버가 지금 시간표에 대안을 넣어 보고(`check_rules`) 이 분반이 낀 위반이 생기는 안의 키.
 
@@ -471,9 +475,10 @@ fetch(`http://localhost:8000/coord/${encodeURIComponent(sectionId)}/message`, { 
 
 | action | 화면 버튼 | 필요한 값 | 하는 일 |
 |---|---|---|---|
-| `confirm` | [확인] | 없음 | 처리안이 `move`면 `key` 안으로 옮긴다. `next`면 조건을 기록하고 상태 `NEXT` |
+| `confirm` | [확인] | 없음 | 처리안이 `move`면 `key` 안으로 옮긴다(DB 모드: 교수가 둘 이상 골랐으면 엔진 `pick_best`가 최종 안). `next`면 조건을 기록하고 상태 `NEXT`. **`keep`이면 [현재대로 유지]와 같다** |
 | `edit` | [수정] | **`reason`(빈칸 안 됨)과 `choice`(`A`/`B`/`C`) 둘 다** | 조교가 고른 안으로 옮기고 사유를 남긴다 |
-| `keep` | [현재대로 유지] | `reason`은 선택 | 안 옮긴다. 분반은 `COORD`로 남아 다음 차수로 간다 |
+| `keep` | [현재대로 유지] | `reason`은 선택 | 안 옮긴다. 상태 `KEPT` |
+| `offline` | [따로 연락] | `reason`은 선택 | 상태 `OFFLINE`. 시스템 밖에서 교수와 정한 뒤 `POST /coord/{id}/manual`로 넣는다 (11/25) |
 
 ```json
 { "action": "edit", "reason": "교수님과 전화로 B안 합의", "choice": "B" }
@@ -507,7 +512,19 @@ fetch(`http://localhost:8000/coord/${encodeURIComponent(sectionId)}/message`, { 
 | 422 | edit인데 안 없음 | `수정하려면 고를 안(choice: A|B|C)을 적어야 합니다.` |
 | 422 | 그 안이 없음 | `B안이 없습니다.` |
 | 409 | confirm인데 답장 전 | `아직 처리안이 없습니다. 답장을 먼저 넣으세요.` |
-| 409 | confirm인데 처리안이 decide | `조교가 직접 정해야 하는 처리안입니다 (action=decide). [수정]이나 [현재대로 유지]를 고르세요.` |
+| 409 | confirm인데 처리안이 decide | `조교가 직접 정해야 하는 처리안입니다 (action=decide). [수정]·[현재대로 유지]·[따로 연락]을 고르세요.` |
+| 409 | 따로 연락 중 | `따로 연락 중인 분반입니다. 정한 자리를 POST /coord/{분반}/manual 로 넣으세요.` |
+
+### `POST /coord/{id}/manual`
+[따로 연락]한 분반(`OFFLINE`)을 조교가 교수와 정한 자리에 놓는다. 그 분반은 `MANUAL`(고정)이 되고 조율은 `RESOLVED`.
+규칙 위반은 막지 않고 `warnings`로 돌려준다(교수와 직접 합의한 결과). DB 모드는 하윤 `manual_place`.
+
+```json
+{ "meetings": [ { "day": 0, "start": "09:00", "end": "10:15", "room": "문화관 03105" },
+                { "day": 2, "start": "09:00", "end": "10:15", "room": "문화관 03105" } ],
+  "reason": "교수님과 통화로 정함" }
+```
+응답 `{decision, coord, violations, warnings}`. `OFFLINE`이 아니면 409, `meetings`가 비면 422.
 | 409 | 이번 차수에 이미 결정 | `이번 차수(1차)에 이미 결정한 분반입니다.` |
 
 ### 조율 3개(`message`·`reply`·`decide`) 공통 에러

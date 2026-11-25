@@ -30,6 +30,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 from backend.app import engine  # noqa: E402
 from backend.app.contracts import conditions_json  # noqa: E402
 from backend.app.main import app  # noqa: E402
+from backend.app.store import store  # noqa: E402
 
 REPLY = "A나 C 다 괜찮아요. 수요일은 17시 전에 끝나야 해요"
 COORD_MOD = "backend.app.nlp.coord"
@@ -330,8 +331,10 @@ def test_engine_uses_real_function_when_present(client, restore_engine):
     fake = types.ModuleType(COORD_MOD)
     fake.__spec__ = importlib.machinery.ModuleSpec(COORD_MOD, None)
 
-    def parse_reply(text, choice=None, *, alternatives=None, message="", method="keyword"):
-        return engine.stubs.parse_reply(text, choice, alternatives=alternatives, message=message, method=method)
+    def parse_reply(text, choice=None, *, choices=None, alternatives=None, message="", method="keyword",
+                    can_keep=False):
+        return engine.stubs.parse_reply(text, choice, choices=choices, alternatives=alternatives, message=message,
+                                        method=method, can_keep=can_keep)
 
     fake.parse_reply = parse_reply
     sys.modules[COORD_MOD] = fake
@@ -543,7 +546,8 @@ def test_reply_note_shown_but_not_used(client, monkeypatch):
     assert r.json()["parse"]["note"] == "" and r.json()["note"] == ""
 
     # 언어 모델이 note를 채운 경우 (실제 호출 대신 가짜 응답)
-    def fake_parse(text, choice=None, *, alternatives=None, message="", method="keyword"):
+    def fake_parse(text, choice=None, *, choices=None, alternatives=None, message="", method="keyword",
+                   can_keep=False):
         return ReplyParse(kind="거절", conditions=Conditions.model_validate({"days": [3], "slots": ["13:30", "15:00"]}),
                           note="실습용 PC가 있는 방", method="llm")
 
@@ -752,3 +756,62 @@ def test_export_rows_function():
         {"과목 코드": "2150000101", "과목명": "다른과목", "분반": "01 (공통-재수강)", "교수": "담당 미정",
          "요일·시간": "미배정", "강의실": "미정"},
     ]
+
+
+# ---------- 재성 #19: 버튼 여러 개·기타·지금 자리 그대로·따로 연락 (메모리 모드) ----------
+
+def _sent(client):
+    sid = start_round(client)
+    assert client.post(f"/coord/{enc(sid)}/message").json()["sent"]
+    return sid
+
+
+def test_reply_choices_checked(client):
+    sid = _sent(client)
+    url = f"/coord/{enc(sid)}/reply"
+    assert client.post(url, json={"choices": []}).status_code == 422                       # 하나 이상
+    assert client.post(url, json={"choices": ["ETC"], "text": " "}).status_code == 422     # 기타는 글 필수
+    assert client.post(url, json={"choices": ["KEEP", "A"]}).status_code == 422            # KEEP은 혼자 또는 기타와만
+    assert client.post(url, json={"choices": ["D"]}).status_code == 422
+    r = client.post(url, json={"choices": ["B", "A"], "text": "B가 좋고 안 되면 A"})
+    assert r.status_code == 200, r.text
+    j = r.json()
+    assert j["choice"] == ["B", "A"] and j["parse"]["picks"][:2] == ["B", "A"] and "ordered" in j["parse"]
+
+
+def test_message_input_current_and_keep(client):
+    sid = _sent(client)
+    inp = store.message_input(sid)
+    assert inp.current and "·" in inp.current                 # 가짜 초안은 밀린 분반도 자리가 있다
+    r = client.post(f"/coord/{enc(sid)}/reply", json={"choices": ["KEEP"]})
+    assert r.status_code == 200, r.text
+    assert r.json()["parse"]["keep"] is True and r.json()["proposal"]["action"] == "keep"
+    before = client.get("/timetable").json()
+    r = client.post(f"/coord/{enc(sid)}/decide", json={"action": "confirm"})   # [확인] = [현재대로 유지]
+    assert r.status_code == 200, r.text
+    assert r.json()["coord"]["state"] == "KEPT" and client.get("/timetable").json() == before
+
+
+def test_keep_needs_current_place(client, monkeypatch):
+    sid = _sent(client)
+    monkeypatch.setattr(store, "current_label", lambda s: None)    # 못 놓인 분반
+    r = client.post(f"/coord/{enc(sid)}/reply", json={"choices": ["KEEP"]})
+    assert r.status_code == 422
+
+
+def test_offline_then_manual_place(client):
+    sid = _sent(client)
+    r = client.post(f"/coord/{enc(sid)}/reply", json={"choices": ["ETC"], "text": "위 안은 다 어렵습니다"})
+    assert r.json()["proposal"]["action"] == "decide"
+    url = f"/coord/{enc(sid)}/manual"
+    assert client.post(url, json={"meetings": []}).status_code == 409                   # 따로 연락 전
+    r = client.post(f"/coord/{enc(sid)}/decide", json={"action": "offline", "reason": "전화로 정함"})
+    assert r.status_code == 200 and r.json()["coord"]["state"] == "OFFLINE"
+    assert client.post(f"/coord/{enc(sid)}/decide", json={"action": "keep"}).status_code == 409
+    meet = [{"day": 0, "start": "09:00", "end": "10:15", "room": "문화관 03105"},
+            {"day": 2, "start": "09:00", "end": "10:15", "room": "문화관 03105"}]
+    r = client.post(url, json={"meetings": meet, "reason": "교수님과 통화"})
+    assert r.status_code == 200, r.text
+    assert r.json()["coord"]["state"] == "RESOLVED" and "warnings" in r.json()
+    a = next(x for x in client.get("/timetable").json()["assignments"] if x["section_id"] == sid)
+    assert a["status"] == "MANUAL" and [(b["day"], b["start"]) for b in a["blocks"]] == [("월", "09:00"), ("수", "09:00")]

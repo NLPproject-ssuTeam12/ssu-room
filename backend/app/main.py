@@ -63,16 +63,35 @@ class MessageIn(BaseModel):
     method: Literal["keyword", "llm"] = "keyword"
 
 
+Choice = Literal["A", "B", "C", "ETC", "KEEP"]
+
+
 class ReplyIn(BaseModel):
     text: str = ""
-    choice: Optional[Literal["A", "B", "C", "none"]] = None   # 교수가 화면에서 누른 안. none = 모두 어려움
+    # 교수 답장 화면에서 누른 값 (하나 이상, 여러 개 가능). ETC = 기타(글 필수), KEEP = 지금 자리 그대로
+    choices: Optional[List[Choice]] = None
+    choice: Optional[Literal["A", "B", "C", "none"]] = None   # 예전 화면 값 (choices가 있으면 choices를 쓴다)
     method: Literal["keyword", "llm"] = "keyword"
 
 
 class DecideIn(BaseModel):
-    action: Literal["confirm", "edit", "keep"]
+    # confirm [확인] / edit [수정] / keep [현재대로 유지] / offline [따로 연락]
+    action: Literal["confirm", "edit", "keep", "offline"]
     reason: Optional[str] = None
     choice: Optional[Key] = None   # edit일 때 조교가 고른 안
+
+
+class MeetingIn(BaseModel):
+    day: int                        # 0=월 … 4=금
+    start: str
+    end: str
+    room: str
+
+
+class ManualIn(BaseModel):
+    """[따로 연락] 뒤 조교가 교수와 정한 자리. 그 분반은 고정된다."""
+    meetings: List[MeetingIn]
+    reason: Optional[str] = None
 
 
 class AssistantIn(BaseModel):
@@ -161,6 +180,23 @@ def _coord_target(sid: str) -> dict:
     if item["state"] in ("RESOLVED", "KEPT"):
         raise _conflict(f"이번 차수({store.round_no}차)에 이미 결정한 분반입니다.")
     return item
+
+
+def _check_reply(body: ReplyIn, can_keep: bool) -> None:
+    """답장 버튼·글 검사 (DB add_reply와 같은 규칙). 틀리면 422."""
+    if body.choices is not None:
+        picked = list(dict.fromkeys(body.choices))
+        if not picked:
+            raise HTTPException(status_code=422, detail="A·B·C·기타·지금 자리 그대로 중 하나 이상을 골라야 합니다.")
+        if "ETC" in picked and not body.text.strip():
+            raise HTTPException(status_code=422, detail="기타를 골랐으면 기타 내용을 적어야 합니다.")
+        if "KEEP" in picked and set(picked) & {"A", "B", "C"}:
+            raise HTTPException(status_code=422,
+                                detail="'지금 자리 그대로'는 A·B·C와 같이 고를 수 없습니다 (혼자 또는 기타와만).")
+        if "KEEP" in picked and not can_keep:
+            raise HTTPException(status_code=422, detail="'지금 자리 그대로'는 이미 자리가 있는 분반에서만 고를 수 있습니다.")
+    elif not body.text.strip() and body.choice is None:
+        raise HTTPException(status_code=422, detail="누른 값(choices)이나 답장 글(text)이 있어야 합니다.")
 
 
 # ---------- 상태 ----------
@@ -289,14 +325,15 @@ def post_reply(section_id: str, body: ReplyIn):
     item = _coord_target(section_id)
     if item["state"] == "OPEN":
         raise _conflict("먼저 조율 메시지를 보내야 답장을 받을 수 있습니다.")
-    if not body.text.strip() and body.choice is None:
-        raise HTTPException(status_code=422, detail="답장 글(text)이나 누른 안(choice)이 있어야 합니다.")
+    can_keep = store.current_label(section_id) is not None
+    _check_reply(body, can_keep)
     alts = item["alternatives"]
-    parsed = engine.parse_reply(body.text, body.choice, alternatives=alts,
-                                message=item["message"] or "", method=body.method)
+    parsed = engine.parse_reply(body.text, body.choice, choices=body.choices, alternatives=alts,
+                                message=item["message"] or "", method=body.method, can_keep=can_keep)
     unavailable = _unavailable(section_id, alts)
     proposal = engine.match_conditions(parsed, alts, store.round_no, unavailable)
-    rec = store.add_reply(section_id, body.text, body.choice, body.method, parsed, proposal, unavailable)
+    rec = store.add_reply(section_id, body.text, body.choices or body.choice, body.method, parsed, proposal,
+                          unavailable)
     store.update_coord(section_id, state="PROPOSED", proposal=proposal, last_parse=parsed)
     return rec
 
@@ -305,9 +342,19 @@ def post_reply(section_id: str, body: ReplyIn):
 def post_decide(section_id: str, body: DecideIn):
     item = _coord_target(section_id)
 
-    if body.action == "keep":
+    if item["state"] == "OFFLINE":
+        raise _conflict("따로 연락 중인 분반입니다. 정한 자리를 POST /coord/{분반}/manual 로 넣으세요.")
+    proposal = item["proposal"]
+    # [확인]인데 처리안이 '지금 자리 그대로'면 [현재대로 유지]와 같다
+    if body.action == "keep" or (body.action == "confirm" and proposal is not None and proposal.action == "keep"):
         rec = store.add_decision(section_id, "keep", body.reason, None)
         store.update_coord(section_id, state="KEPT")
+        return {"decision": rec, "coord": _coord_out(store.get_coord(section_id))}
+
+    if body.action == "offline":
+        # [따로 연락]: 시스템 밖에서 교수와 정한 뒤 POST /coord/{분반}/manual 로 넣는다
+        rec = store.add_decision(section_id, "offline", body.reason, None)
+        store.update_coord(section_id, state="OFFLINE")
         return {"decision": rec, "coord": _coord_out(store.get_coord(section_id))}
 
     if body.action == "edit":
@@ -319,7 +366,6 @@ def post_decide(section_id: str, body: DecideIn):
         if alt is None:
             raise HTTPException(status_code=422, detail=f"{body.choice}안이 없습니다.")
     else:  # confirm
-        proposal = item["proposal"]
         if proposal is None:
             raise _conflict("아직 처리안이 없습니다. 답장을 먼저 넣으세요.")
         if proposal.action == "next":
@@ -329,7 +375,7 @@ def post_decide(section_id: str, body: DecideIn):
             return {"decision": rec, "coord": _coord_out(store.get_coord(section_id))}
         if proposal.action != "move" or proposal.key is None:
             raise _conflict(f"조교가 직접 정해야 하는 처리안입니다 (action={proposal.action}). "
-                            "[수정]이나 [현재대로 유지]를 고르세요.")
+                            "[수정]·[현재대로 유지]·[따로 연락]을 고르세요.")
         alt = next((a for a in item["alternatives"] if a.key == proposal.key), None)
         if alt is None:
             raise _conflict(f"처리안의 {proposal.key}안이 대안 목록에 없습니다.")
@@ -344,6 +390,31 @@ def post_decide(section_id: str, body: DecideIn):
     store.update_coord(section_id, state="RESOLVED")
     return {"decision": rec, "coord": _coord_out(store.get_coord(section_id)),
             "violations": len(engine.check_rules(tt))}
+
+
+@app.post("/coord/{section_id}/manual")
+def post_manual(section_id: str, body: ManualIn):
+    """[따로 연락]한 분반을 조교가 교수와 정한 자리에 직접 놓는다. 그 분반은 MANUAL(고정).
+    규칙 위반은 막지 않고 경고(warnings)로 돌려준다."""
+    _section_or_404(section_id)
+    item = store.get_coord(section_id)
+    if item is None or item["state"] != "OFFLINE":
+        raise _conflict("[따로 연락]한 분반만 직접 놓을 수 있습니다.")
+    if not body.meetings:
+        raise HTTPException(status_code=422, detail="놓을 수업(meetings)이 없습니다.")
+    alt = Alternative(key="A", meetings=[dump(m) for m in body.meetings])
+    blocks, _ = meetings_to_blocks(alt.meetings)
+    tt = parse(Timetable, dump(store.timetable))
+    for a in tt.assignments:
+        if a.section_id == section_id:
+            set_place(a, blocks)
+            a.status, a.reason = "MANUAL", "조교 수동 배치 (따로 연락)"
+    store.set_timetable(tt)
+    rec = store.add_decision(section_id, "manual", body.reason, dump(alt))
+    store.update_coord(section_id, state="RESOLVED")
+    vs = [v for v in engine.check_rules(tt) if section_id in v.section_ids]
+    return {"decision": rec, "coord": _coord_out(store.get_coord(section_id)),
+            "violations": len(vs), "warnings": [dump(v) for v in vs]}
 
 
 # ---------- 차수·확정 ----------
