@@ -29,6 +29,8 @@ V11 = P("archive", "schema_v11.sql")    # 008까지 적용한 모양 (009 전)
 M9 = P("migrations", "009_20261125_section_response.sql")
 V12 = P("archive", "schema_v12.sql")    # 009까지 적용한 모양 (010 전)
 M10 = P("migrations", "010_20261125_lab_must_keep.sql")
+V13 = P("archive", "schema_v13.sql")    # 010까지 적용한 모양 (011 전)
+M11 = P("migrations", "011_20261125_hire_year.sql")
 
 def compare(label, con, target=None):
     """con 이 target(기본: 최종 schema.sql)과 같은 모양인지"""
@@ -104,7 +106,9 @@ ok1 = compare("001~008 적용 후 = schema_v11", old, V11) and ok1
 run(M9, old)
 ok1 = compare("001~009 적용 후 = schema_v12", old, V12) and ok1
 run(M10, old)
-ok1 = compare("001~010 적용 후", old) and ok1
+ok1 = compare("001~010 적용 후 = schema_v13", old, V13) and ok1
+run(M11, old)
+ok1 = compare("001~011 적용 후", old) and ok1
 
 print("\n=== 경로 2: schema_v4(001까지 적용된 모양)에서 002 → 003 → 004 → 005 → 006")
 v4 = sqlite3.connect(":memory:"); v4.executescript(open(P("archive","schema_v4.sql"), encoding="utf-8").read()); seed(v4)
@@ -125,7 +129,9 @@ ok2 = compare("v4 + 002~008 = schema_v11", v4, V11) and ok2
 run(M9, v4)
 ok2 = compare("v4 + 002~009 = schema_v12", v4, V12) and ok2
 run(M10, v4)
-ok2 = compare("v4 + 002~010", v4) and ok2
+ok2 = compare("v4 + 002~010 = schema_v13", v4, V13) and ok2
+run(M11, v4)
+ok2 = compare("v4 + 002~011", v4) and ok2
 print("\n=== 경로 3: schema_v7(004까지 적용된 모양)에서 005 → 006")
 def build_v7():
     v7 = sqlite3.connect(":memory:"); v7.executescript(open(P("archive","schema_v7.sql"), encoding="utf-8").read()); seed(v7); q = v7.execute
@@ -181,7 +187,9 @@ ok3 = compare("v7 + 005~008 = schema_v11", v7, V11) and ok3
 run(M9, v7)
 ok3 = compare("v7 + 005~009 = schema_v12", v7, V12) and ok3
 run(M10, v7)
-ok3 = compare("v7 + 005~010", v7) and ok3
+ok3 = compare("v7 + 005~010 = schema_v13", v7, V13) and ok3
+run(M11, v7)
+ok3 = compare("v7 + 005~011", v7) and ok3
 
 print("\n=== 경로 4: 목록 밖 status 가 있으면 005 가 멈추고 데이터는 그대로")
 v7b = build_v7(); v7b.execute("UPDATE proposal SET status='DONE' WHERE id=3"); v7b.commit()
@@ -347,7 +355,7 @@ q("INSERT INTO message(id,round_id,proposal_id,sender_id,receiver_id,kind,channe
 q("INSERT INTO proposal_option(id,proposal_id,option_no) VALUES (1,1,1)"); q("INSERT INTO reply_choice VALUES (2,'A',1)"); v11.commit()
 before = v11.execute("SELECT id, lab_requirement FROM course_response ORDER BY id").fetchall()
 run(M10, v11)
-ok9 = compare("v12 + 010", v11)
+ok9 = compare("v12 + 010 = schema_v13", v11, V13)
 after = v11.execute("SELECT id, lab_requirement FROM course_response ORDER BY id").fetchall()
 print("  실습실 1/0 → MUST/NONE:", before, "→", after)
 ok9 = ok9 and [a for a, _ in before] == [a for a, _ in after] and all({1: "MUST", 0: "NONE"}[x] == y for (_, x), (_, y) in zip(before, after))
@@ -359,4 +367,15 @@ for bad in ("UPDATE course_response SET lab_requirement=1 WHERE id=100", "INSERT
     except sqlite3.IntegrityError:
         print("  거부 OK:", bad)
 
-print("\n결과:", "모두 통과" if ok1 and ok2 and ok3 and ok4 and ok5 and ok6 and ok7 and ok8 and ok9 else "실패")
+print("\n=== 경로 10: schema_v13(010까지 적용된 모양)에서 011 — 교수 임용 연도")
+n_user = v11.execute("SELECT count(*) FROM user").fetchone()[0]
+run(M11, v11)
+ok10 = compare("v13 + 011", v11)
+ok10 = ok10 and v11.execute("SELECT count(*) FROM user WHERE hire_year IS NULL").fetchone()[0] == n_user
+v11.execute("UPDATE user SET hire_year=2008 WHERE id=2"); print("  임용 연도 저장:", v11.execute("SELECT id, hire_year FROM user WHERE id=2").fetchone())
+try:
+    v11.execute("UPDATE user SET hire_year=1800 WHERE id=2"); ok10 = False; print("  막아야 함: 1800")
+except sqlite3.IntegrityError:
+    print("  거부 OK: 임용 연도 1800")
+
+print("\n결과:", "모두 통과" if ok1 and ok2 and ok3 and ok4 and ok5 and ok6 and ok7 and ok8 and ok9 and ok10 else "실패")

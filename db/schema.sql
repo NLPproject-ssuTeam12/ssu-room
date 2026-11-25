@@ -10,7 +10,8 @@ CREATE TABLE user (
   name TEXT NOT NULL, email TEXT, phone TEXT,
   department_id INTEGER REFERENCES department(id),
   password_hash TEXT NOT NULL,
-  created_at TEXT DEFAULT CURRENT_TIMESTAMP
+  created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+  hire_year INTEGER CHECK (hire_year IS NULL OR hire_year BETWEEN 1950 AND 2100)   -- 교수 임용 연도 (연차). 동점일 때 먼저 임용된 교수 우선. 비면 연차 규칙을 건너뜀 (011)
 );
 CREATE TABLE time_grid (                      -- 시간 격자 한 벌 (예: 75분 교시제). 다른 방식이 필요하면 한 벌 더
   id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE

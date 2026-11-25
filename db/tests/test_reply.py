@@ -320,6 +320,17 @@ def test_keep_choice():
     assert status(con) == "KEPT"
 
 
+def test_set_hire_year():
+    con = make()
+    hdb.set_hire_year(con, 3, 2008)
+    assert con.execute("SELECT hire_year FROM user WHERE id=3").fetchone()[0] == 2008
+    hdb.set_hire_year(con, 3, None)
+    assert con.execute("SELECT hire_year FROM user WHERE id=3").fetchone()[0] is None
+    raises(hdb.set_hire_year, con, 1, 2008, has="교수가 아닙니다")                # 조교
+    raises(hdb.set_hire_year, con, 3, 1800, has="1950~2100")
+    raises(hdb.set_hire_year, con, 3, "2008", has="정수")
+
+
 def test_prev_unique_and_section_status():
     con = make()
     q = con.execute
