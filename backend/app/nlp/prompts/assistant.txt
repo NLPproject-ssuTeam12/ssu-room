@@ -6,10 +6,13 @@
 - move: 어떤 분반을 다른 요일·시각·강의실로 옮기라고 시킨다
 - what_if: 옮기거나 비우거나 못 쓰게 되면 어떻게 되는지 미리 물어본다 ("~하면?", "~해도 돼?")
 - status: 조율 진행 상황, 남은 분반 수, 몇 차인지 같은 현황을 묻는다
-- out_of_scope: 강의 시간표와 상관없는 질문 (날씨, 식당, 잡담, 다른 업무)
+- out_of_scope: 강의 시간표와 상관없는 질문 (날씨, 식당, 잡담, 수강신청, 메일 보내기 같은 다른 업무).
+  시간표 말이 섞여 있어도 시간표 밖 일을 시키면 out_of_scope. 그래도 질문에 나온 과목·교수는 뽑는다.
+- 답장·회신이 왔는지, 몇 차인지, 남은 분반을 물으면 status.
 
 ## 정보
-- course: 질문에 나온 과목명. 줄임말이면 아래 분반 목록의 정식 과목명으로 쓴다. 목록에 없으면 "".
+- course: 질문에 나온 과목명. 줄임말이면 아래 줄임말 표와 분반 목록의 정식 과목명으로 쓴다. 목록에 없으면 "".
+  "A 말고 B"처럼 말하면 뒤(B)가 대상이다. 요일·시각도 "말고" 뒤의 것을 쓴다.
 - section_no: 분반 번호 두 자리 ("2분반" → "02"). 말하지 않았으면 "". 짐작해서 채우지 않는다.
 - retake: "재수강" 분반을 말하면 true.
 - from_history: "그거", "그 강의", "그 분반", "아까 그거"처럼 앞 대화의 분반을 가리키면 true.
@@ -40,8 +43,19 @@
 {"intent": "what_if", "course": "", "section_no": "", "retake": false, "from_history": false, "professor": "", "days": [], "time_text": "", "room_no": "21501", "building": ""}
 
 앞 대화: (없음)
+질문: 웹프 화요일 말고 목요일 오후로 미뤄 줘
+{"intent": "move", "course": "웹프로그래밍", "section_no": "", "retake": false, "from_history": false, "professor": "", "days": ["목"], "time_text": "오후", "room_no": "", "building": ""}
+
+앞 대화: (없음)
+질문: 교수07한테 시프 시간표 메일로 보내 줘
+{"intent": "out_of_scope", "course": "시스템프로그래밍", "section_no": "", "retake": false, "from_history": false, "professor": "교수07", "days": [], "time_text": "", "room_no": "", "building": ""}
+
+앞 대화: (없음)
 질문: 오늘 학식 메뉴 뭐야
 {"intent": "out_of_scope", "course": "", "section_no": "", "retake": false, "from_history": false, "professor": "", "days": [], "time_text": "", "room_no": "", "building": ""}
+
+## 줄임말 표 (줄임말 → 정식 과목명. 여러 과목이면 질문에 맞는 것, 모르겠으면 둘 중 아무거나 고르지 말고 첫 과목명)
+<<ALIASES>>
 
 ## 분반 목록 (과목명 | 분반 | 담당 교수 가명)
 <<SECTIONS>>

@@ -21,6 +21,7 @@
 결과: eval/results/assistant_{method}_{날짜시각}.csv / .json
 """
 import argparse
+import time
 import csv
 import datetime as dt
 import glob
@@ -154,14 +155,31 @@ def f1(tp: int, fp: int, fn: int) -> dict:
 
 
 # ---------------- 평가 ----------------
-def evaluate(rows: list[dict], method: str, store) -> tuple[list[dict], dict]:
+RETRY_HINT = ("429", "503", "500", "과부하", "요청 제한", "RESOURCE_EXHAUSTED", "UNAVAILABLE", "timeout", "시간 초과")
+
+
+def _ask(read_question, r: dict, store, method: str, sleep: float, first: bool):
+    """한 질문 읽기. llm이면 질문 사이에 sleep초 쉬고, 429·503처럼 잠깐 뒤 될 수 있는 실패면 한 번 더 기다렸다 다시."""
+    if method == "llm" and sleep and not first:
+        time.sleep(sleep)
+    q = read_question(r["question"], parse_history(r.get("history", "")), store, method=method)
+    retried = False
+    if method == "llm" and getattr(q, "fallback", False) and any(h in (q.fallback_reason or "") for h in RETRY_HINT):
+        time.sleep(max(sleep * 3, 10) if sleep else 0)
+        q = read_question(r["question"], parse_history(r.get("history", "")), store, method=method)
+        retried = True
+    return q, retried
+
+
+def evaluate(rows: list[dict], method: str, store, sleep: float = 0.0) -> tuple[list[dict], dict]:
     from backend.app.nlp.assistant import read_question
     norm = Normalizer(store)
     out, skipped = [], 0
     tp = fp = fn = 0
     per = {f: [0, 0, 0] for f in FIELDS}
     ask_tp = ask_fn = noask_tn = noask_fp = 0
-    intent_ok, fallbacks = 0, 0
+    intent_ok, fallbacks, retries = 0, 0, 0
+    reasons = Counter()
     confusion = Counter()
     for r in rows:
         if not r.get("question") or not r.get("intent"):
@@ -169,7 +187,10 @@ def evaluate(rows: list[dict], method: str, store) -> tuple[list[dict], dict]:
             continue
         if r["intent"] not in INTENTS:
             raise ValueError(f"{r.get('id')}: intent 값을 모름: {r['intent']!r}")
-        q = read_question(r["question"], parse_history(r.get("history", "")), store, method=method)
+        q, retried = _ask(read_question, r, store, method, sleep, first=not out)
+        retries += retried
+        if getattr(q, "fallback", False):
+            reasons[(q.fallback_reason or "")[:60]] += 1
         g, p = norm.gold(r), norm.pred(q)
         gi, pi = items(g), items(p)
         tp, fp, fn = tp + len(gi & pi), fp + len(pi - gi), fn + len(gi - pi)
@@ -199,7 +220,8 @@ def evaluate(rows: list[dict], method: str, store) -> tuple[list[dict], dict]:
     n = len(out)
     should, shouldnt = ask_tp + ask_fn, noask_tn + noask_fp
     summary = {
-        "method": method, "rows": n, "skipped": skipped, "fallback": fallbacks,
+        "method": method, "rows": n, "skipped": skipped, "fallback": fallbacks, "retried": retries,
+        "fallback_reasons": dict(reasons), "sleep": sleep,
         "intent_accuracy": round(intent_ok / n, 3) if n else None,
         "info": f1(tp, fp, fn),
         "info_by_field": {f: f1(*per[f]) for f in FIELDS},
@@ -217,7 +239,9 @@ def evaluate(rows: list[dict], method: str, store) -> tuple[list[dict], dict]:
 def print_summary(s: dict, files: list[str]) -> None:
     print(f"라벨 파일: {', '.join(files) or '(없음)'}")
     print(f"방식: {s['method']}  평가한 줄: {s['rows']}  건너뛴 줄(라벨 없음): {s['skipped']}"
-          + (f"  키워드로 대신 처리: {s['fallback']}" if s["method"] == "llm" else ""))
+          + (f"  키워드로 대신 처리: {s['fallback']}  (다시 시도 {s.get('retried', 0)})" if s["method"] == "llm" else ""))
+    for why, n in (s.get("fallback_reasons") or {}).items():
+        print(f"  대신 처리 이유: {why} × {n}")
     if not s["rows"]:
         print("평가할 줄이 없습니다. intent 칸을 채운 뒤 다시 돌리세요.")
         return
@@ -238,13 +262,15 @@ def main(argv=None) -> dict:
     ap.add_argument("--method", choices=["keyword", "llm"], default="keyword")
     ap.add_argument("--labels", nargs="*", help="라벨 CSV (기본: eval/labels/assistant_questions_*.csv 전부)")
     ap.add_argument("--out", default=str(ROOT / "eval" / "results"), help="결과 폴더")
+    ap.add_argument("--sleep", type=float, default=4.0,
+                    help="llm 방식일 때 질문 사이에 쉬는 초 (무료 티어 429·503 대비, 기본 4). 실패하면 더 기다렸다 한 번 다시")
     args = ap.parse_args(argv)
 
     files = args.labels or sorted(glob.glob(str(ROOT / "eval" / "labels" / "assistant_questions_*.csv")))
     rows = [r for f in files for r in read_csv(f)]
 
     from backend.app.store import store
-    out, summary = evaluate(rows, args.method, store)
+    out, summary = evaluate(rows, args.method, store, sleep=args.sleep)
     summary["labels"] = [str(pathlib.Path(f).name) for f in files]
     print_summary(summary, summary["labels"])
 

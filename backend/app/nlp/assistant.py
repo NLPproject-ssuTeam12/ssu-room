@@ -23,6 +23,7 @@ from ..contracts import (
     DAYS, LATE_SLOT, STARTS, AssistantCommand, Block, Day, alternative, block_room, dump, late_penalty,
     no_long_at_1800,
 )
+from .aliases import BUILDING_ALIAS, COURSE_ALIAS, alias_table_text, course_alias_hits
 from .llm import LLMUnavailable, generate_json, load_prompt
 
 # ---------- 모양 ----------
@@ -38,43 +39,19 @@ class AssistantQuery(AssistantCommand):
 
 # ---------- 사전 ----------
 
-# 줄임말 → 실제 과목명 (몇 개만)
-ABBR: Dict[str, str] = {
-    "자구": "자료구조",
-    "운체": "운영체제",
-    "os": "운영체제",
-    "컴네": "컴퓨터네트워크",
-    "데통": "데이터통신과네트워크",
-    "인입": "인공지능입문",
-    "디시입": "디지털시스템입문",
-    "확통": "확률및통계",
-    "웹프": "웹프로그래밍",
-    "모프": "모바일프로그래밍",
-    "시프": "시스템프로그래밍",
-    "캡디": "캡스톤디자인",
-    "고캡": "고급캡스톤디자인",
-    "클컴": "클라우드컴퓨팅",
-    "소분설": "소프트웨어분석및설계",
-    "자연어처리": "자연언어처리",
-    "nlp": "자연언어처리",
-    "머신": "머신러닝",
-    "프기1": "프로그래밍기초1",
-    "프기2": "프로그래밍기초2",
-}
-
-BUILDING_ALIAS: Dict[str, str] = {
-    "정보과학관": "정보과학관",
-    "정보관": "정보과학관",
-    "문화관": "문화관",
-    "전산관": "전산관",
-    "벤처중소기업센터": "벤처중소기업센터",
-    "벤처관": "벤처중소기업센터",
-}
+# 줄임말 표는 aliases.py 한 곳에 둔다 (키워드·언어 모델 두 방식이 같이 쓴다)
 
 RE_EXPLAIN = re.compile(r"왜|이유|어째서|밀렸|밀린\s*이유|언제|어디(?!까지)")
 RE_STATUS = re.compile(r"현황|남은|남았|몇\s*개|몇\s*분반|어디까지|진행|상태|몇\s*차|조율\s*중인\s*(분반|과목|강의)?\s*(몇|목록|있)")
-RE_WHATIF = re.compile(r"옮기면|바꾸면|넣으면|비우면|빼면|못\s*쓰면|쓰면|하면|가면|면\s*어때|면\s*어떨까|되나|될까|돼\?|괜찮을까|가능할까|가능해\?|어때")
-RE_MOVE = re.compile(r"옮겨|바꿔|넣어|이동해|이동시켜|배정해|변경해|옮기자|바꾸자")
+# 답장·회신을 묻는 말은 '언제·어디'가 있어도 현황이다 ("회신 언제 와?")
+RE_STATUS_FIRST = re.compile(r"답장|회신|몇\s*차(?!시)")
+RE_WHATIF = re.compile(r"옮기면|바꾸면|넣으면|비우면|빼면|당기면|미루면|못\s*쓰면|쓰면|하면|가면|면\s*어때|면\s*어떨까"
+                       r"|되나|될까|돼\?|괜찮을까|가능할까|가능해\?|어때|겹쳐|겹치|겹칠|문제\s*없|자리\s*(있|없|남)|비어\s*있|빌까")
+RE_MOVE = re.compile(r"옮겨|바꿔|넣어|이동해|이동시켜|배정해|변경해|옮기자|바꾸자|당겨|미뤄|빼\s*줘|빼\s*주세요")
+# 시간표 밖 일 (수강신청·메일·식사 등). 시간표 말이 섞여 있어도 이것이 먼저다
+RE_OUT = re.compile(r"수강\s*신청|이\s*메일|메일|문자\s*(보내|돌려)|점심\s*(뭐|메뉴|먹)|학식|식당|날씨|회식|성적|출석|휴가|월급")
+# "A 말고 B": 뒤(B)가 목표
+RE_NOT = re.compile(r"말고|대신에?|아니고")
 RE_PRONOUN = re.compile(r"그\s*강의|그\s*수업|그\s*과목|그\s*분반|아까\s*그거|그거|그것|거기")
 
 _DAY_TOKEN = re.compile(
@@ -196,10 +173,10 @@ def _match_course(norm_text: str, names: List[str]) -> Tuple[List[str], str]:
     for key in sorted(by_norm, key=len, reverse=True):
         if key and key in norm_text:
             return [by_norm[key]], norm_text.replace(key, " ", 1)
-    # 2) 줄임말
-    for abbr in sorted(ABBR, key=len, reverse=True):
-        if abbr in norm_text and _norm(ABBR[abbr]) in by_norm:
-            return [ABBR[abbr]], norm_text.replace(abbr, " ", 1)
+    # 2) 줄임말 (aliases.py, 여러 과목을 가리키면 후보 여럿 → 되묻기)
+    hits, rest = course_alias_hits(norm_text, names, _norm)
+    if hits:
+        return hits, rest
     # 3) 일부 일치: 과목명 앞부분 3글자 이상이 질문에 있음
     best, hits = 0, []
     for key, name in by_norm.items():
@@ -270,8 +247,14 @@ def _pick_section(cands: List[str], rest: str, professor: Optional[str], code_si
         if len(secs) == 1:
             section_id = secs[0].id
         elif len(secs) > 1 and not ask:
-            opts = ", ".join(f"{section_label(s)}({s.professor or '담당 미정'}, {s.code})" for s in secs)
-            ask = f"{cands[0]}은(는) 분반이 {len(secs)}개예요. 몇 분반인가요? ({opts})"
+            bases = sorted({s.code[:-2] for s in secs})
+            if len(bases) > 1:   # 같은 이름 과목이 둘 이상 (과목 코드가 다름) → 코드·학과·학년을 같이 보여 준다
+                opts = ", ".join(f"{s.code} {section_label(s)}({_course_tag(s)}, {s.professor or '담당 미정'})"
+                                 for s in sorted(secs, key=lambda s: s.code))
+                ask = f"{cands[0]}이(가) 과목 코드가 다른 과목 {len(bases)}개에 있어요. 어느 과목·몇 분반인가요? ({opts})"
+            else:
+                opts = ", ".join(f"{section_label(s)}({s.professor or '담당 미정'}, {s.code})" for s in secs)
+                ask = f"{cands[0]}은(는) 분반이 {len(secs)}개예요. 몇 분반인가요? ({opts})"
     elif pronoun:
         section_id = _history_section(history or [], store)
         if section_id is None:
@@ -281,6 +264,13 @@ def _pick_section(cands: List[str], rest: str, professor: Optional[str], code_si
         if len(mine) == 1:
             section_id = mine[0].id
     return section_id, ask
+
+
+def _course_tag(sec) -> str:
+    """같은 이름 과목을 가르는 말: 학과(이수구분 뒤쪽)·학년."""
+    dept = (sec.category or "").partition("-")[2] or (sec.category or "")
+    year = f"{sec.year}학년" if sec.year else "전체 학년"
+    return " ".join(x for x in (dept, year) if x)
 
 
 def _find_room(room_no: Optional[str], norm: str, store) -> Tuple[Optional[str], Optional[str], Optional[str]]:
@@ -347,11 +337,18 @@ def _read_question_keyword(text: str, history: Optional[List[dict]], store) -> A
     norm = _norm(raw)
     sections = store.list_sections()
     names = sorted({s.name for s in sections})
+    # "A 말고 B": 뒤쪽 글이 목표. 과목·요일·시각은 뒤쪽에서 먼저 찾는다
+    target = RE_NOT.split(raw)[-1] if RE_NOT.search(raw) else raw
 
     # --- 분반 ---
     m = re.search(r"(?<!\d)(\d{10})(?!\d)", raw)
     code_hits = [s for s in sections if m and s.code == m.group(1)]
-    cands, rest = ([], norm.replace(m.group(1), " ")) if code_hits else _match_course(norm, names)
+    if code_hits:
+        cands, rest = [], norm.replace(m.group(1), " ")
+    else:
+        cands, rest = _match_course(_norm(target), names) if target is not raw else ([], norm)
+        if not cands:
+            cands, rest = _match_course(norm, names)
     professor = None
     pm = re.search(r"교수\s*0?(\d{1,2})", raw)
     if pm:
@@ -360,11 +357,11 @@ def _read_question_keyword(text: str, history: Optional[List[dict]], store) -> A
                                     bool(RE_PRONOUN.search(raw)), history, store)
 
     # --- 요일·시각·강의실 (과목명을 뺀 글에서) ---
-    rest_raw = raw
+    rest_raw = target
     if section_id:
         sec = store.get_section(section_id)
-        rest_raw = re.sub(r"\s*".join(map(re.escape, sec.name.replace(" ", ""))), " ", raw)
-    for abbr in ABBR:
+        rest_raw = re.sub(r"\s*".join(map(re.escape, sec.name.replace(" ", ""))), " ", target)
+    for abbr in sorted(COURSE_ALIAS, key=len, reverse=True):
         rest_raw = re.sub(re.escape(abbr), " ", rest_raw, flags=re.I)
     rest_raw = re.sub(r"\d{1,2}\s*분반|재수강", " ", rest_raw)
     days = _extract_days(rest_raw)
@@ -377,7 +374,11 @@ def _read_question_keyword(text: str, history: Optional[List[dict]], store) -> A
     # --- 의도 ---
     has_target = bool(days or start or room or building or time_ask)
     has_entity = bool(section_id or cands or has_target or professor or RE_PRONOUN.search(raw))
-    if RE_EXPLAIN.search(raw):
+    if RE_OUT.search(raw):
+        intent = "out_of_scope"       # 시간표 밖 일이 먼저. 뽑은 교수·과목 정보는 그대로 남긴다
+    elif RE_STATUS_FIRST.search(raw):
+        intent = "status"
+    elif RE_EXPLAIN.search(raw):
         intent = "explain"
     elif RE_STATUS.search(raw):
         intent = "status"
@@ -488,7 +489,9 @@ def _read_question_llm(text: str, history: Optional[List[dict]], store) -> Assis
     raw = (text or "").strip()
     if not raw:
         raise ValueError("빈 질문")
+    names = sorted({s.name for s in store.list_sections()})
     prompt = (load_prompt("assistant")
+              .replace("<<ALIASES>>", alias_table_text(names, _norm))
               .replace("<<SECTIONS>>", _sections_text(store))
               .replace("<<HISTORY>>", _history_text(history))
               .replace("<<QUESTION>>", raw))
