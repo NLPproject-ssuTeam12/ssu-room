@@ -95,6 +95,7 @@ pre{background:var(--sunk);border-radius:8px;padding:8px 10px;font-size:12px;ove
 .blk{border-radius:7px;padding:5px 7px;background:var(--surface);border:1px solid var(--line);font-size:12px;line-height:1.35}
 .blk b{display:block;font-size:12.5px}
 .blk.temp{background:var(--warn-soft);border-color:var(--warn)}
+.blk.manual{border-style:dashed}
 .blk.changed{box-shadow:0 0 0 2px var(--good)}
 .blk.mine{background:var(--accent-soft);border-color:var(--accent)}
 .blk.dim{opacity:.4}
