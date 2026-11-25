@@ -242,6 +242,7 @@ def test_edit_keep_ignore_proposal_action():
 def test_open_next_proposal():
     con = make(); add_rounds(con)
     raises(hdb.open_next_proposal, con, 1, 2, has="다음 차수로 넘긴 안건이 아닙니다")     # SENT
+    con.execute("UPDATE proposal SET target_kind='MISMATCH' WHERE id=1"); con.commit()
     m = proposed(con)
     hdb.decide_reply(con, m, 1, "CONFIRM", conditions=COND, proposal_action="next")
     raises(hdb.open_next_proposal, con, 99, 2, has="없는 조율 안건")
@@ -256,6 +257,7 @@ def test_open_next_proposal():
                       (new,)).fetchone()
     assert row == (2, 1, 10, 2, "희망 시간 겹침", "OPEN", 1), row                      # 시간표는 이전 안건 것
     assert status(con, 1) == "NEXT"                                                  # 이전 안건은 그대로 (되돌리지 않음)
+    assert con.execute("SELECT target_kind FROM proposal WHERE id=?", (new,)).fetchone()[0] == "MISMATCH"   # 조율 대상 종류 이어받음
     assert hdb.carried_conditions(con, new) == COND and hdb.confirmed_conditions(con, new) is None
     raises(hdb.open_next_proposal, con, 1, 2, has="이미 다음 차수 안건")                  # 중복 생성
     raises(hdb.carried_conditions, con, 99, has="없는 조율 안건")
@@ -370,20 +372,75 @@ def test_confirm_records_option():
 
 def test_confirm_pair_updates_response():
     con = make()
-    con.execute("INSERT INTO course_response(id,round_id,course_id,professor_id,lab_requirement,single_day_pref) VALUES (50,1,10,3,0,'NONE')")
+    con.execute("INSERT INTO course_section VALUES (10,3,3,40)")                       # 교수나가 2·3분반
+    con.execute("INSERT INTO course_response(id,round_id,course_id,section_no,professor_id,lab_requirement,single_day_pref) VALUES (50,1,10,2,3,0,'NONE')")
     con.commit()
     m = hdb.add_reply(con, 1, 3, "두 분반을 이어서 해 주세요", choices=["ETC"])
     hdb.save_interpretation(con, m, "CONDITIONAL", {"section_pair": "BACK_TO_BACK"})
     raises(hdb.decide_reply, con, m, 1, "CONFIRM", proposal_action="pair", has="pair_mode")
     raises(hdb.decide_reply, con, m, 1, "CONFIRM", proposal_action="pair", pair_mode="BOTH", has="pair_mode")
-    hdb.decide_reply(con, m, 1, "CONFIRM", proposal_action="pair", pair_mode="BACK_TO_BACK")
-    assert con.execute("SELECT section_pair FROM course_response WHERE id=50").fetchone()[0] == "BACK_TO_BACK"
+    raises(hdb.decide_reply, con, m, 1, "CONFIRM", proposal_action="pair", pair_mode="BACK_TO_BACK", pair_sections=[1, 2],
+           has="맡은 분반이 아닙니다")
+    hdb.decide_reply(con, m, 1, "CONFIRM", proposal_action="pair", pair_mode="BACK_TO_BACK", pair_sections=[3, 2])
+    assert hdb.pair_request(con, 1, 10, 3) == ("BACK_TO_BACK", [3, 2])                   # 교수가 적은 순서
+    assert '"confirmed_pair_sections": [3, 2]' in con.execute("SELECT extracted_json FROM reply_interpretation WHERE message_id=?", (m,)).fetchone()[0]
     assert status(con) == "RESOLVED"
     con2 = make()                                                                          # 응답이 없으면 반영할 곳이 없음
     m = hdb.add_reply(con2, 1, 3, "두 분반 교차로", choices=["ETC"])
     hdb.save_interpretation(con2, m, "CONDITIONAL", {})
     raises(hdb.decide_reply, con2, m, 1, "CONFIRM", proposal_action="pair", pair_mode="CROSS", has="교수 응답이 없습니다")
     assert status(con2) == "PROPOSED"
+
+
+def test_set_pair_request():
+    """분반 연강·교차는 과목 단위로 한 번. 교수가 붙일 분반을 순서대로, 상관없음은 행 없음."""
+    con = make()
+    con.execute("INSERT INTO course_section VALUES (10,1,2,40)")
+    con.execute("INSERT INTO course_section VALUES (10,3,3,40),(10,4,3,40)")             # 교수나: 2·3·4분반
+    con.commit()
+    assert hdb.set_pair_request(con, 1, 10, 3, "BACK_TO_BACK") == [2, 3, 4]              # 적지 않으면 맡은 분반 전부(번호 순)
+    assert hdb.set_pair_request(con, 1, 10, 3, "CROSS", [4, 2]) == [4, 2]                # 두 분반만 붙이고 3분반은 떨어뜨림
+    assert hdb.pair_request(con, 1, 10, 3) == ("CROSS", [4, 2])
+    assert con.execute("SELECT COUNT(*) FROM pair_request").fetchone()[0] == 1           # 바꾸면 덮어씀
+    raises(hdb.set_pair_request, con, 1, 10, 3, "BACK_TO_BACK", [2], has="두 분반 이상")
+    raises(hdb.set_pair_request, con, 1, 10, 3, "BACK_TO_BACK", [2, 2], has="두 분반 이상")
+    raises(hdb.set_pair_request, con, 1, 10, 3, "BACK_TO_BACK", [1, 2], has="맡은 분반이 아닙니다")
+    raises(hdb.set_pair_request, con, 1, 10, 2, "BACK_TO_BACK", has="둘 이상 맡을 때만")   # 교수가는 1분반 하나
+    raises(hdb.set_pair_request, con, 1, 10, 3, "BOTH", has="중 하나")
+    assert hdb.pair_request(con, 1, 10, 3) == ("CROSS", [4, 2])                          # 실패하면 그대로
+    assert hdb.set_pair_request(con, 1, 10, 3, "NONE") == []
+    assert hdb.pair_request(con, 1, 10, 3) == ("NONE", [])
+    assert con.execute("SELECT COUNT(*) FROM pair_request_section").fetchone()[0] == 0
+
+
+def test_section_response_unique():
+    """희망 입력은 분반마다: 같은 차수·과목·분반·교수 응답은 하나."""
+    con = make()
+    q = "INSERT INTO course_response(round_id,course_id,section_no,professor_id,lab_requirement,single_day_pref) VALUES (1,10,?,?,?,?)"
+    con.execute(q, (1, 2, 1, "MUST")); con.execute(q, (2, 3, 0, "NONE"))
+    try:
+        con.execute(q, (2, 3, 1, "MUST")); raise AssertionError("같은 분반 응답이 두 번 들어감")
+    except sqlite3.IntegrityError:
+        pass
+
+
+def test_hold_and_no_option():
+    con = make()
+    con.execute("UPDATE proposal SET status='HOLD', target_kind='PARTIAL' WHERE id=1")
+    con.execute("UPDATE proposal SET status='NO_OPTION', target_kind='UNPLACED' WHERE id=2"); con.commit()
+    assert hdb.coord_board(con, 1) == [(1, 10, 2, "PARTIAL", "HOLD", "희망 시간 겹침", 2), (2, 11, 1, "UNPLACED", "NO_OPTION", "겹침", 1)]
+    raises(hdb.release_hold, con, 1, 3, has="조교만")
+    raises(hdb.release_hold, con, 2, 1, has="HOLD")
+    raises(hdb.ack_no_option, con, 1, 1, has="NO_OPTION")
+    hdb.release_hold(con, 1, 1, send=True)
+    assert status(con, 1) == "OPEN"                                                        # 서버가 보냄
+    hdb.ack_no_option(con, 2, 1)
+    assert status(con, 2) == "OFFLINE"                                                     # 따로 연락 → manual_place
+    raises(hdb.release_hold, con, 1, 1, has="HOLD")
+    c2 = make()
+    c2.execute("UPDATE proposal SET status='HOLD' WHERE id=1"); c2.commit()
+    hdb.release_hold(c2, 1, 1, send=False)
+    assert status(c2, 1) == "KEPT"                                                         # 보내지 않음 = 현재대로 유지
 
 
 def test_reply_other_request():

@@ -65,14 +65,18 @@ def confirm_other_request(con, other_request_id, user_id, memo=None):
 # ---------------------------------------------------------------- 조율 회신 (교수가 자기 화면에서 직접 답장)
 # 안건(proposal) 상태: 보내기 전 → 답 기다림 → 조교 확인 대기 → 반영됨 / 현재대로 유지 / 다음 차수로. 서버 조율 상태와 같은 이름.
 # 다음 차수에는 같은 안건을 되돌리지 않고 새 안건을 연다 (open_next_proposal, prev_proposal_id 로 이어짐).
-PROPOSAL_STATUSES = ["OPEN", "SENT", "PROPOSED", "RESOLVED", "KEPT", "NEXT", "OFFLINE"]
+# 1차 안건은 엔진 open_coord_proposals 가 조율 대상 종류(target_kind)에 따라 연다 (11/25):
+#   못 놓음·희망에서 어긋남 → OPEN(자동으로 보냄), 일부 어긋남 → HOLD(조교가 골라 보냄), 대안 없음 → NO_OPTION(조교 확인 → 따로 연락).
+PROPOSAL_STATUSES = ["OPEN", "SENT", "PROPOSED", "RESOLVED", "KEPT", "NEXT", "OFFLINE", "HOLD", "NO_OPTION"]
 PROPOSAL_LABELS = {"OPEN": "보내기 전", "SENT": "답 기다림", "PROPOSED": "조교 확인 대기",
-                   "RESOLVED": "반영됨", "KEPT": "현재대로 유지", "NEXT": "다음 차수로", "OFFLINE": "따로 연락 중"}
+                   "RESOLVED": "반영됨", "KEPT": "현재대로 유지", "NEXT": "다음 차수로", "OFFLINE": "따로 연락 중",
+                   "HOLD": "조교 선택 대기", "NO_OPTION": "대안 없음(조교 확인)"}
+TARGET_KINDS = {"UNPLACED": "못 놓음", "MISMATCH": "희망에서 어긋남", "PARTIAL": "일부 어긋남"}   # proposal.target_kind
 REPLY_LABELS = ["ACCEPT", "CONDITIONAL", "REJECT", "UNCLEAR"]          # 수용 / 조건부 / 거절 / 확인 필요
 TA_ACTIONS = ["CONFIRM", "EDIT", "KEEP", "OFFLINE"]                    # [확인] / [수정] / [현재대로 유지] / [따로 연락]
 PROPOSAL_ACTIONS = {"move": "RESOLVED", "next": "NEXT", "pair": "RESOLVED"}   # [확인]한 처리안: 옮김 / 다음 차수 / 분반 연강·교차 반영
 REPLY_CHOICES = ["A", "B", "C", "ETC"]                                 # 답장에서 고르는 값: 대안 A·B·C / 기타(본문)
-PAIR_MODES = ["NONE", "BACK_TO_BACK", "CROSS"]                         # course_response.section_pair
+PAIR_MODES = ["NONE", "BACK_TO_BACK", "CROSS"]                         # 분반 연강·교차 (pair_request.mode, NONE = 행 없음)
 MAX_ROUND = 3                                                          # 조율은 3차까지
 
 
@@ -241,13 +245,14 @@ def _has_condition(cond):
 
 
 def decide_reply(con, message_id, user_id, action, reason=None, conditions=None, proposal_action=None,
-                 option_id=None, pair_mode=None):
+                 option_id=None, pair_mode=None, pair_sections=None):
     """조교의 [확인](CONFIRM) / [수정](EDIT) / [현재대로 유지](KEEP) / [따로 연락](OFFLINE)을 기록한다.
     - 조교(role='TA')만, 해석이 저장돼 있고 안건이 PROPOSED 이고 그 안건의 가장 최근 답장일 때만. 이미 결정했으면 ValueError.
     - CONFIRM 은 proposal_action(조교가 확인한 처리안) 필수: 'move'(옮김) → RESOLVED, 'next'(다음 차수) → NEXT.
       'next' 는 conditions 가 비어 있으면 ValueError (다음 차수 대안에 넘길 조건이 있어야 한다).
-    - CONFIRM + 'pair'(기타의 분반 연강·교차 요청): pair_mode(NONE/BACK_TO_BACK/CROSS) 필수. 답장한 교수의 그 과목 응답
-      (가장 최근 차수) section_pair 를 바꾸고 → RESOLVED. 서버는 이어서 그 교수의 분반을 다시 풀어야 한다.
+    - CONFIRM + 'pair'(기타의 분반 연강·교차 요청): pair_mode(NONE/BACK_TO_BACK/CROSS) 필수. 답장한 교수의 그 과목
+      분반 연강·교차 요청(pair_request, 그 교수 응답의 가장 최근 차수)을 바꾸고 → RESOLVED. pair_sections 는 붙일 분반을
+      교수가 적은 순서대로(없으면 그 교수가 맡은 분반 번호 순서). 서버는 이어서 그 교수의 분반을 다시 풀어야 한다.
     - option_id: 옮긴 대안(proposal_option)을 reply_interpretation.chosen_option_id 에 남긴다 (CONFIRM 'move'·EDIT). 이 안건의 대안이어야 한다.
     - OFFLINE: 조교가 시스템 밖에서 교수와 따로 연락 → 안건 OFFLINE. 조건은 넣지 않는다. 이후 manual_place 로 수동 배치를 기록한다.
     - EDIT 는 reason(사유) 필수 → RESOLVED. KEEP 에는 conditions 를 넣지 않는다 → KEPT.
@@ -299,12 +304,14 @@ def decide_reply(con, message_id, user_id, action, reason=None, conditions=None,
             data["confirmed_conditions"] = _json_object(conditions, "conditions")
         if proposal_action == "pair" and action == "CONFIRM":
             prof = con.execute("SELECT sender_id FROM message WHERE id=?", (message_id,)).fetchone()[0]
-            resp = con.execute("""SELECT id FROM course_response WHERE course_id=? AND professor_id=?
+            resp = con.execute("""SELECT round_id FROM course_response WHERE course_id=? AND professor_id=?
                                   ORDER BY round_id DESC, id DESC LIMIT 1""", (p["course_id"], prof)).fetchone()
             if resp is None:
                 raise ValueError(f"분반 연강·교차를 반영할 교수 응답이 없습니다: 과목 {p['course_id']} 교수 {prof}")
-            con.execute("UPDATE course_response SET section_pair=? WHERE id=?", (pair_mode, resp[0]))
+            order = _set_pair(con, resp[0], p["course_id"], prof, pair_mode, pair_sections)
             data["confirmed_section_pair"] = pair_mode
+            if order:
+                data["confirmed_pair_sections"] = order
         con.execute("""UPDATE reply_interpretation SET ta_action=?, ta_reason=?, ta_user_id=?, ta_at=datetime('now'),
                        extracted_json=?, chosen_option_id=COALESCE(?, chosen_option_id) WHERE message_id=?""",
                     (action, reason, user_id, json.dumps(data, ensure_ascii=False), option_id, message_id))
@@ -329,16 +336,18 @@ def confirmed_conditions(con, proposal_id):
 def open_next_proposal(con, prev_proposal_id, round_id, timetable_id=None):
     """다음 차수에 새 조율 안건을 연다. -> 새 proposal id
     - 이전 안건이 NEXT(다음 차수로)이고, round_id 가 같은 학기의 바로 다음 차수(3차까지)일 때만.
-    - 같은 과목·분반, status='OPEN', prev_proposal_id=이전 안건. 이유(reason)도 이어받는다.
+    - 같은 과목·분반, status='OPEN', prev_proposal_id=이전 안건. 이유(reason)·조율 대상 종류(target_kind)도 이어받는다.
+      대안은 엔진 solver_core.fill_options 로 채운다(이미 보낸 대안은 빼고, 하나도 없으면 NO_OPTION).
     - timetable_id 가 없으면 이전 안건의 시간표 (NEXT 는 시간표를 바꾸지 않으므로). 주면 같은 학기 시간표인지 검사.
     - 이미 이 안건에서 다음 차수 안건을 열었으면 ValueError."""
     try:
-        prev = con.execute("""SELECT p.timetable_id, p.course_id, p.section_no, p.reason, p.status, r.term_id, r.round_no
+        prev = con.execute("""SELECT p.timetable_id, p.course_id, p.section_no, p.reason, p.status, r.term_id, r.round_no,
+                                     p.target_kind
                               FROM proposal p JOIN round r ON r.id = p.round_id WHERE p.id=?""",
                            (prev_proposal_id,)).fetchone()
         if prev is None:
             raise ValueError(f"없는 조율 안건: {prev_proposal_id}")
-        prev_tt, course_id, section_no, reason, status, term_id, prev_no = prev
+        prev_tt, course_id, section_no, reason, status, term_id, prev_no, kind = prev
         if status != "NEXT":
             raise ValueError(f"다음 차수로 넘긴 안건이 아닙니다: 안건 {prev_proposal_id} 상태 "
                              f"'{PROPOSAL_LABELS.get(status, status)}'({status}). 처리안 'next'로 [확인]한 안건만 이어 엽니다")
@@ -363,9 +372,10 @@ def open_next_proposal(con, prev_proposal_id, round_id, timetable_id=None):
                 raise ValueError(f"없는 시간표: {timetable_id}")
             if t[0] != term_id:
                 raise ValueError(f"다른 학기의 시간표입니다: 시간표 {timetable_id}는 학기 {t[0]}, 이전 안건은 학기 {term_id}")
-        cur = con.execute("""INSERT INTO proposal(round_id, timetable_id, course_id, section_no, reason, status, prev_proposal_id)
-                             VALUES (?,?,?,?,?,'OPEN',?)""",
-                          (round_id, timetable_id, course_id, section_no, reason, prev_proposal_id))
+        cur = con.execute("""INSERT INTO proposal(round_id, timetable_id, course_id, section_no, reason, status, prev_proposal_id,
+                                                  target_kind)
+                             VALUES (?,?,?,?,?,'OPEN',?,?)""",
+                          (round_id, timetable_id, course_id, section_no, reason, prev_proposal_id, kind))
         con.commit()
         return cur.lastrowid
     except Exception:
@@ -582,3 +592,103 @@ def apply_option(con, proposal_id, user_id, rows, reason=None, *, course_id=None
     except Exception:
         con.rollback()
         raise
+
+
+# ---------------------------------------------------------------- 분반 연강·교차 요청 (11/25)
+def _set_pair(con, round_id, course_id, professor_id, mode, sections=None):
+    """pair_request 를 바꾼다 (commit 하지 않음). -> 저장한 분반 순서 (NONE 이면 [])"""
+    if mode not in PAIR_MODES:
+        raise ValueError(f"분반 연강·교차는 {PAIR_MODES} 중 하나여야 합니다: {mode}")
+    old = con.execute("SELECT id FROM pair_request WHERE round_id=? AND course_id=? AND professor_id=?",
+                      (round_id, course_id, professor_id)).fetchone()
+    if old is not None:
+        con.execute("DELETE FROM pair_request_section WHERE request_id=?", (old[0],))
+        con.execute("DELETE FROM pair_request WHERE id=?", (old[0],))
+    if mode == "NONE":
+        return []
+    mine = [r[0] for r in con.execute("SELECT section_no FROM course_section WHERE course_id=? AND professor_id=? ORDER BY 1",
+                                      (course_id, professor_id))]
+    if len(mine) < 2:
+        raise ValueError(f"분반 연강·교차는 한 교수가 그 과목 분반을 둘 이상 맡을 때만 받습니다: 과목 {course_id} 교수 {professor_id} "
+                         f"맡은 분반 {mine}")
+    order = list(sections) if sections is not None else mine
+    if len(order) < 2 or len(set(order)) != len(order):
+        raise ValueError(f"붙일 분반은 서로 다른 두 분반 이상이어야 합니다: {order}")
+    bad = [x for x in order if x not in mine]
+    if bad:
+        raise ValueError(f"그 교수가 맡은 분반이 아닙니다: 분반 {bad} (맡은 분반 {mine})")
+    rid = con.execute("INSERT INTO pair_request(round_id, course_id, professor_id, mode) VALUES (?,?,?,?)",
+                      (round_id, course_id, professor_id, mode)).lastrowid
+    con.executemany("INSERT INTO pair_request_section(request_id, seq, section_no) VALUES (?,?,?)",
+                    [(rid, i, x) for i, x in enumerate(order, 1)])
+    return order
+
+
+def set_pair_request(con, round_id, course_id, professor_id, mode, sections=None):
+    """교수 입력의 분반 연강·교차 (과목 단위로 한 번). -> 저장한 분반 순서
+    - mode: NONE(상관없음, 행을 지움) / BACK_TO_BACK(연강: 앞 분반 바로 뒤 다음 분반) / CROSS(교차).
+    - 그 교수가 그 과목 분반을 둘 이상 맡을 때만(course_section). sections 는 붙일 분반, 교수가 적은 순서대로.
+      없으면 맡은 분반 전부를 번호 순서로. 두 분반만 붙이고 한 분반은 떨어뜨리려면 그 두 분반만 적는다.
+    - 솔버는 앞 두 분반만 붙인다. 셋 이상 적으면 셋째부터는 조교가 수동 배치·고정한다(솔버 unsupported 로 알림)."""
+    try:
+        order = _set_pair(con, round_id, course_id, professor_id, mode, sections)
+        con.commit()
+        return order
+    except Exception:
+        con.rollback()
+        raise
+
+
+def pair_request(con, round_id, course_id, professor_id):
+    """-> (모드, [분반 순서]) 또는 ('NONE', [])"""
+    row = con.execute("SELECT id, mode FROM pair_request WHERE round_id=? AND course_id=? AND professor_id=?",
+                      (round_id, course_id, professor_id)).fetchone()
+    if row is None:
+        return "NONE", []
+    return row[1], [r[0] for r in con.execute("SELECT section_no FROM pair_request_section WHERE request_id=? ORDER BY seq",
+                                              (row[0],))]
+
+
+# ---------------------------------------------------------------- 조교 선택 대기(HOLD)·대안 없음(NO_OPTION) (11/25)
+def _ta(con, user_id, what):
+    u = con.execute("SELECT role FROM user WHERE id=?", (user_id,)).fetchone()
+    if u is None or u[0] != "TA":
+        raise ValueError(f"조교만 {what}: 사용자 {user_id}")
+
+
+def release_hold(con, proposal_id, user_id, send=True):
+    """일부 어긋남(HOLD) 안건을 조교가 정한다. send=True → OPEN(서버가 대안과 함께 보냄), False → KEPT(현재대로 유지)."""
+    try:
+        _ta(con, user_id, "보류 안건을 정할 수 있습니다")
+        p = _proposal(con, proposal_id)
+        if p["status"] != "HOLD":
+            raise ValueError(f"조교 선택 대기(HOLD) 안건이 아닙니다: 안건 {proposal_id} 상태 "
+                             f"'{PROPOSAL_LABELS.get(p['status'], p['status'])}'({p['status']})")
+        con.execute("UPDATE proposal SET status=? WHERE id=?", ("OPEN" if send else "KEPT", proposal_id))
+        con.commit()
+    except Exception:
+        con.rollback()
+        raise
+
+
+def ack_no_option(con, proposal_id, user_id):
+    """대안이 없어 조율 메시지를 보내지 못한 안건(NO_OPTION)을 조교가 확인한다 → OFFLINE(따로 연락).
+    이후 조교가 시스템 밖에서 교수와 정한 칸을 manual_place 로 기록한다."""
+    try:
+        _ta(con, user_id, "대안 없음을 확인할 수 있습니다")
+        p = _proposal(con, proposal_id)
+        if p["status"] != "NO_OPTION":
+            raise ValueError(f"대안 없음(NO_OPTION) 안건이 아닙니다: 안건 {proposal_id} 상태 "
+                             f"'{PROPOSAL_LABELS.get(p['status'], p['status'])}'({p['status']})")
+        con.execute("UPDATE proposal SET status='OFFLINE' WHERE id=?", (proposal_id,))
+        con.commit()
+    except Exception:
+        con.rollback()
+        raise
+
+
+def coord_board(con, round_id):
+    """조교 화면용: 그 차수 안건을 조율 대상 종류·상태와 함께. -> [(안건 id, 과목, 분반, target_kind, status, 이유, 대안 수)]"""
+    return con.execute("""SELECT p.id, p.course_id, p.section_no, p.target_kind, p.status, p.reason,
+                                 (SELECT COUNT(*) FROM proposal_option o WHERE o.proposal_id = p.id)
+                          FROM proposal p WHERE p.round_id=? ORDER BY p.id""", (round_id,)).fetchall()

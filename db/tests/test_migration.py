@@ -25,6 +25,8 @@ V9 = P("archive", "schema_v9.sql")      # 006까지 적용한 모양 (007 전)
 M7 = P("migrations", "007_20261125_reply_choice.sql")
 V10 = P("archive", "schema_v10.sql")    # 007까지 적용한 모양 (008 전)
 M8 = P("migrations", "008_20261125_timetable_reason.sql")
+V11 = P("archive", "schema_v11.sql")    # 008까지 적용한 모양 (009 전)
+M9 = P("migrations", "009_20261125_section_response.sql")
 
 def compare(label, con, target=None):
     """con 이 target(기본: 최종 schema.sql)과 같은 모양인지"""
@@ -96,7 +98,9 @@ ok1 = compare("001~006 적용 후 = schema_v9", old, V9) and ok1
 run(M7, old)
 ok1 = compare("001~007 적용 후 = schema_v10", old, V10) and ok1
 run(M8, old)
-ok1 = compare("001~008 적용 후", old) and ok1
+ok1 = compare("001~008 적용 후 = schema_v11", old, V11) and ok1
+run(M9, old)
+ok1 = compare("001~009 적용 후", old) and ok1
 
 print("\n=== 경로 2: schema_v4(001까지 적용된 모양)에서 002 → 003 → 004 → 005 → 006")
 v4 = sqlite3.connect(":memory:"); v4.executescript(open(P("archive","schema_v4.sql"), encoding="utf-8").read()); seed(v4)
@@ -113,7 +117,9 @@ ok2 = compare("v4 + 002~006 = schema_v9", v4, V9) and ok2
 run(M7, v4)
 ok2 = compare("v4 + 002~007 = schema_v10", v4, V10) and ok2
 run(M8, v4)
-ok2 = compare("v4 + 002~008", v4) and ok2
+ok2 = compare("v4 + 002~008 = schema_v11", v4, V11) and ok2
+run(M9, v4)
+ok2 = compare("v4 + 002~009", v4) and ok2
 print("\n=== 경로 3: schema_v7(004까지 적용된 모양)에서 005 → 006")
 def build_v7():
     v7 = sqlite3.connect(":memory:"); v7.executescript(open(P("archive","schema_v7.sql"), encoding="utf-8").read()); seed(v7); q = v7.execute
@@ -165,7 +171,9 @@ ok3 = compare("v7 + 005 + 006 = schema_v9", v7, V9) and ok3
 run(M7, v7)
 ok3 = compare("v7 + 005 + 006 + 007 = schema_v10", v7, V10) and ok3
 run(M8, v7)
-ok3 = compare("v7 + 005~008", v7) and ok3
+ok3 = compare("v7 + 005~008 = schema_v11", v7, V11) and ok3
+run(M9, v7)
+ok3 = compare("v7 + 005~009", v7) and ok3
 
 print("\n=== 경로 4: 목록 밖 status 가 있으면 005 가 멈추고 데이터는 그대로")
 v7b = build_v7(); v7b.execute("UPDATE proposal SET status='DONE' WHERE id=3"); v7b.commit()
@@ -274,11 +282,56 @@ for bad in ["INSERT INTO reply_choice VALUES (2,'D',NULL)",
 print("\n=== 경로 7: schema_v10(007까지 적용된 모양)에서 008 — 시간표 버전 사유")
 n10 = v9.execute("select count(*) from timetable").fetchone()[0]
 run(M8, v9)
-ok7 = compare("v10 + 008", v9)
+ok7 = compare("v10 + 008 = schema_v11", v9, V11)
 r10 = v9.execute("select id, kind, reason from timetable order by id").fetchall()
 print("  시간표 행 보존·사유 NULL:", r10)
 ok7 = ok7 and len(r10) == n10 and all(r[2] is None for r in r10)
 v9.execute("INSERT INTO timetable(id,term_id,round_id,kind,parent_id,reason) VALUES (2,1,1,'TA_EDIT',1,'교수님과 통화로 확인')"); v9.commit()
 print("  새 버전에 사유 저장:", v9.execute("select kind, parent_id, reason from timetable where id=2").fetchone())
 
-print("\n결과:", "모두 통과" if ok1 and ok2 and ok3 and ok4 and ok5 and ok6 and ok7 else "실패")
+print("\n=== 경로 8: schema_v11(008까지 적용된 모양)에서 009 — 분반별 응답·분반 연강 요청·조율 대상")
+v11 = sqlite3.connect(":memory:"); v11.executescript(open(V11, encoding="utf-8").read()); q = v11.execute
+sd.seed(v11)
+q("INSERT INTO department VALUES (1,'AI','AI융합대학')")
+q("INSERT INTO user(id,role,name,department_id,password_hash) VALUES (1,'TA','조교',1,'x'),(2,'PROF','교수2',1,'x'),(3,'PROF','교수3',1,'x')")
+q("INSERT INTO term(id,year,semester,grid_id) VALUES (1,2026,'2',1)"); q("INSERT INTO round VALUES (1,1,1,NULL,'2026-11-20','CLOSED')")
+q("INSERT INTO building VALUES (1,'건물')"); q("INSERT INTO room(id,building_id,room_no,capacity,is_lab) VALUES (1,1,'101',50,0)")
+q("INSERT INTO course(id,term_id,department_id,name,professor_id,session_count,slots_per_session) VALUES (10,1,1,'알고리즘',2,2,1),(11,1,1,'객체지향',3,2,1),(12,1,1,'자료구조',3,2,1)")
+q("INSERT INTO course_section VALUES (10,1,2,40),(10,2,2,40),(10,3,3,40)")    # 과목 10: 교수2가 1·2분반, 교수3이 3분반. 과목 11·12 는 분반 행 없음
+q("INSERT INTO course_response(id,round_id,course_id,professor_id,lab_requirement,single_day_pref,section_pair) VALUES "
+  "(100,1,10,2,1,'MUST','BACK_TO_BACK'),(101,1,10,3,0,'NONE','NONE'),(102,1,11,3,0,'NONE','CROSS')")
+q("INSERT INTO response_slot VALUES (100,1,'BLOCK'),(100,2,'PREFER'),(101,3,'PREFER')")
+q("INSERT INTO other_request(id,response_id,body) VALUES (1,100,'실습 조교 한 명 부탁드립니다')")
+q("INSERT INTO request_item(id,response_id,type,value_int,source) VALUES (1,100,'SECTION_COUNT',2,'TA')")
+q("INSERT INTO solver_run(id,round_id,status) VALUES (1,1,'OPTIMAL')")
+q("INSERT INTO timetable(id,term_id,round_id,kind,solver_run_id) VALUES (1,1,1,'DRAFT',1)")
+q("INSERT INTO proposal(id,round_id,timetable_id,course_id,section_no,reason,status) VALUES (1,1,1,10,1,'겹침','SENT')")
+v11.commit()
+run(M9, v11)
+ok8 = compare("v11 + 009", v11)
+resp = v11.execute("SELECT id, course_id, section_no, professor_id, lab_requirement, single_day_pref FROM course_response ORDER BY course_id, section_no, id").fetchall()
+print("  응답 → 분반마다:", resp)
+ok8 = ok8 and [(r[1], r[2], r[3]) for r in resp] == [(10, 1, 2), (10, 2, 2), (10, 3, 3), (11, 1, 3)]
+ok8 = ok8 and resp[0][0] == 100 and resp[2][0] == 101 and resp[3][0] == 102 and resp[1][4:] == (1, "MUST")   # 첫 분반은 id 그대로, 둘째는 값 복사
+slots = v11.execute("SELECT response_id, slot_id, kind FROM response_slot ORDER BY 1,2").fetchall()
+print("  칠한 칸:", slots)
+ok8 = ok8 and slots == [(100, 1, "BLOCK"), (100, 2, "PREFER"), (101, 3, "PREFER"), (resp[1][0], 1, "BLOCK"), (resp[1][0], 2, "PREFER")]
+ok8 = ok8 and v11.execute("SELECT response_id FROM other_request").fetchone() == (100,) and v11.execute("SELECT response_id FROM request_item").fetchone() == (100,)
+pairs = v11.execute("SELECT p.course_id, p.professor_id, p.mode, s.seq, s.section_no FROM pair_request p LEFT JOIN pair_request_section s ON s.request_id=p.id ORDER BY 1,2,4").fetchall()
+print("  분반 연강·교차 요청:", pairs)
+ok8 = ok8 and pairs == [(10, 2, "BACK_TO_BACK", 1, 1), (10, 2, "BACK_TO_BACK", 2, 2), (11, 3, "CROSS", None, None)]   # 과목 11 은 분반 행이 없어 붙일 분반 없음
+pr = v11.execute("SELECT id, status, target_kind FROM proposal").fetchall()
+print("  안건 보존·target_kind NULL:", pr)
+ok8 = ok8 and pr == [(1, "SENT", None)]
+for st, kind in (("HOLD", "PARTIAL"), ("NO_OPTION", "UNPLACED")):
+    v11.execute("INSERT INTO proposal(round_id,timetable_id,course_id,section_no,status,target_kind) VALUES (1,1,10,2,?,?)", (st, kind))
+try:
+    v11.execute("INSERT INTO proposal(round_id,timetable_id,course_id,status,target_kind) VALUES (1,1,10,'OPEN','OTHER')"); ok8 = False
+except sqlite3.IntegrityError:
+    print("  없는 target_kind 거부")
+try:
+    v11.execute("INSERT INTO course_response(round_id,course_id,section_no,professor_id,lab_requirement,single_day_pref) VALUES (1,10,1,2,0,'NONE')"); ok8 = False
+except sqlite3.IntegrityError:
+    print("  같은 분반·같은 교수 응답 두 번 거부")
+
+print("\n결과:", "모두 통과" if ok1 and ok2 and ok3 and ok4 and ok5 and ok6 and ok7 and ok8 else "실패")
