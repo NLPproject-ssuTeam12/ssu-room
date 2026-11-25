@@ -29,7 +29,7 @@ DB(schema.sql)에서 입력을 읽어 초안 시간표를 만들고 같은 DB에
         같은 과목의 분반끼리는 겹쳐도 된다(교수가 같으면 교수 겹침 규칙이 막는다).
   채플: 학년별 채플 칸(chapel_slot)에는 그 학년 전공필수를 놓지 않는다(하드).
   시간: 19:30 교시는 큰 감점(late), 18:00 이후 시작하는 연속 2칸 이상 수업은 놓지 않는다(하드).
-  실습실: 1(쓴다 → 실습실만 배정) / 0(안 쓴다 → 실습실 쓰면 약한 벌점). 희망 칸: PREFER(희망)/BLOCK(불가), 칠하지 않으면 상관없음
+  실습실: MUST(필요 → 실습실만 배정) / NONE(필요 없음 → 실습실 쓰면 약한 벌점). 희망 칸: PREFER(희망)/BLOCK(불가), 칠하지 않으면 상관없음
 
   고정: 이전 시간표에서 고정(timetable_section.locked=1)된 분반은 모든 풀이(부분 재풀이·대안·전체 재풀이)에서 움직이지 않는다.
         조교가 교수와 따로 정해 수동 배치한 분반이 규칙을 어겨도 풀이가 막히지 않도록, 고정된 수업끼리의 위반은 그대로 두고
@@ -63,7 +63,7 @@ DEFAULT_WEIGHTS = {
     "unplaced": 100000,   # 못 놓음
     "prefer": 10,         # 교수가 희망한 칸 (보너스)
     "building_other": 50, # 교수가 고른 희망 건물이 아닌 건물이면 큰 벌점 (11/24: 하드는 아님. 유지 30 + 희망 칸 2칸 20 과 같은 크기)
-    "lab_waste": 5,       # 실습실을 안 쓴다고 답한 수업(0)이 실습실 사용
+    "lab_waste": 5,       # 실습실이 필요 없다고 답한 수업(NONE)이 실습실 사용
     "keep": 30,           # 이전 배정을 그대로 두면 보너스 (최소 변경)
     "late": 60,           # 19:30 교시를 쓰면 큰 감점 (11/21·11/24: 다른 방법이 없을 때만)
     "history_room": 8,    # 회신 안 한 교수: 전년에 같은 과목을 한 강의실이면 보너스
@@ -380,7 +380,7 @@ def _solve_model(con, term_id, round_id, W, time_limit, workers, prev, prevk, fr
                                 else:
                                     if cl["cap"] is not None and sd["enroll"] and cl["cap"] < sd["enroll"]:
                                         continue            # 분반 수강 인원 > 강의실 정원: 후보에서 뺌 (하드)
-                                    if sd["lab"] == 1 and not cl["lab"]:
+                                    if sd["lab"] == "MUST" and not cl["lab"]:
                                         continue
                                     if cl["dept"] is not None and cl["dept"] != c["dept"]:
                                         continue
@@ -398,7 +398,7 @@ def _solve_model(con, term_id, round_id, W, time_limit, workers, prev, prevk, fr
                                     w -= W["prefer"] * len(sd["prefer"] & set(covered))
                                     if bp is not None and cl["bld"] != bp:
                                         w += W["building_other"]     # 희망 건물이 아니면 벌점
-                                    if cl["lab"] and sd["lab"] == 0:
+                                    if cl["lab"] and sd["lab"] == "NONE":
                                         w += W["lab_waste"]          # 미회신(None)에는 가정하지 않음
                                     if hroom and hroom & set(cl["rooms"]):
                                         w -= W["history_room"]
@@ -869,7 +869,7 @@ def check_timetable(con, timetable_id):
         out.append(dict(rule="정원", course_id=cid, section_no=sec, detail=f"인원 {enr} > 강의실 {room} 정원 {cap}"))
     for cid, sec, room in q(f"""SELECT DISTINCT a.course_id, a.section_no, r.id FROM assignment a JOIN course c ON c.id=a.course_id
                                JOIN room r ON r.id=a.room_id JOIN course_response cr ON cr.id={resp_sql}
-                               WHERE a.timetable_id=? AND cr.lab_requirement=1 AND r.is_lab=0"""):
+                               WHERE a.timetable_id=? AND cr.lab_requirement='MUST' AND r.is_lab=0"""):
         out.append(dict(rule="실습실", course_id=cid, section_no=sec, detail=f"실습실이 아닌 강의실 {room}"))
     for cid, sec, sid in q("""SELECT a.course_id, a.section_no, a.slot_id FROM assignment a JOIN course c ON c.id=a.course_id
                               JOIN timetable t ON t.id=a.timetable_id

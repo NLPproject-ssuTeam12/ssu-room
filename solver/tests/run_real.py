@@ -97,7 +97,7 @@ def build(rows, with_responses):
                 bld_use[r["professor"]][r["room"].split()[0]] += 1
         i = 0
         for (cid, p), rs in by_cp.items():
-            lab = int(any(r["room"].split()[-1] in LABS for r in rs if r["room"]))
+            lab = "MUST" if any(r["room"].split()[-1] in LABS for r in rs if r["room"]) else "NONE"
             single = "MUST" if all(r["_long"] for r in rs) else "NONE"
             pref = {SL[(d, st)] for r in rs for d, st in r["_cells"] if (d, st) in SL}
             block = rnd.sample(sorted(set(SL.values()) - pref), 6)

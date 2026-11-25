@@ -9,7 +9,7 @@ def setup(c, with_section_rows):
     c.execute("DELETE FROM course_section WHERE course_id=?", (os_id,))
     for prof in (pa, pb):                      # 두 교수 모두 "분반 2개 개설" 요청(옛 방식, 이제 솔버는 읽지 않음)
         rid += 1
-        c.execute("INSERT INTO course_response(id,round_id,course_id,professor_id,lab_requirement,single_day_pref) VALUES (?,?,?,?,?,?)", (rid,1,os_id,prof,0,'NONE'))
+        c.execute("INSERT INTO course_response(id,round_id,course_id,professor_id,lab_requirement,single_day_pref) VALUES (?,?,?,?,?,?)", (rid,1,os_id,prof,'NONE','NONE'))
         c.execute("INSERT INTO request_item(response_id,type,value_int) VALUES (?,?,?)", (rid,'SECTION_COUNT',2))
     if with_section_rows:                      # 오프라인 회의 결과: 조교가 분반 4개(교수·인원)를 입력
         for s, p in [(1,pa),(2,pa),(3,pb),(4,pb)]: c.execute("INSERT INTO course_section VALUES (?,?,?,?)", (os_id, s, p, 30))

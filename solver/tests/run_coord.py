@@ -45,7 +45,7 @@ def new_course(sections, prefer=None, block=None, bld=None, cat="전공선택", 
         c.execute("INSERT INTO course_section VALUES (?,?,?,?)", (cid, sec, p, 30))
         NEXT[0] += 1; rid = NEXT[0]
         c.execute("INSERT INTO course_response(id,round_id,course_id,section_no,professor_id,lab_requirement,single_day_pref) VALUES (?,?,?,?,?,?,?)",
-                  (rid, 1, cid, sec, p, 0, "NONE"))
+                  (rid, 1, cid, sec, p, "NONE", "NONE"))
         pf = prefer[sec - 1] if prefer and isinstance(prefer[0], list) else (prefer or [])
         bk = block[sec - 1] if block and isinstance(block[0], list) else (block or [])
         for x in pf: c.execute("INSERT INTO response_slot VALUES (?,?,'PREFER')", (rid, SL[x]))

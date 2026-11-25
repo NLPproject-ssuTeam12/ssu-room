@@ -40,7 +40,7 @@ def verify(c, tt, label=""):
         lab_req=q("""SELECT COUNT(*) FROM assignment a JOIN course c0 ON c0.id=a.course_id
                      JOIN course_response cr ON cr.course_id=a.course_id AND cr.section_no=a.section_no AND cr.professor_id=COALESCE((SELECT professor_id FROM course_section WHERE course_id=a.course_id AND section_no=a.section_no), c0.professor_id)
                      JOIN room r ON r.id=a.room_id
-                     WHERE a.timetable_id=? AND cr.lab_requirement=1 AND r.is_lab=0""", tt),
+                     WHERE a.timetable_id=? AND cr.lab_requirement='MUST' AND r.is_lab=0""", tt),
         same_day=q("""SELECT COUNT(*) FROM (SELECT a.course_id,a.section_no,ts.day,COUNT(DISTINCT a.session_no) n FROM assignment a
                       JOIN time_slot ts ON ts.id=a.slot_id WHERE a.timetable_id=? GROUP BY 1,2,3 HAVING n>1)""", tt),
         chapel=q("""SELECT COUNT(*) FROM assignment a JOIN course c ON c.id=a.course_id JOIN timetable t ON t.id=a.timetable_id

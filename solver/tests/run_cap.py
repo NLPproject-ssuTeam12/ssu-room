@@ -13,7 +13,7 @@ print("강의실 정원 종류:", caps)
 # 대상: 응답이 있고 분반 1개, 분반 연강·교차 요청 없는 과목
 cid = c.execute("""SELECT s.course_id FROM course_section s JOIN course_response r ON r.course_id=s.course_id
                    GROUP BY s.course_id HAVING COUNT(*)=1 ORDER BY s.course_id LIMIT 1""").fetchone()[0]
-c.execute("UPDATE course_response SET lab_requirement=0 WHERE course_id=?", (cid,))     # 실습실 조건은 빼고 정원만 본다
+c.execute("UPDATE course_response SET lab_requirement='NONE' WHERE course_id=?", (cid,))     # 실습실 조건은 빼고 정원만 본다
 
 # 1) 인원 95명 → 정원 100 강의실에만
 c.execute("UPDATE course_section SET enrollment=95 WHERE course_id=?", (cid,)); c.commit()

@@ -43,7 +43,7 @@ def build(seed=1, n_courses=70, n_prof=30):
             c.execute("INSERT INTO course_section VALUES (?,?,?,?)", (cid, s, prof, -(-enr // n_sec)))
             rid_resp += 1                        # 희망 입력은 분반마다 (11/25). 가상 데이터는 분반끼리 같은 값
             c.execute("INSERT INTO course_response(id,round_id,course_id,section_no,professor_id,lab_requirement,single_day_pref) VALUES (?,?,?,?,?,?,?)",
-                      (rid_resp,1,cid,s,prof,lab,single_day))
+                      (rid_resp,1,cid,s,prof,"MUST" if lab else "NONE",single_day))
             for sid in block: c.execute("INSERT OR IGNORE INTO response_slot VALUES (?,?,?)",(rid_resp,sid,'BLOCK'))
             for sid in prefer: c.execute("INSERT OR IGNORE INTO response_slot VALUES (?,?,?)",(rid_resp,sid,'PREFER'))
     CHAPEL = {"1": ("화", "12:00"), "2": ("목", "12:00"), "3": ("수", "12:00"), "4": ("월", "12:00")}   # 가상 채플 시간

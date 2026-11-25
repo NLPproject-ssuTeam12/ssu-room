@@ -42,7 +42,7 @@ def new_course(cat="전공선택", year="1", sessions=2, sections=((None, 30),),
         NEXT[0] += 1; rid = NEXT[0]
         ok = sec_ok[order.index(p)] if sec_ok else ok_slots
         c.execute("INSERT INTO course_response(id,round_id,course_id,section_no,professor_id,lab_requirement,single_day_pref) VALUES (?,?,?,?,?,?,?)",
-                  (rid, 1, cid, sec, p, lab, single))
+                  (rid, 1, cid, sec, p, {1: "MUST", 0: "NONE"}.get(lab, lab), single))
         for sid in (ALL - set(SL[x] for x in ok)) if ok else ():
             c.execute("INSERT INTO response_slot VALUES (?,?,'BLOCK')", (rid, sid))
         for x in prefer:
