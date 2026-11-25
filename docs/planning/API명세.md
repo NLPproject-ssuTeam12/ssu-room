@@ -13,7 +13,8 @@
 
 - 데이터 묶음: 환경변수 `DATA_SET` (기본 `real`) → `data/private/<DATA_SET>/` 의 JSON을 읽는다.
   `real`은 `python backend/tools/import_real.py --src <원본 폴더>` 로 만든다. 이 폴더는 커밋하지 않는다.
-- 상태는 서버 메모리에만 있다. 서버를 다시 켜거나 `POST /reset` 하면 처음으로 돌아간다. (DB는 나중에)
+- 상태: 기본(메모리 모드, 테스트용)은 서버 메모리. `SSUROOM_ENGINE=solver`면 **DB 모드**: 하윤 DB(`ssuroom.db`)에 저장하고
+  배정·조율은 하윤 엔진이 한다. 아래 "DB 모드" 참고.
 - 테스트: `python -m pytest backend/tests -q` (backend/ 안에서는 `python -m pytest tests -q`)
 
 ## 데이터 안내 (화면에 표시할 것)
@@ -313,6 +314,28 @@ fetch(`http://localhost:8000/coord/${encodeURIComponent(sectionId)}/message`, { 
 - 과목명·교수는 `GET /sections`에서 `section_id`로 찾아 붙인다.
 
 에러: 409 `아직 초안이 없습니다. POST /draft 를 먼저 부르세요.`
+
+### DB 모드 (11/25, `SSUROOM_ENGINE=solver`)
+
+준비: `python backend/tools/seed_db.py` (강의정보 엑셀 → `ssuroom.db` + `data/private/real/section_map.json`, 교수는 가명).
+실행: `SSUROOM_ENGINE=solver uvicorn backend.app.main:app --port 8000` (PowerShell은 `$env:SSUROOM_ENGINE="solver"` 먼저).
+경로·요청·응답 모양은 메모리 모드와 같고, 다음이 다르다.
+
+| 항목 | DB 모드 |
+|---|---|
+| 단계 | `term.phase`(COLLECTING·ROUND1~3·FINAL) + 시간표 유무. COLLECTING인데 시간표가 있으면 `DRAFT` |
+| `POST /wishes` | 분반마다 `course_response`·`response_slot`, 건물 → 교수 희망 건물, `note` → 기타 요청 |
+| `POST /wishes/pair` | `{section_id, mode: NONE|BACK_TO_BACK|CROSS, order: [분반 id…]}` 분반 연강·교차 (하윤 `set_pair_request`) |
+| `POST /draft` | 엔진 `solve` → 조율 대상(`coord_targets`)마다 안건을 열고 대안 A·B·C. 응답에 `coord_status`(OPEN·HOLD·NO_OPTION 개수)·`solver` |
+| `GET /coord` | 항목에 `proposal_id`, `kind`(`UNPLACED`·`MISMATCH`·`PARTIAL`), `current`(지금 자리, 있으면 교수 화면에 KEEP), `state`에 `HOLD`·`NO_OPTION`·`OFFLINE`이 더 있다 |
+| `POST /rounds/next` | 본문 `{method}`(선택). 1차를 열면 보내기 전(`OPEN`) 안건에 조율 메시지를 **자동으로 보낸다**. 2·3차는 `NEXT` 안건을 이어받아 확인된 조건을 쌓은 대안을 만들고(이미 보낸 대안 제외, 없으면 `NO_OPTION`) 보낸다. 응답 `sent`·`next_opened` |
+| `POST /coord/{id}/hold` | `HOLD`(일부만 어긋남): `{send: true}` → `OPEN`(이어서 `/message`로 보냄), `false` → `KEPT` |
+| `POST /coord/{id}/ack` | `NO_OPTION`(대안 없음): 조교 확인 → `OFFLINE`(따로 연락) → `/manual` |
+| `POST /coord/{id}/reply` | DB `add_reply`(누른 값 필수: 예전 `choice`나 글만 보내면 `ETC`로 넣음) → 해석 `save_interpretation`(판정·해석 JSON·모델 이름). 기타 글의 시간표 밖 요청(`note`)은 기타 요청 표로 |
+| `POST /coord/{id}/decide` | `decide_reply`. [확인] move는 엔진 `pick_best`(교수가 고른 안 중 지금 놓을 수 있는 첫 안, 글로 밝힌 순서 우선) → `apply_option`(새 시간표 버전, 새 규칙 위반이면 409) |
+| `POST /assistant/apply` | `apply_option`으로 새 시간표 버전 (사유 = 시간표 버전 사유) |
+| `POST /finalize` | 엔진 `finalize` + 단계 FINAL. `/export.xlsx`는 그 시간표 |
+| `POST /reset` | 조율·시간표 기록을 지우고 희망 수집으로 (희망·과목·강의실은 그대로) |
 
 ### `GET /coord`
 조율 목록. 모든 단계(COLLECT는 `[]`).

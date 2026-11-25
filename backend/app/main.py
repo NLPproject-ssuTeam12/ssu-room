@@ -4,7 +4,8 @@
     uvicorn backend.app.main:app --reload --port 8000
 
 배정·조율 함수는 engine.py에서만 가져온다 (진짜가 없으면 가짜).
-상태는 store.py(메모리)에 둔다. 단계: COLLECT → DRAFT → ROUND(1~3) → FINAL.
+상태: 기본(메모리 모드)은 store.py(메모리). SSUROOM_ENGINE=solver 면 DB 모드: 하윤 DB가 기준이고(dbmode.py),
+바꾸는 요청 뒤마다 DB 내용으로 store를 다시 채운다. 단계: COLLECT → DRAFT → ROUND(1~3) → FINAL.
 조교가 [확인]·[수정]·[현재대로 유지]를 누르기 전에는 어떤 처리안도 시간표에 반영하지 않는다.
 """
 
@@ -17,7 +18,7 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-from . import engine, export
+from . import dbmode, engine, export
 from .contracts import Alternative, Key, Timetable, Wish, fix_conditions, dump, meetings_to_blocks, parse, set_place
 from .nlp import assistant
 from .store import MAX_ROUND, store
@@ -55,6 +56,10 @@ def _log_sources() -> None:
         log.warning(bar)
     for w in store.load_warnings:
         log.warning("데이터 읽기: %s", w)
+    db = dbmode.active()
+    if db is not None:
+        db.sync(store)
+        log.info("DB 모드: 하윤 DB에 상태를 저장합니다 (분반 %d개)", len(store.sections))
 
 
 # ---------- 요청 모양 ----------
@@ -109,10 +114,41 @@ class ApplyIn(BaseModel):
     reason: Optional[str] = None
 
 
+class HoldIn(BaseModel):
+    send: bool = True               # True = [보내기] (OPEN), False = 보내지 않음 (KEPT)
+
+
+class PairIn(BaseModel):
+    """분반 연강·교차 (같은 교수가 한 과목의 분반을 둘 이상 맡을 때, 과목 단위로 한 번)."""
+    section_id: str                 # 그 과목의 분반 하나 (교수 확인용)
+    mode: Literal["NONE", "BACK_TO_BACK", "CROSS"]
+    order: Optional[List[str]] = None   # 붙일 분반 id, 교수가 적은 순서. 없으면 맡은 분반 전부
+
+
+class RoundIn(BaseModel):
+    method: Literal["keyword", "llm"] = "keyword"   # DB 모드에서 자동으로 보내는 조율 메시지 방식
+
+
 # ---------- 도우미 ----------
 
 def _conflict(msg: str) -> HTTPException:
     return HTTPException(status_code=409, detail=msg)
+
+
+def _db():
+    """DB 모드면 DBMode (SSUROOM_ENGINE=solver), 아니면 None."""
+    return dbmode.active()
+
+
+def _db_call(fn, *args, **kwargs):
+    """DB 모드 함수 호출. 하윤 함수의 거부(ValueError)와 서버 거부(DBModeError)는 409, 끝나면 store를 DB로 다시 채운다."""
+    db = _db()
+    try:
+        return fn(*args, **kwargs)
+    except (ValueError, dbmode.DBModeError) as e:
+        raise _conflict(str(e))
+    finally:
+        db.sync(store)
 
 
 def _section_or_404(sid: str):
@@ -254,8 +290,24 @@ def post_wish(wish: Wish):
         wish.professor = sec.professor
     elif sec.professor is not None and wish.professor != sec.professor:
         raise HTTPException(status_code=422, detail="이 분반의 담당 교수가 아닙니다.")
+    if _db():
+        _db_call(_db().save_wish, wish)
+        return {"saved": store.get_wish(wish.section_id) or wish}
     store.save_wish(wish)
     return {"saved": wish}
+
+
+@app.post("/wishes/pair")
+def post_pair(body: PairIn):
+    """분반 연강·교차 요청 (교수 입력 필터). DB 모드는 하윤 set_pair_request, 메모리 모드는 기록만."""
+    _section_or_404(body.section_id)
+    if store.stage != "COLLECT":
+        raise _conflict(f"희망은 수집 단계(COLLECT)에서만 받습니다. 지금 단계: {store.stage}")
+    if _db():
+        order = _db_call(_db().set_pair, body.section_id, body.mode, body.order)
+        return {"section_id": body.section_id, "mode": body.mode, "order": order}
+    store.pairs = {**getattr(store, "pairs", {}), body.section_id: {"mode": body.mode, "order": body.order or []}}
+    return {"section_id": body.section_id, "mode": body.mode, "order": body.order or []}
 
 
 # ---------- 초안 ----------
@@ -264,6 +316,18 @@ def post_wish(wish: Wish):
 def post_draft():
     if store.stage != "COLLECT":
         raise _conflict(f"초안은 수집 단계(COLLECT)에서 한 번만 만듭니다. 지금 단계: {store.stage}")
+    if _db():
+        r = _db_call(_db().draft)
+        count: dict = {}
+        for a in store.timetable.assignments:
+            count[a.status] = count.get(a.status, 0) + 1
+        kinds: dict = {}
+        for o in r["opened"]:
+            kinds[o["status"]] = kinds.get(o["status"], 0) + 1
+        return {"stage": store.stage, "assignments": len(store.timetable.assignments), "status_count": count,
+                "coord": [c["section_id"] for c in store.list_coord()], "coord_status": kinds,
+                "solver": {k: r[k] for k in ("status", "seconds", "unplaced", "unsupported")},
+                "violations": len(_db().violations())}
     tt, delayed = engine.make_draft(store.list_sections(), store.list_wishes(), store.list_rooms())
     tt = _normalize(tt)
     tt.status = "DRAFT"
@@ -314,10 +378,33 @@ def post_message(section_id: str, body: Optional[MessageIn] = None):
     msg = engine.write_message(inp, method)
     issues = list(engine.check_message(msg.text, inp))
     sent = not issues   # 검사에 걸리면 보내지 않는다
+    if _db():
+        _db_call(_db().send_message, section_id, msg.text, sent)
+        return store.add_message(section_id, msg, issues, sent)
     rec = store.add_message(section_id, msg, issues, sent)
     if sent:
         store.update_coord(section_id, state="SENT", message=msg.text)
     return rec
+
+
+@app.post("/coord/{section_id}/hold")
+def post_hold(section_id: str, body: HoldIn):
+    """일부만 어긋난 분반(HOLD): 조교가 [보내기](send=true → OPEN, 이어서 /message) 또는 보내지 않음(KEPT). DB 모드."""
+    _section_or_404(section_id)
+    if not _db():
+        raise _conflict("조교 선택 대기(HOLD)는 DB 모드(SSUROOM_ENGINE=solver)에서만 있습니다.")
+    _db_call(_db().release_hold, section_id, body.send)
+    return {"coord": _coord_out(store.get_coord(section_id))}
+
+
+@app.post("/coord/{section_id}/ack")
+def post_ack(section_id: str):
+    """대안이 없는 분반(NO_OPTION): 조교가 확인 → 따로 연락(OFFLINE) → /manual. DB 모드."""
+    _section_or_404(section_id)
+    if not _db():
+        raise _conflict("대안 없음(NO_OPTION)은 DB 모드(SSUROOM_ENGINE=solver)에서만 있습니다.")
+    _db_call(_db().ack_no_option, section_id)
+    return {"coord": _coord_out(store.get_coord(section_id))}
 
 
 @app.post("/coord/{section_id}/reply")
@@ -330,6 +417,18 @@ def post_reply(section_id: str, body: ReplyIn):
     alts = item["alternatives"]
     parsed = engine.parse_reply(body.text, body.choice, choices=body.choices, alternatives=alts,
                                 message=item["message"] or "", method=body.method, can_keep=can_keep)
+    if _db():
+        # DB는 누른 값이 하나 이상 있어야 받는다(add_reply). 예전 값은 바꿔 넣는다: 안 → 그 안, 모두 어려움·글만 → 기타
+        choices = list(dict.fromkeys(body.choices or ([body.choice] if body.choice in ("A", "B", "C") else ["ETC"])))
+        if "ETC" in choices and not body.text.strip():
+            raise HTTPException(status_code=422, detail="기타를 골랐으면 기타 내용을 적어야 합니다.")
+        db = _db()
+        pid, mid = _db_call(db.add_reply, section_id, body.text, choices)
+        # 그사이 못 쓰게 된 안은 [확인] 때 엔진 pick_best 가 가린다
+        proposal = engine.match_conditions(parsed, alts, store.round_no, [])
+        model = "keyword" if parsed.method == "keyword" else os.environ.get("GEMINI_MODEL", "gemini-3.5-flash-lite")
+        _db_call(db.save_interpretation, pid, mid, parsed, proposal, model)
+        return store.add_reply(section_id, body.text, choices, body.method, parsed, proposal, [])
     unavailable = _unavailable(section_id, alts)
     proposal = engine.match_conditions(parsed, alts, store.round_no, unavailable)
     rec = store.add_reply(section_id, body.text, body.choices or body.choice, body.method, parsed, proposal,
@@ -341,6 +440,18 @@ def post_reply(section_id: str, body: ReplyIn):
 @app.post("/coord/{section_id}/decide")
 def post_decide(section_id: str, body: DecideIn):
     item = _coord_target(section_id)
+    if _db():
+        if body.action == "edit":
+            if not (body.reason and body.reason.strip()):
+                raise HTTPException(status_code=422, detail="수정하려면 사유(reason)를 적어야 합니다.")
+            if body.choice is None:
+                raise HTTPException(status_code=422, detail="수정하려면 고를 안(choice: A|B|C)을 적어야 합니다.")
+        r = _db_call(_db().decide, section_id, body.action, body.reason, body.choice)
+        rec =store.add_decision(section_id, r["action"], body.reason, r.get("applied"))
+        out = {"decision": rec, "coord": _coord_out(store.get_coord(section_id))}
+        if r.get("timetable_id"):
+            out["violations"] = len(_db().violations())
+        return out
 
     if item["state"] == "OFFLINE":
         raise _conflict("따로 연락 중인 분반입니다. 정한 자리를 POST /coord/{분반}/manual 로 넣으세요.")
@@ -403,6 +514,11 @@ def post_manual(section_id: str, body: ManualIn):
     if not body.meetings:
         raise HTTPException(status_code=422, detail="놓을 수업(meetings)이 없습니다.")
     alt = Alternative(key="A", meetings=[dump(m) for m in body.meetings])
+    if _db():
+        _tt, warn = _db_call(_db().manual_place, section_id, [dump(m) for m in body.meetings], body.reason)
+        rec = store.add_decision(section_id, "manual", body.reason, dump(alt))
+        return {"decision": rec, "coord": _coord_out(store.get_coord(section_id)),
+                "violations": len(warn), "warnings": warn}
     blocks, _ = meetings_to_blocks(alt.meetings)
     tt = parse(Timetable, dump(store.timetable))
     for a in tt.assignments:
@@ -420,7 +536,20 @@ def post_manual(section_id: str, body: ManualIn):
 # ---------- 차수·확정 ----------
 
 @app.post("/rounds/next")
-def post_next_round():
+def post_next_round(body: Optional[RoundIn] = None):
+    if _db():
+        # DB 모드: 다음 차수를 열고(2·3차는 NEXT 안건을 이어받아 조건을 쌓은 대안), 보내기 전(OPEN) 안건은
+        # 조율 메시지를 자동으로 보낸다 (11/25 결정: 못 놓음·어긋남은 자동, 일부 어긋남(HOLD)·대안 없음은 조교 화면)
+        no, opened = _db_call(_db().next_round)
+        sent = []
+        for c in store.list_coord():
+            if c["state"] == "OPEN" and c["round_no"] == no:
+                post_message(c["section_id"], MessageIn(method=body.method if body else "keyword"))
+                sent.append(c["section_id"])
+        _db().sync(store)
+        open_items = [c["section_id"] for c in store.list_coord() if c["state"] not in ("RESOLVED", "KEPT")]
+        return {"stage": store.stage, "round_no": store.round_no, "open": open_items, "sent": sent,
+                "next_opened": opened}
     if store.stage == "DRAFT":
         store.set_stage("ROUND", round_no=1)
         for c in store.list_coord():
@@ -447,6 +576,11 @@ def post_next_round():
 def post_finalize():
     if store.stage not in ("DRAFT", "ROUND"):
         raise _conflict(f"확정할 수 없는 단계입니다: {store.stage}")
+    if _db():
+        _db_call(_db().finalize)
+        left = [a.section_id for a in store.timetable.assignments if a.status == "COORD"]
+        return {"stage": store.stage, "round_no": store.round_no, "unresolved": left,
+                "violations": len(_db().violations())}
     store.set_stage("FINAL")
     left = [a.section_id for a in store.timetable.assignments if a.status == "COORD"]
     return {"stage": store.stage, "round_no": store.round_no, "unresolved": left,
@@ -455,8 +589,11 @@ def post_finalize():
 
 @app.post("/reset")
 def post_reset():
-    store.reset()
     assistant.clear_proposals()
+    if _db():
+        _db_call(_db().reset)
+        return {"stage": store.stage}
+    store.reset()
     return {"stage": store.stage}
 
 
@@ -488,6 +625,11 @@ def post_assistant_apply(body: ApplyIn):
         raise _conflict("제안을 만든 뒤 시간표가 바뀌었습니다. 도우미에게 다시 물어봐 주세요.")
 
     sid, alt = prop["section_id"], prop["alternative"]
+    if _db():
+        _db_call(_db().assistant_apply, sid, alt, body.reason.strip())
+        rec = store.add_decision(sid, "assistant_move", body.reason.strip(), dump(alt))
+        assistant.pop_proposal(body.proposal_id)
+        return {"decision": rec, "summary": prop["summary"], "violations": len(_db().violations())}
     tt = _normalize(engine.reassign(store.timetable, sid, alt))
     tt.status = store.timetable.status
     store.set_timetable(tt)

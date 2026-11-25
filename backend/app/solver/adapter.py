@@ -183,6 +183,10 @@ class SolverAdapter:
         self.draft_time_limit, self.alt_time_limit = draft_time_limit, alt_time_limit
         self.last_options: Dict[str, List[dict]] = {}     # 분반 id → 마지막으로 만든 솔버 대안 (save_proposal용)
         self.last_solve: Optional[dict] = None
+        # reassign 이 새 시간표 버전(apply_option)을 만들 때 남길 조교 id·사유. 서버가 부르기 전에 넣는다
+        self.actor_id: Optional[int] = None
+        self.apply_reason: Optional[str] = None
+        self.last_saved: Optional[dict] = None             # 마지막 reassign 결과 {timetable_id, proposal_id, section_id}
 
     # --- 하윤 함수 부르기 ---
 
@@ -241,24 +245,49 @@ class SolverAdapter:
         cid, _ = self.sections.key(section_id)
         return options_to_alternatives(self.options(section_id, conditions), cid, self.slots, self.rooms)
 
+    def option_of(self, section_id: str, alt: Alternative) -> dict:
+        """재성 Alternative → 솔버 대안 모양 {placements: {(분반, 회차): (시작 칸, 강의실)}, ks: {...}}."""
+        _, sec = self.sections.key(section_id)
+        placements, ks = {}, {}
+        for ss, m in enumerate(sorted(alt.meetings, key=lambda m: (m.day, m.start)), start=1):
+            start = self.slots.id_of[(DAYS[m.day], m.start)]
+            k = next(n for n in range(1, 4) if self.slots.end(start, n) == m.end)
+            if m.room not in self.rooms.id_of:
+                raise ValueError(f"DB에 없는 강의실: {m.room}")
+            placements[(sec, ss)] = (start, self.rooms.id_of[m.room])
+            ks[(sec, ss)] = k
+        return dict(placements=placements, ks=ks)
+
+    def open_proposal(self, section_id: str) -> Optional[int]:
+        """그 분반의 열린 안건 (반영됨·현재대로 유지·다음 차수가 아닌 가장 최근 것). 없으면 None (= 도우미 [적용])."""
+        cid, sec = self.sections.key(section_id)
+        row = self.con.execute("""SELECT id FROM proposal WHERE course_id=? AND section_no=?
+                                  AND status NOT IN ('RESOLVED','KEPT','NEXT') ORDER BY id DESC LIMIT 1""",
+                               (cid, sec)).fetchone()
+        return row[0] if row else None
+
     def reassign(self, timetable: Timetable, section_id: str, choice) -> Timetable:
-        """고른 안(Alternative) 또는 조건 → 그 분반만 바꾼 새 시간표. DB에는 아직 쓰지 않는다."""
-        tt = parse(Timetable, dump(timetable))
+        """고른 안(Alternative) 또는 조건 → 그 분반만 바꾼 새 시간표 버전 (하윤 solver_core.apply_option).
+        ① 그 분반의 열린 안건(없으면 None = 도우미 [적용]) ② option_rows 로 rows ③ apply_option(새 위반이면 ValueError)
+        ④ self.timetable_id 를 새 버전으로. 조교 id·사유는 self.actor_id·self.apply_reason. 반환은 새 버전의 배정."""
         if not isinstance(choice, Alternative):
             alts = self.make_alternatives(section_id, choice)
             if not alts:
-                return tt
+                return parse(Timetable, dump(timetable))
             choice = alts[0]
-        blocks = []
-        for m in choice.meetings:
-            sid = self.slots.id_of[(DAYS[m.day], m.start)]
-            k = next(n for n in range(1, 4) if self.slots.end(sid, n) == m.end)
-            blocks.append(Block(day=DAYS[m.day], start=m.start, slots=k, room=m.room))   # 수업마다 강의실 유지
-        for a in tt.assignments:
-            if a.section_id == section_id:
-                set_place(a, blocks)
-                a.status, a.reason = "DONE", None
-        return tt
+        cid, _ = self.sections.key(section_id)
+        base = self.timetable_id or self.con.execute("SELECT MAX(id) FROM timetable WHERE term_id=?",
+                                                     (self.term_id,)).fetchone()[0]
+        rows = self.sc.option_rows(self.con, option=self.option_of(section_id, choice), timetable_id=base)
+        pid = self.open_proposal(section_id)
+        new_tt = self.sc.apply_option(self.con, pid, self.actor_id, rows, self.apply_reason,
+                                      course_id=cid, base_timetable_id=base)
+        self.timetable_id = new_tt
+        self.last_saved = dict(timetable_id=new_tt, proposal_id=pid, section_id=section_id)
+        placed = self.assignments(new_tt)
+        out = parse(Timetable, dump(timetable))
+        out.assignments = [placed.get(a.section_id, a) for a in out.assignments] or list(placed.values())
+        return out
 
 
 # ---------- engine.py가 부르는 모듈 함수 (서버 모양) ----------
