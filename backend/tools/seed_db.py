@@ -20,6 +20,11 @@
 - 채플: data/private/real/fixed_blocks.json 의 채플(AI대학 대상) 칸 → 학년별 chapel_slot. 교양필수 고정 시간은 넣지 않는다.
 - 조교 계정 하나(user role TA, 이름 '조교')를 만든다(조교 결정 함수가 조교만 받음).
 - 전 학기(2026-1) 기록은 넣지 않는다: 엔진 load_history 는 전년도 같은 학기만 읽는다.
+- --demo (기본 꺼짐): 시연용으로 일부 분반의 **가상 희망만** 서로 겹치게 바꾼다 (과목·분반·강의실·인원은 그대로).
+  고정 난수 시드로 늘 같은 분반을 고른다. 바꾼 분반은 출력하고 대응표에 "demo_changed"(무엇을 바꿨는지)로 남긴다.
+    겹침(MISMATCH → OPEN)  같은 교수의 다른 분반이 그 칸만 되게 막고, 이 분반은 그 칸만 희망 → 희망 칸을 하나도 못 받음
+    일부 겹침(PARTIAL → HOLD) 희망 두 칸 중 한 칸을 같은 교수 다른 분반(그 칸만 됨)의 칸으로 → 한 회차만 어긋남
+    대안 없음(NO_OPTION)    모든 칸을 불가로 → 못 놓고 대안도 없음
 대응표(section_map.json)는 서버·어댑터가 읽는다. data/private 아래라 커밋하지 않는다.
 """
 
@@ -224,7 +229,7 @@ def build_plan(rows: List[dict], alias: Dict[str, str], rooms_info: Dict[str, di
         if s["shape"] == "MANUAL":
             continue
         wishes.append(dict(section_id=s["section_id"], course_id=s["course_id"], section_no=s["section_no"],
-                           professor=s["professor"], prefer=cells_of(s["blocks"]),
+                           professor=s["professor"], prefer=cells_of(s["blocks"]), block=[],
                            lab="MUST" if any(b["room"] in LABS for b in s["blocks"]) else "NONE",
                            single_day="MUST" if s["shape"] == "ONCE_LONG" else "NONE"))
     bld = defaultdict(Counter)
@@ -290,9 +295,11 @@ def create_db(con, plan: dict, year: int = 2026, semester: str = "2", deadline: 
         rid = q("""INSERT INTO course_response(round_id, course_id, section_no, professor_id, lab_requirement,
                                                single_day_pref, submitted_at) VALUES (?,?,?,?,?,?,datetime('now'))""",
                 (rnd, w["course_id"], w["section_no"], user[w["professor"]], w["lab"], w["single_day"])).lastrowid
-        for cell in w["prefer"]:
-            d, _, st = cell.partition("-")
-            q("INSERT OR IGNORE INTO response_slot(response_id, slot_id, kind) VALUES (?,?, 'PREFER')", (rid, slot[(d, st)]))
+        for kind in ("BLOCK", "PREFER"):
+            for cell in w["block" if kind == "BLOCK" else "prefer"]:
+                d, _, st = cell.partition("-")
+                q("INSERT OR IGNORE INTO response_slot(response_id, slot_id, kind) VALUES (?,?,?)",
+                  (rid, slot[(d, st)], kind))
     for p in sorted({w["professor"] for w in plan["wishes"]}):
         q("INSERT INTO round_invite(round_id, professor_id, status) VALUES (?,?, 'RESPONDED')", (rnd, user[p]))
     for p, b in plan["building_pref"].items():
@@ -306,6 +313,65 @@ def create_db(con, plan: dict, year: int = 2026, semester: str = "2", deadline: 
     return dict(term_id=term, round_id=rnd, ta_id=ta, users=user, rooms=room_ids, slots=slot)
 
 
+DEMO_SEED = 20261125
+DEMO_COUNTS = dict(mismatch=4, partial=1, no_option=1)   # 실제 엑셀에서 초안 OPEN 4~6·HOLD 1~2·NO_OPTION 1 이 되게 맞춘 값
+ALL_CELLS = [f"{d}-{t}" for d in DAYS for t in STARTS]
+
+
+def apply_demo(plan: dict, seed: int = DEMO_SEED, counts: Optional[dict] = None) -> Dict[str, str]:
+    """시연용 겹침: 가상 희망만 바꾼다. -> {서버 분반 id: 바꾼 내용}. 같은 seed 면 늘 같은 결과."""
+    import random
+    counts = dict(DEMO_COUNTS, **(counts or {}))
+    rng = random.Random(seed)
+    wish = {w["section_id"]: w for w in plan["wishes"]}
+    by_prof: Dict[str, List[str]] = defaultdict(list)
+    for sid in sorted(wish):
+        by_prof[wish[sid]["professor"]].append(sid)
+    profs = sorted(p for p, v in by_prof.items() if len(v) >= 2)
+    rng.shuffle(profs)
+    used, changed = set(), {}
+
+    def pair():
+        """같은 교수의 아직 안 쓴 두 분반 (겹칠 분반, 막는 분반)."""
+        for p in profs:
+            free = [x for x in by_prof[p] if x not in used]
+            if len(free) >= 2:
+                a, b = rng.sample(free, 2)
+                used.update((a, b))
+                return a, b
+        return None
+
+    def hold_only(blocker: str) -> None:
+        w = wish[blocker]
+        w["block"] = [c for c in ALL_CELLS if c not in w["prefer"]]
+        changed[blocker] = "막는 분반: 지금 칸 말고 모두 불가"
+
+    for _ in range(counts["mismatch"]):
+        got = pair()
+        if not got:
+            break
+        a, b = got
+        hold_only(b)
+        wish[a]["prefer"] = list(wish[b]["prefer"])
+        changed[a] = f"겹침: {b}의 칸만 희망"
+    for _ in range(counts["partial"]):
+        got = pair()
+        if not got:
+            break
+        a, b = got
+        hold_only(b)
+        own = [c for c in wish[a]["prefer"] if c not in wish[b]["prefer"]]
+        wish[a]["prefer"] = sorted(set(own[:1] + wish[b]["prefer"][:1]))
+        wish[a]["single_day"] = "NONE"
+        changed[a] = f"일부 겹침: 한 칸은 {b}의 칸"
+    rest = [sid for sid in sorted(wish) if sid not in used]
+    for sid in rng.sample(rest, min(counts["no_option"], len(rest))):
+        wish[sid]["prefer"], wish[sid]["block"] = [], list(ALL_CELLS)
+        used.add(sid)
+        changed[sid] = "대안 없음: 모든 칸 불가"
+    return changed
+
+
 def section_map(plan: dict, ids: dict, db_path: str) -> dict:
     """서버 분반 id → 분반 정보. DB에 넣은 분반은 course_id·section_no, MANUAL은 "manual": true 와 칸."""
     secs = {}
@@ -315,6 +381,8 @@ def section_map(plan: dict, ids: dict, db_path: str) -> dict:
         if s["shape"] == "MANUAL":
             e.update(manual=True, manual_reason=s["manual_reason"], blocks=s["blocks"])
         else:
+            if s["section_id"] in plan.get("demo_changed", {}):
+                e["demo_changed"] = plan["demo_changed"][s["section_id"]]
             e.update(manual=False, course_id=s["course_id"], section_no=s["section_no"],
                      orig_section_no=s["orig_section_no"])
         secs[s["section_id"]] = e
@@ -366,13 +434,14 @@ def counts(con, plan: dict) -> List[Tuple[str, int]]:
 
 
 def seed(xlsx: Path, db_path: Path, map_path: Path, alias_path: Path, rooms_json: Path, fixed_json: Path,
-         year: int = 2026, semester: str = "2") -> dict:
+         year: int = 2026, semester: str = "2", demo: bool = False) -> dict:
     rows = read_excel(xlsx)
     old = json.loads(alias_path.read_text(encoding="utf-8")) if alias_path.exists() else {}
     alias = make_aliases(rows, old)
     rooms_info = {r["id"]: r for r in json.loads(rooms_json.read_text(encoding="utf-8"))} if rooms_json.exists() else {}
     fixed = json.loads(fixed_json.read_text(encoding="utf-8")) if fixed_json.exists() else []
     plan = build_plan(rows, alias, rooms_info, fixed)
+    plan["demo_changed"] = apply_demo(plan) if demo else {}
     if db_path.exists():
         db_path.unlink()
     con = sqlite3.connect(db_path)
@@ -389,6 +458,7 @@ def seed(xlsx: Path, db_path: Path, map_path: Path, alias_path: Path, rooms_json
     con.close()
     manual = Counter(s["manual_reason"] for s in plan["sections"] if s["shape"] == "MANUAL")
     return dict(counts=table, real_name_hits=hits, manual_reasons=manual, term_id=ids["term_id"],
+                demo_changed=plan["demo_changed"],
                 round_id=ids["round_id"])
 
 
@@ -402,12 +472,17 @@ def main() -> None:
     ap.add_argument("--fixed", type=Path, default=PRIVATE / "real" / "fixed_blocks.json")
     ap.add_argument("--year", type=int, default=2026)
     ap.add_argument("--semester", default="2")
+    ap.add_argument("--demo", action="store_true", help="시연용: 일부 분반의 가상 희망을 서로 겹치게 (기본 꺼짐)")
     a = ap.parse_args()
-    out = seed(a.xlsx, a.db, a.map, a.alias, a.rooms, a.fixed, a.year, a.semester)
+    out = seed(a.xlsx, a.db, a.map, a.alias, a.rooms, a.fixed, a.year, a.semester, demo=a.demo)
     print(f"DB: {a.db}  (term {out['term_id']}, round {out['round_id']})")
     for k, v in out["counts"]:
         print(f"{k:<24}{v}")
     print("MANUAL 이유:", dict(out["manual_reasons"]))
+    if a.demo:
+        print(f"시연용 겹침(--demo): 가상 희망을 바꾼 분반 {len(out['demo_changed'])}개 (희망은 실제 값이 아닌 가상)")
+        for sid, what in out["demo_changed"].items():
+            print(f"  {sid}: {what}")
     print(f"실명 검색(DB·대응표·출력): {out['real_name_hits']}건")
     print("교양필수 고정 시간은 넣지 않음. 전 학기(2026-1)는 엔진이 읽지 않아(전년도 같은 학기만) 넣지 않음.")
 
