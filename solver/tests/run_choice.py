@@ -1,5 +1,6 @@
 """교수 답장 선택(A·B·C·기타)과 수동 배치 고정 검사 (가상 데이터).
   ① pick_best: 고른 안 여러 개 → 점수 좋은 순, 지금 놓을 수 없는 안은 feasible=False
+     교수가 글로 순서를 밝히면(respect_order) 점수보다 그 순서, 앞 순서 안을 못 놓으면 다음 순서
   ② 기타 조건 → 조건에 맞는 새 안(ETC)도 함께 비교, add_option 으로 저장·load_option 으로 다시 읽기
   ③ 따로 연락 → manual_place(규칙을 어겨도 저장) → check_timetable 경고 → 고정은 부분·전체 재풀이에서 그대로, 대안은 거부
   python solver/tests/run_choice.py"""
@@ -50,6 +51,20 @@ c.commit()
 r1p = sc.pick_best(c, 1, 1, tt, cid, 1, option_ids=opts[:3], time_limit=10)
 report("① 희망 칸이 많은 B안이 점수가 가장 좋아 맨 앞", r1p[0]["option_id"] == opts[1] and r1p[0]["objective"] < r1p[1]["objective"],
        f"({[(x['source'], x['objective']) for x in r1p]})")
+#    교수가 "A가 제일 좋고 안 되면 B" → 점수는 B가 좋아도 A가 먼저
+r1o = sc.pick_best(c, 1, 1, tt, cid, 1, option_ids=[opts[0], opts[1]], time_limit=10, respect_order=True)
+report("① 교수가 밝힌 순서(A→B)가 점수(B)보다 먼저", [x["option_id"] for x in r1o] == [opts[0], opts[1]] and r1o[0]["objective"] > r1o[1]["objective"],
+       f"({[(x['source'], x['objective']) for x in r1o]})")
+#    A안 칸을 불가로 칠해 A를 못 놓게 하면 → 다음 순서 B
+asl = sorted(sc.load_option(c, opts[0])["slots"])[0]
+c.execute("INSERT OR REPLACE INTO response_slot VALUES (?,?,'BLOCK')", (rid, asl)); c.commit()
+r1q = sc.pick_best(c, 1, 1, tt, cid, 1, option_ids=[opts[0], opts[1]], time_limit=10, respect_order=True)
+report("① 앞 순서(A)를 못 놓으면 다음 순서(B)", r1q[0]["option_id"] == opts[1] and r1q[0]["feasible"] and not r1q[1]["feasible"],
+       f"({[(x['source'], x['feasible']) for x in r1q]})")
+#    기타 조건 새 안은 밝힌 순서 뒤 (점수가 더 좋아도)
+r1e = sc.pick_best(c, 1, 1, tt, cid, 1, option_ids=[opts[1]], condition={"day_slots": {"3": []}, "end_before": []},
+                   time_limit=10, respect_order=True)
+report("① 순서 모드에서 기타 조건 새 안(ETC)은 밝힌 순서 뒤", [x["source"] for x in r1e] == ["B", "ETC"], f"({[(x['source'], x['objective']) for x in r1e]})")
 c.execute("DELETE FROM response_slot WHERE response_id=?", (rid,))
 c.executemany("INSERT INTO response_slot VALUES (?,?,?)", [(rid, sl, k) for sl, k in saved]); c.commit()
 #    C안 칸 하나를 교수가 불가로 칠함 → C안은 지금 놓을 수 없음
