@@ -748,14 +748,17 @@ def load_option(con, option_id):
 
 
 def pick_best(con, term_id, round_id, timetable_id, course_id, section_no=None, option_ids=(), condition=None,
-              time_limit=15, weights=None, workers=8):
+              time_limit=15, weights=None, workers=8, respect_order=False):
     """교수가 고른 대안(option_ids, 여러 개 가능)과 기타 조건(condition, 있으면 그 조건에 맞는 새 안 하나)을
     지금 시간표(timetable_id)에 넣었을 때의 점수로 비교한다. 점수는 엔진 목적함수(낮을수록 좋음), 다른 수업은 그대로.
     고른 안이 지금은 놓을 수 없으면(그사이 다른 수업이 그 칸을 씀) 같은 교수·같은 학년 필수과목을 조금 움직여 보고,
     그래도 안 되면 feasible=False.
     반환: 좋은 순서 [dict(source='A'|'B'|'C'|'ETC', option_id, feasible, objective, stage, placements, ks, moves)]
       source 'ETC' 는 기타 조건으로 만든 새 안(option_id=None, 쓰려면 add_option 으로 저장).
-      feasible 인 안이 하나도 없으면 처리안은 '조교가 정함'([수정]·[현재대로 유지]·[따로 연락])."""
+      feasible 인 안이 하나도 없으면 처리안은 '조교가 정함'([수정]·[현재대로 유지]·[따로 연락]).
+    respect_order: 교수가 글로 선호 순서를 밝혔을 때(예: "A가 제일 좋고 안 되면 B") True. option_ids 를 그 순서대로 넘기면
+      점수와 상관없이 놓을 수 있는 안 중 앞 순서를 먼저 둔다. 기타 조건으로 만든 새 안(ETC)은 밝힌 순서 뒤.
+      False(버튼만 누른 경우)면 점수 순."""
     W = {**DEFAULT_WEIGHTS, **(weights or {})}
     prev, prevk = load_assignment(con, timetable_id)
     by_day, courses, secs, _, _, slot_info = load_input(con, term_id, round_id)
@@ -802,8 +805,12 @@ def pick_best(con, term_id, round_id, timetable_id, course_id, section_no=None, 
                                if k in prev and (k[0], k[1]) not in t_secs and pl[k] != prev[k]])
             break
         out_list.append(best)
-    out_list.sort(key=lambda d: (not d["feasible"], d["stage"] != "다른 수업은 그대로",
-                                 d["objective"] if d["objective"] is not None else 0))
+    rank = {oid: i for i, oid in enumerate(option_ids)}
+    if respect_order:                                    # 교수가 밝힌 순서 → 놓을 수 있는 안 중 앞 순서, 새 안(ETC)은 맨 뒤
+        out_list.sort(key=lambda d: (not d["feasible"], rank.get(d["option_id"], len(rank))))
+    else:                                                # 버튼만 누른 경우 → 점수 순
+        out_list.sort(key=lambda d: (not d["feasible"], d["stage"] != "다른 수업은 그대로",
+                                     d["objective"] if d["objective"] is not None else 0))
     return out_list
 
 
