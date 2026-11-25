@@ -131,7 +131,8 @@ def _template_body(inp: MessageInput) -> list[str]:
             body.append(f"희망하신 건물({inp.wish_building})에도 배정하지 못했습니다.")
         return body
     if inp.prev_conditions and not inp.prev_conditions.is_empty():
-        first = f"지난 회신에서 주신 조건({cond_label(inp.prev_conditions)})을 반영해 대안을 다시 드립니다."
+        # 조건은 차수마다 쌓인다(하윤 #21 carried_conditions). 3차면 1·2차 조건을 합친 것이라 "지난 회신"이 아니라 "지금까지"
+        first = f"지금까지 주신 조건({cond_label(inp.prev_conditions)})을 반영해 대안을 다시 드립니다."
     else:
         first = "지난 차수 이후 바뀐 시간표를 반영해 대안을 다시 드립니다."
     second = {"time": f"처음 희망하신 시간: {inp.wish}", "building": f"처음 희망하신 건물: {inp.wish_building}",
@@ -197,7 +198,7 @@ def write_message(inp: MessageInput, method: Method = "keyword") -> Message:
         if inp.off == "both":
             situation += " 희망 건물에도 배정하지 못했다."
     elif inp.prev_conditions and not inp.prev_conditions.is_empty():
-        situation = (f"{inp.round}차 조율. 지난 회신에서 받은 조건({cond_label(inp.prev_conditions)})을 반영한 대안을 다시 보낸다. "
+        situation = (f"{inp.round}차 조율. 지금까지 회신에서 받은 조건({cond_label(inp.prev_conditions)})을 반영한 대안을 다시 보낸다. "
                      "조건은 \"조건(…)을\"처럼 괄호 안에 글자 그대로 적는다. 처음 희망도 다시 적는다. 처음 희망이 왜 안 됐는지는 모른다.")
     else:
         situation = (f"{inp.round}차 조율. 지난 차수 이후 바뀐 시간표를 반영한 대안을 다시 보낸다. "

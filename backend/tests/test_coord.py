@@ -451,7 +451,7 @@ class LLMPath(unittest.TestCase):
         i = inp(course="C프로그래밍 01", blocker_course="AI개론 02")
         self.assertEqual(coord.check_body("희망하신 월·수 15:00이 가 교수님의 AI개론 02 분반과 겹칩니다.", i), [])
         i2 = inp(round=2, prev_conditions=Conditions(end_before=[{"day": 2, "time": "17:00"}]))
-        self.assertEqual(coord.check_body("지난 회신에서 주신 조건(수요일 17:00 전 종료)을 반영했습니다. 처음 희망하신 시간은 월·수 15:00입니다.", i2), [])
+        self.assertEqual(coord.check_body("지금까지 주신 조건(수요일 17:00 전 종료)을 반영했습니다. 처음 희망하신 시간은 월·수 15:00입니다.", i2), [])
 
 
 @unittest.skipUnless(os.getenv("GEMINI_API_KEY"), "GEMINI_API_KEY가 없어 실제 호출은 건너뜀")
