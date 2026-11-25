@@ -64,6 +64,25 @@ class WriteAndCheck(unittest.TestCase):
         self.assertNotIn("지금 자리 그대로", write_message(inp()).text)
         self.assertIn("지금 배정된 자리가 빠지거나 바뀜", check_message(write_message(inp()).text, i))
 
+    def test_building_off(self):
+        # 건물만 희망 밖인 분반(#21 MISMATCH)은 "시간에 배정하지 못해"라고 쓰지 않는다. 상대가 있어도 '겹친다'고 쓰지 않는다 (11/25)
+        i = inp(off="building", wish_building="정보과학관", current="월·수 15:00 · 문화관 201")
+        t = write_message(i).text
+        self.assertIn("희망하신 건물(정보과학관)에 배정하지 못해 아래 대안을 드립니다.", t)
+        self.assertNotIn("희망하신 시간", t)
+        self.assertNotIn("겹", t)
+        self.assertEqual(check_message(t, i), [])
+        both = inp(off="both", wish_building="정보과학관", blocker_prof=None, blocker_course=None)
+        self.assertIn("희망하신 시간(월·수 15:00)과 건물(정보과학관)에 배정하지 못해", write_message(both).text)
+        known = write_message(inp(off="both", wish_building="정보과학관")).text
+        self.assertIn("가 교수님의 자료구조 01 분반과 겹칩니다.", known)
+        self.assertIn("희망하신 건물(정보과학관)에도 배정하지 못했습니다.", known)
+        self.assertIn("처음 희망하신 건물: 정보과학관", write_message(inp(off="building", wish_building="정보과학관", round=2)).text)
+        # 건물이 빠지면 검사에 걸림, 건물 없이 off=building은 만들 수 없음
+        self.assertIn("본인 희망 건물이 빠지거나 바뀜", check_message(write_message(inp()).text, i))
+        with self.assertRaises(ValueError):
+            inp(off="building")
+
     def test_reveal_setting(self):
         self.assertIn("가 교수님의 자료구조 01 분반과 겹칩니다", write_message(inp()).text)
         t = write_message(inp(reveal=False)).text
@@ -300,6 +319,20 @@ class LLMPath(unittest.TestCase):
         self.assertEqual((r.kind, r.note, p.action), ("거절", "실습 조교 배치", "decide"))
         self.assertIn("[따로 연락]", p.text)
         self.assertIn("실습 조교 배치", p.text)
+
+    def test_llm_building_off(self):
+        # 건물만 어긋나면 모델에 처음 희망 = 건물, 상황 = 희망 건물. 모델이 '겹친다'를 쓰면 틀 문장으로
+        i = inp(off="building", wish_building="정보과학관")
+        good = coord._MessageLLM(text="교수님께서 희망하신 건물(정보과학관)에 배정하지 못해 아래와 같이 대안을 마련했습니다.")
+        with mock.patch.object(coord, "generate_json", return_value=good) as g:
+            m = write_message(i, method="llm")
+        self.assertEqual((m.method, m.fallback), ("llm", False))
+        self.assertIn("[처음 희망] 정보과학관", g.call_args[0][0])
+        self.assertIn("희망 건물에 배정하지 못해", g.call_args[0][0])
+        bad = coord._MessageLLM(text="희망하신 건물(정보과학관)이 다른 강의와 겹칩니다.")
+        with mock.patch.object(coord, "generate_json", return_value=bad):
+            m = write_message(i, method="llm")
+        self.assertEqual((m.method, m.fallback), ("keyword", True))
 
     def test_llm_keep(self):
         # 모델의 keep은 지금 자리가 있는 분반에서만 받는다. 버튼을 누르면 모델 답과 상관없이 keep

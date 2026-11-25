@@ -119,6 +119,15 @@ class MessageInput(BaseModel):
     hidden: list[str] = []         # 메시지에 나오면 안 되는 글 (상대 교수의 기타 요청 등). 언어 모델에는 주지 않는다
     current: str | None = None     # 지금 배정된 자리 ("화·목 10:30~11:45 · 정보과학관 21304"). 희망 밖에라도 놓인 분반(11/25 결정 2·3번)만.
                                    # 있으면 메시지에 "지금은 …에 배정되어 있습니다. 그대로 괜찮으시면 '지금 자리 그대로'" 한 줄 (틀 문장)
+    off: Literal["time", "building", "both"] = "time"   # 희망에서 어긋난 것. 못 놓은 분반·시간만 어긋남 = time,
+                                   # 건물만 = building, 둘 다 = both. 서버가 엔진 coord_targets의 time_off·building_off로 채운다 (11/25 #21)
+    wish_building: str | None = None   # 희망 건물 ("정보과학관"). off가 building·both면 꼭 넣는다
+
+    @model_validator(mode="after")
+    def _need_building(self):
+        if self.off != "time" and not (self.wish_building or "").strip():
+            raise ValueError("off가 building·both면 wish_building(희망 건물)이 있어야 합니다")
+        return self
 
 
 class Message(BaseModel):

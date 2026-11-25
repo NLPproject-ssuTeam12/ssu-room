@@ -55,6 +55,7 @@
 | `prev_conditions` | 2차부터: 지난 답장에서 받은 조건 |
 | `hidden` | **서버가 DB에서 채운다.** 상대 교수의 기타 요청 원문 등 메시지에 나오면 안 되는 글. 언어 모델에는 주지 않고 검사에만 쓴다. 화면에서 받지 않는다 |
 | `current` | **서버가 채운다.** 희망 밖에라도 지금 놓여 있는 분반의 자리 (`"화·목 10:30~11:45 · 정보과학관 21304"`, 대안 줄과 같은 모양). 있으면 대안 아래에 틀 문장 "지금은 …에 배정되어 있습니다. 그대로 괜찮으시면 '지금 자리 그대로'를 골라 주세요."가 붙고, 교수 화면에 `KEEP` 버튼을 보여 준다. 못 놓인 분반은 `null` (11/25 결정) |
+| `off`, `wish_building` | **서버가 채운다.** 희망에서 어긋난 것: `"time"`(기본, 못 놓은 분반 포함) / `"building"` / `"both"`. 엔진 `coord_targets`의 `time_off`·`building_off`가 비었는지로 정한다(#21). `building`·`both`면 `wish_building`(희망 건물 이름) 필수. 건물만이면 "희망하신 건물(정보과학관)에 배정하지 못해 아래 대안을 드립니다."로 쓰고 시간·겹친 상대는 쓰지 않는다. 둘 다면 시간 문장 뒤에 건물 문장을 붙인다. 2·3차는 "처음 희망하신 건물: …" (11/25) |
 
 응답 `Message`
 
@@ -78,7 +79,7 @@
 `POST /api/coord/message/check` 요청 `{"text": "...", "input": MessageInput}` → 응답 `{"problems": ["..."]}` (빈 목록 = 통과)
 
 조교가 메시지를 직접 고친 뒤 보내기 전에 부른다. 걸리는 것:
-연차·임용·우선순위 같은 이유, `hidden`의 글, 이름 숨김 설정인데 상대 교수 이름, 과목·분반 빠짐, 본인 희망 빠짐, 대안 줄이 빠지거나 바뀜, `current`가 있는데 지금 자리가 빠지거나 바뀜.
+연차·임용·우선순위 같은 이유, `hidden`의 글, 이름 숨김 설정인데 상대 교수 이름, 과목·분반 빠짐, 본인 희망(시간, `off`가 건물이면 건물) 빠짐, 대안 줄이 빠지거나 바뀜, `current`가 있는데 지금 자리가 빠지거나 바뀜.
 
 ## 3. 답장 해석 `parse_reply`
 
@@ -167,10 +168,10 @@
 | # | 파일 | 할 일 | 안 하면 |
 |---|---|---|---|
 | 1 | `stubs.py` `parse_reply` | 인자 모양을 진짜와 똑같이: `parse_reply(text, choice=None, *, choices=None, alternatives=None, message="", method="keyword", can_keep=False)` | `engine.py`의 `signature_diff`가 모양이 다르다고 보고 **가짜 함수로 바꿔 씀** (경고만 남음) |
-| 2 | `contracts.py` 사본 | `ReplyParse`에 `ordered: bool = False`, `keep: bool = False`, `fallback_reason: str = ""` / `MessageInput`에 `current: Optional[str] = None` / `Proposal.action`에 `"keep"` | 사본으로 다시 읽거나 저장할 때 칸이 빠지거나 `keep` 처리안이 검증 오류 |
+| 2 | `contracts.py` 사본 | `ReplyParse`에 `ordered: bool = False`, `keep: bool = False`, `fallback_reason: str = ""` / `MessageInput`에 `current: Optional[str] = None`, `off: Literal["time", "building", "both"] = "time"`, `wish_building: Optional[str] = None` / `Proposal.action`에 `"keep"` | 사본으로 다시 읽거나 저장할 때 칸이 빠지거나 `keep` 처리안이 검증 오류 |
 | 3 | `main.py` `ReplyIn` | `choices: Optional[List[Literal["A", "B", "C", "ETC", "KEEP"]]]` 추가(예전 `choice`는 남겨도 됨), "글이나 버튼 하나는 있어야" 검사를 `choices`까지, `ETC`면 글 필수 | 여러 개 누름·기타·지금 자리 그대로를 받을 수 없음 |
 | 4 | `main.py` `post_reply` | `engine.parse_reply(body.text, body.choice, choices=body.choices, alternatives=alts, message=..., method=..., can_keep=<지금 자리 있음>)` | 버튼 값이 해석에 안 들어감 |
-| 5 | `store.py` `message_input` | 희망 밖에라도 놓인 분반(11/25 결정 2·3번)은 `current`에 지금 자리를 넣는다. 모양은 대안 줄과 같게: 지금 배정을 `Alternative`로 만들어 `coord.alt_label`에 넣으면 됨 (`"화·목 10:30~11:45 · 정보과학관 21304"`). 못 놓인 분반은 `None` | 메시지에 지금 자리 줄이 안 나오고, 교수 화면에 `KEEP` 버튼을 띄울 근거가 없음 |
+| 5 | `store.py` `message_input` | 희망 밖에라도 놓인 분반(11/25 결정 2·3번)은 `current`에 지금 자리를 넣는다. 모양은 대안 줄과 같게: 지금 배정을 `Alternative`로 만들어 `coord.alt_label`에 넣으면 됨 (`"화·목 10:30~11:45 · 정보과학관 21304"`). 못 놓인 분반은 `None`. 같은 곳에서 `off`·`wish_building`도 채운다(#21 `coord_targets`의 `time_off`·`building_off`, 희망 건물은 `professor_building_pref`) | 메시지에 지금 자리 줄이 안 나오고, 교수 화면에 `KEEP` 버튼을 띄울 근거가 없음. 건물만 어긋난 분반에 "희망하신 시간에 배정하지 못해"라고 틀리게 나감 |
 | 6 | 교수 답장 화면 | `current`가 있던 분반만 `KEEP`(지금 자리 그대로) 버튼을 보여 준다 | 못 놓인 분반에서 KEEP이 눌릴 수 있음 |
 | 7 | `main.py` `post_decide` | 처리안이 `keep`이면 [확인] = [현재대로 유지] (`state="KEPT"`, DB는 `decide_reply(..., 'KEEP')`). 지금은 `move`가 아니면 [확인]이 409 | 교수가 지금 자리를 골랐는데 조교 [확인]이 막힘 |
 | 8 | `main.py` `post_decide` | 처리안이 `move`이고 `picks`가 둘 이상이면 하윤 `pick_best(option_ids=picks, respect_order=ordered)`로 최종 안을 고른다 (#18) | 교수가 밝힌 순서를 무시하거나, 그사이 못 쓰게 된 안을 고를 수 있음 |

@@ -107,21 +107,36 @@ def _compose(inp: MessageInput, body: list[str]) -> str:
 
 def _knows_blocker(inp: MessageInput) -> bool:
     """겹친 상대를 서버가 알려 줬는가. 모르면 '겹친다'고 단정하지 않는다
-    (배정 엔진은 상대를 알려 주지 않고, 밀린 이유가 실습실 부족·학년 규칙일 수도 있다. 11/24 하윤 점검 문서)."""
-    return bool(inp.blocker_prof and inp.blocker_course)
+    (배정 엔진은 상대를 알려 주지 않고, 밀린 이유가 실습실 부족·학년 규칙일 수도 있다. 11/24 하윤 점검 문서).
+    건물만 어긋났으면 시간이 겹친 것이 아니므로 상대가 있어도 쓰지 않는다 (11/25)."""
+    return inp.off != "building" and bool(inp.blocker_prof and inp.blocker_course)
+
+
+def _wish_text(inp: MessageInput) -> str:
+    """메시지에 그대로 넣을 처음 희망. 시간만 / 건물만 / 둘 다 (11/25 #21 조율 대상: 건물만 어긋난 분반도 있음)."""
+    return {"time": inp.wish, "building": inp.wish_building,
+            "both": f"{inp.wish} · {inp.wish_building}"}[inp.off]
 
 
 def _template_body(inp: MessageInput) -> list[str]:
     if inp.round == 1:
+        if inp.off == "building":
+            return [f"희망하신 건물({inp.wish_building})에 배정하지 못해 아래 대안을 드립니다."]
         if not _knows_blocker(inp):
-            return [f"희망하신 시간({inp.wish})에 배정하지 못해 아래 대안을 드립니다."]
+            what = f"시간({inp.wish})" if inp.off == "time" else f"시간({inp.wish})과 건물({inp.wish_building})"
+            return [f"희망하신 {what}에 배정하지 못해 아래 대안을 드립니다."]
         other = f"{inp.blocker_prof} 교수님의 {inp.blocker_course} 분반과" if inp.reveal else "다른 강의와"
-        return [f"희망하신 시간({inp.wish})이 {other} 겹칩니다."]
+        body = [f"희망하신 시간({inp.wish})이 {other} 겹칩니다."]
+        if inp.off == "both":
+            body.append(f"희망하신 건물({inp.wish_building})에도 배정하지 못했습니다.")
+        return body
     if inp.prev_conditions and not inp.prev_conditions.is_empty():
         first = f"지난 회신에서 주신 조건({cond_label(inp.prev_conditions)})을 반영해 대안을 다시 드립니다."
     else:
         first = "지난 차수 이후 바뀐 시간표를 반영해 대안을 다시 드립니다."
-    return [first, f"처음 희망하신 시간: {inp.wish}"]
+    second = {"time": f"처음 희망하신 시간: {inp.wish}", "building": f"처음 희망하신 건물: {inp.wish_building}",
+              "both": f"처음 희망하신 시간: {inp.wish} · 건물: {inp.wish_building}"}[inp.off]
+    return [first, second]
 
 
 def _template(inp: MessageInput) -> str:
@@ -169,13 +184,18 @@ def check_body(body: str, inp: MessageInput) -> list[str]:
 def write_message(inp: MessageInput, method: Method = "keyword") -> Message:
     if method == "keyword":
         return Message(text=_template(inp), method="keyword")
+    place = {"time": "희망 시간", "building": "희망 건물", "both": "희망 시간과 희망 건물"}[inp.off]
     if inp.round == 1 and not _knows_blocker(inp):
-        situation = ("1차 조율. 희망 시간에 배정하지 못해 대안을 보낸다. 왜 못 했는지, 어느 강의와 겹치는지는 모른다. "
+        situation = (f"1차 조율. {place}에 배정하지 못해 대안을 보낸다. 왜 못 했는지, 어느 강의와 겹치는지는 모른다. "
                      "'겹친다'는 말이나 다른 이유를 쓰지 않는다.")
+        if inp.off == "building":
+            situation += " 시간이 어긋났다고 쓰지 않는다."
     elif inp.round == 1:
         situation = (f"1차 조율. 희망 시간이 {inp.blocker_prof} 교수님의 {inp.blocker_course} 분반과 겹친다. 상대 교수와 강의 이름을 그대로 적는다."
                      if inp.reveal
                      else "1차 조율. 희망 시간이 다른 강의와 겹친다. 상대 교수 이름과 강의 이름은 적지 않는다 (학과 설정).")
+        if inp.off == "both":
+            situation += " 희망 건물에도 배정하지 못했다."
     elif inp.prev_conditions and not inp.prev_conditions.is_empty():
         situation = (f"{inp.round}차 조율. 지난 회신에서 받은 조건({cond_label(inp.prev_conditions)})을 반영한 대안을 다시 보낸다. "
                      "조건은 \"조건(…)을\"처럼 괄호 안에 글자 그대로 적는다. 처음 희망도 다시 적는다. 처음 희망이 왜 안 됐는지는 모른다.")
@@ -185,7 +205,7 @@ def write_message(inp: MessageInput, method: Method = "keyword") -> Message:
     prompt = (load_prompt("write_message")
               .replace("<<PROFESSOR>>", inp.professor).replace("<<TERM>>", inp.term)
               .replace("<<COURSE>>", inp.course).replace("<<ROUND>>", str(inp.round))
-              .replace("<<WISH>>", inp.wish).replace("<<SITUATION>>", situation))
+              .replace("<<WISH>>", _wish_text(inp)).replace("<<SITUATION>>", situation))
     try:
         body = " ".join(generate_json(prompt, _MessageLLM).text.split())   # 한 문단으로
     except LLMUnavailable as e:
@@ -210,8 +230,10 @@ def check_message(text: str, inp: MessageInput) -> list[str]:
         p.append("상대 교수 이름을 썼음 (학과 설정: 알리지 않음)")
     if inp.course not in text:
         p.append("과목·분반 이름이 빠짐")
-    if inp.wish not in text:
+    if inp.off != "building" and inp.wish not in text:
         p.append("본인 희망 시간이 빠지거나 바뀜")
+    if inp.off != "time" and inp.wish_building not in text:
+        p.append("본인 희망 건물이 빠지거나 바뀜")
     if inp.current and inp.current not in text:
         p.append("지금 배정된 자리가 빠지거나 바뀜")
     if not inp.alternatives:
