@@ -3,13 +3,14 @@
      같은 과목에서 교수가 다른 분반끼리는 겹쳐도 됨
   ② 전공필수는 그 학년 채플 칸에 놓지 않음
   ③ 18:00 이후 시작 연강 금지                       ④ 19:30 교시는 큰 감점
-  ⑤ 분반 연강·교차는 교수 응답 칸(section_pair)으로, 그 교수의 두 분반(3·4번이어도)에
+  ⑤ 분반 연강·교차는 교수 입력(pair_request)으로, 그 교수의 두 분반(3·4번이어도)에
   ⑥ 대안에 회차 순서만 바뀐 같은 안이 나오지 않음
   ⑦ 같은 학년 교양필수↔전공필수는 겹치지 않음, 학년이 다르면(2학년 전필↔1학년 교필) 겹쳐도 됨
 기준 시간표를 한 번 풀고, 시험용 과목(가상)만 free_courses 로 다시 푼다.
   python solver/tests/run_rules.py"""
 import sys
 from test_solver2 import *
+import db as hdb
 
 results = []
 def report(label, ok, detail=""):
@@ -36,15 +37,20 @@ def new_course(cat="전공선택", year="1", sessions=2, sections=((None, 30),),
             c.execute("INSERT INTO course(id,term_id,department_id,name,professor_id,category,target_year,session_count,slots_per_session) VALUES (?,?,?,?,?,?,?,?,?)",
                       (cid, 1, dept, f"시험과목{cid}", p, cat, year, sessions, 1))
         c.execute("INSERT INTO course_section VALUES (?,?,?,?)", (cid, sec, p, enr))
-    for i, p in enumerate(dict.fromkeys(profs)):
+    order = list(dict.fromkeys(profs))
+    for sec, p in enumerate(profs, 1):              # 희망 입력은 분반마다 (11/25). 같은 교수의 분반은 같은 값
         NEXT[0] += 1; rid = NEXT[0]
-        ok = sec_ok[i] if sec_ok else ok_slots
-        c.execute("INSERT INTO course_response(id,round_id,course_id,professor_id,lab_requirement,single_day_pref,section_pair) VALUES (?,?,?,?,?,?,?)",
-                  (rid, 1, cid, p, lab, single, pair))
+        ok = sec_ok[order.index(p)] if sec_ok else ok_slots
+        c.execute("INSERT INTO course_response(id,round_id,course_id,section_no,professor_id,lab_requirement,single_day_pref) VALUES (?,?,?,?,?,?,?)",
+                  (rid, 1, cid, sec, p, {1: "MUST", 0: "NONE"}.get(lab, lab), single))
         for sid in (ALL - set(SL[x] for x in ok)) if ok else ():
             c.execute("INSERT INTO response_slot VALUES (?,?,'BLOCK')", (rid, sid))
         for x in prefer:
             c.execute("INSERT OR REPLACE INTO response_slot VALUES (?,?,'PREFER')", (rid, SL[x]))
+    if pair != "NONE":
+        for p in order:
+            if profs.count(p) >= 2:
+                hdb.set_pair_request(c, 1, cid, p, pair)
     c.commit(); return cid
 
 def resolve(cids, **kw):
@@ -131,7 +137,7 @@ NEXT[0] += 1; pa = NEXT[0]; NEXT[0] += 1; pb = NEXT[0]
 for pp in (pa, pb):
     c.execute("INSERT INTO user(id,role,name,department_id,password_hash) VALUES (?,?,?,?,?)", (pp, "PROF", f"가상교수{pp}", 1, "x"))
 pc = new_course(sections=((pa, 30), (pa, 30), (pb, 30), (pb, 30)))
-c.execute("UPDATE course_response SET section_pair='BACK_TO_BACK' WHERE course_id=? AND professor_id=?", (pc, pb)); c.commit()
+hdb.set_pair_request(c, 1, pc, pb, "BACK_TO_BACK")
 _, courses, secs, *_ = sc.load_input(c, 1, 1)
 report("⑤ 응답 칸 → 그 교수의 분반 3·4만 짝", courses[pc]["pairs"] == [([3, 4], "BACK_TO_BACK")] and secs[(pc, 3)]["paired"] and not secs[(pc, 1)]["paired"],
        f"({courses[pc]['pairs']})")

@@ -79,7 +79,7 @@ opts = sc.make_alternatives(con, term_id, round_id, timetable_id, course_id,
 
 교수가 자기 화면에서 쓴 답장은 `db.add_reply`로, 해석은 `db.save_interpretation`으로 DB에 남는다. 조교가 [확인]·[수정]을 누르면 서버가 `db.decide_reply(con, message_id, ta_id, 'CONFIRM' | 'EDIT', reason, conditions=...)`로 조건을 `reply_interpretation.extracted_json`의 `"confirmed_conditions"`에 저장한다. 다음 차수 대안을 만들 때 `cond = db.confirmed_conditions(con, proposal_id)`로 읽어 **바꾸지 않고** `alternatives(..., condition=cond)`에 넘긴다. 모양은 서버 `conditions_json`과 같은 `{"day_slots": {"1": [...]}, "end_before": [...]}`이고, 조교가 확인한 조건이 없으면(`[현재대로 유지]`, 결정 전, 조건 없이 [확인]) `None`이라 조건 없이 만든 대안과 같다. 엔진 코드는 바뀌지 않았고, `tests/run_cc.py`가 이 흐름([확인]·[수정]·조건 없음·결정 전)을 가상 데이터로 검사한다. 자세한 함수 설명은 `../db/README.md` "조율 회신".
 
-**다음 차수로 조건 넘기기.** 처리안이 "다음 차수"이면 서버가 `db.decide_reply(..., 'CONFIRM', conditions=cond, proposal_action='next')`를 불러 안건을 `NEXT`로 둔다(조건이 비면 거부, 시간표는 그대로). 다음 차수를 열 때 `new = db.open_next_proposal(con, 이전 안건, 다음 차수 round_id)`로 같은 분반의 새 안건(`prev_proposal_id`로 이어짐)을 만들고, `cond = db.carried_conditions(con, new)`로 이전 차수에서 확인한 조건을 읽어 **바꾸지 않고** `alternatives(..., condition=cond)`에 넘긴다. 한 단계만 이어받으며(3차 안건은 2차에서 확인한 조건), 3차 다음 차수는 없다. 엔진 코드는 바뀌지 않았고(`timetable_section` INSERT에 칸 이름만 적음), `tests/run_cc.py` "[다음 차수]"가 이 흐름을 가상 데이터로 검사한다.
+**다음 차수로 조건 넘기기.** 처리안이 "다음 차수"이면 서버가 `db.decide_reply(..., 'CONFIRM', conditions=cond, proposal_action='next')`를 불러 안건을 `NEXT`로 둔다(조건이 비면 거부, 시간표는 그대로). 다음 차수를 열 때 `new = db.open_next_proposal(con, 이전 안건, 다음 차수 round_id)`로 같은 분반의 새 안건(`prev_proposal_id`로 이어짐)을 만들고, `cond = db.carried_conditions(con, new)`로 이전 차수에서 확인한 조건을 읽어 **바꾸지 않고** `alternatives(..., condition=cond)`에 넘긴다. 조건은 쌓인다(11/25): 3차 안건은 1차·2차에서 확인한 조건을 모두 지킨다(`db.merge_conditions`: 요일·교시는 둘 다 되는 것, 종료 시각은 더 이른 것, 요일이 하나도 안 겹치면 최신 조건). 3차 다음 차수는 없다. 엔진 코드는 바뀌지 않았고(`timetable_section` INSERT에 칸 이름만 적음), `tests/run_cc.py` "[다음 차수]"가 이 흐름을 가상 데이터로 검사한다.
 
 반환: 대안 리스트(최대 n개). 각 항목:
 
@@ -102,9 +102,9 @@ dict(stage="다른 수업은 그대로" | "같은 교수·같은 학년 필수�
 |---|---|
 | 분반 수강 인원 `course_section.enrollment` | 정수(>0) 또는 NULL(미정). 정원이 더 작은 강의실은 후보에서 뺌 |
 | 희망 건물 `professor_building_pref.building_id` | 교수당 하나. 그 밖의 건물은 벌점(`building_other`) |
-| 실습실 `course_response.lab_requirement` | `1` 쓴다(실습실만 배정) / `0` 안 쓴다 (필수 입력) |
+| 실습실 `course_response.lab_requirement` (분반마다) | `MUST` 필요(실습실만 배정) / `NONE` 필요 없음 (필수 입력, 010에서 1/0을 이름으로) |
 | 칠한 칸 `response_slot.kind` | `PREFER` 희망 / `BLOCK` 불가. 칠하지 않은 칸은 상관없음 |
-| 주 1회 연강 `course_response.single_day_pref` | `MUST` 하루에 연속 2칸 / `NONE` 1칸씩 이틀 (필수 입력. `PREFER`는 11/24에 없앰) |
+| 주 1회 연강 `course_response.single_day_pref` (분반마다) | `MUST` 하루에 연속 2칸 / `NONE` 1칸씩 이틀 (필수 입력. `PREFER`는 11/24에 없앰) |
 | 답장 해석 `reply_interpretation.label` | `ACCEPT` 수용 / `CONDITIONAL` 조건부 / `REJECT` 거절 / `UNCLEAR` 확인 필요 |
 
 ### 연강은 두 종류다 (용어 구분)
@@ -112,7 +112,7 @@ dict(stage="다른 수업은 그대로" | "같은 교수·같은 학년 필수�
 | 용어 | 뜻 | 어디서 받나 |
 |---|---|---|
 | **주 1회 연강** | 한 분반이 **하루에 2칸을 이어서** 수업 (예: 화 3·4교시). 3학점 수업이 이틀 나눠 하지 않고 하루에 끝남 | 교수 응답 `single_day_pref` (MUST/NONE) |
-| **분반 연강** | 한 교수가 한 과목의 두 분반을 맡을 때 **가반이 끝나자마자 나반**이 이어짐. 교차는 가반 월1·목2, 나반 월2·목1처럼 엇갈리게 | 교수 응답 `course_response.section_pair` (`NONE` / `BACK_TO_BACK` / `CROSS`, 11/24) |
+| **분반 연강** | 한 교수가 한 과목의 분반 둘 이상을 맡을 때 **앞 분반이 끝나자마자 다음 분반**이 이어짐. 교차는 가반 월1·목2, 나반 월2·목1처럼 엇갈리게 | 교수 입력 `pair_request` (과목 단위, `BACK_TO_BACK` / `CROSS`, 상관없음 = 행 없음) + 붙일 분반 `pair_request_section` (교수가 적은 순서). 솔버는 앞 두 분반만 (11/25) |
 
 - 주 1회 연강은 **주당 2칸짜리 수업(1칸×2회)** 에만 적용된다. 그 외 수업은 입력된 구성 그대로.
 - 응답이 없는 분반(미회신)은 입력된 구성 그대로 두고 주 1회 연강을 가정하지 않는다.
@@ -121,7 +121,7 @@ dict(stage="다른 수업은 그대로" | "같은 교수·같은 학년 필수�
 
 - `course_section(course_id, section_no, professor_id, enrollment)` 한 행이 분반 하나다. 그 교수가 맡고, `enrollment`가 그 분반 수강 인원이다. 과목에 행이 없으면 `course.professor_id`의 1분반 하나로 본다.
 - 교수 겹침 검사, 불가 시간·실습실·연강 응답은 **분반의 담당 교수 기준**이다.
-  응답(`course_response`)도 교수별로 받는다: `UNIQUE (round_id, course_id, professor_id)`.
+  응답(`course_response`)은 **분반마다** 받는다(11/25): `UNIQUE (round_id, course_id, section_no, professor_id)`. 솔버는 그 분반 담당 교수의 응답만 읽는다.
 - 같은 과목의 분반을 다른 교수가 맡으면, 그 교수의 응답이 없을 때 그 분반은 미회신으로 본다.
 - `v_schedule`, `v_professor_conflict` 뷰도 분반 담당 교수를 따른다.
 
@@ -167,6 +167,23 @@ new_tt = sc.apply_option(con, proposal_id, ta_id, rows, "교수님과 통화로 
 - 기준 버전을 복사해 `TA_EDIT`(parent=기준 버전) 새 버전을 만들고 rows의 분반만 바꾼다. 기준 버전에 없던 하드 규칙 위반(`check_timetable`)이 새로 생기면 저장하지 않고 `ValueError`. 안건은 `RESOLVED`, 사유는 `timetable.reason`.
 - 저장 뒤에는 **새 id를 현재 시간표로** 써야 한다. 다음 차수 `alternatives`는 그 버전의 배정을 '현재 배정'으로 보고 같은 안을 빼고, `solve(previous_timetable_id=새 id)`는 그 배정을 유지 보너스로 지킨다(`tests/run_apply.py`).
 
+## 5-3. 조율 대상과 1차 안건 (11/25)
+
+```python
+targets = sc.coord_targets(con, term_id, round_id, timetable_id)
+# -> [{'course_id', 'section_no', 'kind': 'UNPLACED'|'MISMATCH'|'PARTIAL', 'reason', 'time_off': [회차], 'building_off': [회차]}]
+opened = sc.open_coord_proposals(con, term_id, round_id, timetable_id, n=3)   # targets= 로 일부만도 가능
+# -> [{'proposal_id', 'course_id', 'section_no', 'kind', 'status': 'OPEN'|'HOLD'|'NO_OPTION', 'options'}]
+n = sc.fill_options(con, next_proposal_id, condition=db.carried_conditions(con, next_proposal_id))   # 다음 차수 안건
+```
+
+- `UNPLACED` 못 놓음, `MISMATCH` 모든 회차가 희망 칸 밖 또는 모든 회차가 희망 건물 밖 → `OPEN`, 서버가 대안 A·B·C와 함께 자동으로 보낸다.
+- `PARTIAL` 일부 회차만 희망 칸·건물 밖 → `HOLD`, 보내지 않고 조교 화면에. 조교가 고르면 `db.release_hold(send=True)` → `OPEN`.
+- 대안이 하나도 없으면 종류와 상관없이 `NO_OPTION`: 보내지 않고, 조교가 `db.ack_no_option`으로 확인 → `OFFLINE` → `db.manual_place`.
+- 희망 칸을 칠하지 않은 분반은 시간으로, 희망 건물이 없는 교수는 건물로는 대상이 아니다. 고정·`MANUAL` 분반은 뺀다.
+- `alternatives(..., exclude_sent=True)`(기본): 그 분반에 이미 보낸 대안(이전 차수 포함, `SENT` 이후 상태 안건)과 칸 묶음이 같은 안은 내지 않는다. `pick_best`의 기타 조건 새 안은 `exclude_sent=False`(교수가 예전 안을 다시 원할 수 있음).
+- `save_proposal(..., target_kind=None, status=None)`: 대안이 없으면 무엇을 주든 `NO_OPTION`.
+
 ## 6. 서버 단계와 기타 요청 (`db.py`)
 
 ```python
@@ -178,9 +195,9 @@ db.confirm_other_request(con, other_request_id, user_id, memo=None)
 
 - 단계: `COLLECTING` 희망 수집 → `ROUND1` 1차 조율 → `ROUND2` 2차 조율 → `ROUND3` 3차 조율 → `FINAL` 확정.
 - 기타 요청은 AI를 거치지 않는다. 교수 원문(`other_request.body`, `PENDING`) → 조교가 읽고 필요하면 `request_item`(`source='TA'`, `other_request_id`)을 직접 입력 → "확인함"(`CONFIRMED`).
-- 11/24부터 솔버는 `request_item`을 읽지 않는다. 분반 수는 `course_section`, 분반 연강·교차는 응답의 `section_pair`로 받는다. `request_item`은 조교가 남기는 기록이다.
+- 11/24부터 솔버는 `request_item`을 읽지 않는다. 분반 수는 `course_section`, 분반 연강·교차는 `pair_request`로 받는다. `request_item`은 조교가 남기는 기록이다.
 
 ## 7. 알려진 한계
 
-- 분반 연강·교차(`section_pair`)는 그 교수가 그 과목에서 맡은 분반이 정확히 2개이고 1회 한 칸일 때만 지원. 이때 주 1회 연강 응답은 무시된다(`unsupported`에 표시).
+- 분반 연강·교차(`pair_request`)는 교수가 적은 순서의 앞 두 분반만 붙이고, 1회 한 칸일 때만 지원. 셋째 분반부터는 `unsupported`로 알리고 조교가 수동 배치·고정한다. 붙인 두 분반의 주 1회 연강 응답은 무시된다(`unsupported`에 표시).
 - 풀이 시간: 조건이 빡빡한 분반 연강·교차 과목이 있으면 30초 안에는 일부가 못 놓일 수 있다. 60~90초를 권장.

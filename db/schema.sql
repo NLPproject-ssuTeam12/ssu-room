@@ -87,17 +87,16 @@ CREATE TABLE round_invite (
   status TEXT DEFAULT 'PENDING', responded_at TEXT,
   PRIMARY KEY (round_id, professor_id)
 );
-CREATE TABLE course_response (                -- 교수가 과목별로 낸 응답
+CREATE TABLE course_response (            -- 교수가 분반마다 낸 희망 입력 (칠한 칸·실습실·주 1회 연강). 인원은 course_section.enrollment
   id INTEGER PRIMARY KEY,
   round_id INTEGER NOT NULL REFERENCES round(id),
   course_id INTEGER NOT NULL REFERENCES course(id),
-  professor_id INTEGER NOT NULL REFERENCES user(id),   -- 응답한 교수 (분반마다 교수가 다를 수 있어 교수별로 받음)
-  lab_requirement INTEGER NOT NULL CHECK (lab_requirement IN (0,1)),      -- 실습실: 1=쓴다(실습실만 배정) / 0=안 쓴다 (사이트에서 필수 입력)
+  section_no INTEGER NOT NULL DEFAULT 1,               -- 어느 분반의 응답인지
+  professor_id INTEGER NOT NULL REFERENCES user(id),   -- 응답한 교수 (솔버는 그 분반 담당 교수의 응답만 읽는다)
+  lab_requirement TEXT NOT NULL CHECK (lab_requirement IN ('MUST','NONE')),   -- 실습실: 필요(실습실만 배정) / 필요 없음 (사이트에서 필수 입력)
   single_day_pref TEXT NOT NULL CHECK (single_day_pref IN ('MUST','NONE')),    -- 주 1회 연강(한 분반이 하루에 2칸 이어서): 무조건 / 필요 없음(주 2회)
-  section_pair TEXT NOT NULL DEFAULT 'NONE'
-         CHECK (section_pair IN ('NONE','BACK_TO_BACK','CROSS')),   -- 이 교수가 이 과목 두 분반을 맡을 때: 상관없음 / 연강(가반 바로 뒤 나반) / 교차
   submitted_at TEXT,
-  UNIQUE (round_id, course_id, professor_id)
+  UNIQUE (round_id, course_id, section_no, professor_id)
 );
 CREATE TABLE response_slot (                  -- 시간표에서 고른 칸
   response_id INTEGER REFERENCES course_response(id),
@@ -124,6 +123,22 @@ CREATE TABLE request_item (                   -- 솔버가 쓰는 구조화된 �
   params_json TEXT,                                    -- 요일·교시 등 상세 조건
   source TEXT NOT NULL DEFAULT 'TA' CHECK (source IN ('FORM','TA')),   -- 화면 항목 / 조교 입력
   created_by INTEGER REFERENCES user(id), created_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE pair_request (                  -- 같은 교수가 한 과목에서 두 분반 이상 맡을 때 분반 사이의 관계 (과목 단위로 한 번). 상관없음 = 행 없음
+  id INTEGER PRIMARY KEY,
+  round_id INTEGER NOT NULL REFERENCES round(id),
+  course_id INTEGER NOT NULL REFERENCES course(id),
+  professor_id INTEGER NOT NULL REFERENCES user(id),
+  mode TEXT NOT NULL CHECK (mode IN ('BACK_TO_BACK','CROSS')),   -- 연강(앞 분반 바로 뒤 다음 분반) / 교차
+  created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE (round_id, course_id, professor_id)
+);
+CREATE TABLE pair_request_section (          -- 붙일 분반, 교수가 적은 순서대로. 솔버는 앞 두 분반만 붙이고 셋째부터는 조교가 수동 배치·고정
+  request_id INTEGER NOT NULL REFERENCES pair_request(id),
+  seq INTEGER NOT NULL,                                -- 1, 2, 3, …
+  section_no INTEGER NOT NULL,
+  PRIMARY KEY (request_id, seq),
+  UNIQUE (request_id, section_no)
 );
 CREATE TABLE chapel_slot (                   -- 학년별 채플 칸 (조교 입력). 그 학년 전공필수는 이 칸에 놓지 않는다
   term_id INTEGER NOT NULL REFERENCES term(id),
@@ -186,8 +201,10 @@ CREATE TABLE proposal (
   section_no INTEGER,                                  -- 어느 분반의 조율인지 (NULL = 과목 전체)
   reason TEXT,
   status TEXT NOT NULL DEFAULT 'OPEN'
-         CHECK (status IN ('OPEN','SENT','PROPOSED','RESOLVED','KEPT','NEXT','OFFLINE')),   -- 보내기 전 / 답 기다림 / 조교 확인 대기 / 반영됨 / 현재대로 유지 / 다음 차수로 / 따로 연락 중
-  prev_proposal_id INTEGER REFERENCES proposal(id)     -- 이어받은 이전 차수 안건 (NULL = 1차 또는 처음 연 안건)
+         CHECK (status IN ('OPEN','SENT','PROPOSED','RESOLVED','KEPT','NEXT','OFFLINE','HOLD','NO_OPTION')),
+         -- 보내기 전 / 답 기다림 / 조교 확인 대기 / 반영됨 / 현재대로 유지 / 다음 차수로 / 따로 연락 중 / 조교 선택 대기(일부 어긋남) / 대안 없음(조교 확인)
+  prev_proposal_id INTEGER REFERENCES proposal(id),    -- 이어받은 이전 차수 안건 (NULL = 1차 또는 처음 연 안건)
+  target_kind TEXT CHECK (target_kind IN ('UNPLACED','MISMATCH','PARTIAL'))   -- 조율 대상 종류: 못 놓음 / 희망(시간·건물)에서 어긋남 / 일부 어긋남. NULL = 009 전 안건
 );
 CREATE UNIQUE INDEX ux_proposal_prev ON proposal(prev_proposal_id);   -- 한 안건에서 다음 차수 안건은 하나만
 CREATE TABLE proposal_option (
@@ -215,8 +232,8 @@ CREATE TABLE message (
 );
 CREATE TABLE reply_choice (                  -- 교수 답장에서 고른 값 (하나 이상, 여러 개 가능)
   message_id INTEGER NOT NULL REFERENCES message(id),
-  choice TEXT NOT NULL CHECK (choice IN ('A','B','C','ETC')),   -- 대안 A / B / C / 기타(답장 본문)
-  option_id INTEGER REFERENCES proposal_option(id),    -- A·B·C 가 가리키는 대안 (기타는 NULL)
+  choice TEXT NOT NULL CHECK (choice IN ('A','B','C','ETC','KEEP')),   -- 대안 A / B / C / 기타(답장 본문) / 지금 자리 그대로
+  option_id INTEGER REFERENCES proposal_option(id),    -- A·B·C 가 가리키는 대안 (기타·지금 자리 그대로는 NULL)
   PRIMARY KEY (message_id, choice)
 );
 CREATE TABLE reply_interpretation (

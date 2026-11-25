@@ -10,7 +10,7 @@ def reset():
     c.execute("DELETE FROM course_response WHERE course_id=?", (cid,)); c.execute("DELETE FROM course_section WHERE course_id=?", (cid,))
 def resp(prof, n=None, rid=[8000]):
     rid[0] += 1
-    c.execute("INSERT INTO course_response(id,round_id,course_id,professor_id,lab_requirement,single_day_pref) VALUES (?,?,?,?,?,?)", (rid[0],1,cid,prof,0,'NONE'))
+    c.execute("INSERT INTO course_response(id,round_id,course_id,professor_id,lab_requirement,single_day_pref) VALUES (?,?,?,?,?,?)", (rid[0],1,cid,prof,'NONE','NONE'))
     if n: c.execute("INSERT INTO request_item(response_id,type,value_int) VALUES (?,?,?)", (rid[0],'SECTION_COUNT',n))
 def rows(*spec):
     for s, p, e in spec: c.execute("INSERT INTO course_section VALUES (?,?,?,?)", (cid, s, p, e))

@@ -19,7 +19,7 @@ c.execute("INSERT INTO user(id,role,name,department_id,password_hash) VALUES (?,
 cid, prof = c.execute("""SELECT s.course_id, s.professor_id FROM course_section s JOIN course_response r
                           ON r.course_id=s.course_id AND r.professor_id=s.professor_id
                          WHERE (SELECT COUNT(*) FROM course_section x WHERE x.course_id=s.course_id)=1
-                           AND r.single_day_pref='NONE' AND r.section_pair='NONE' ORDER BY s.course_id LIMIT 1""").fetchone()
+                           AND r.single_day_pref='NONE' ORDER BY s.course_id LIMIT 1""").fetchone()
 alts = sc.alternatives(c, 1, 1, tt, cid, n=3, time_limit=10)
 pid = sc.save_proposal(c, 1, tt, cid, alts, "가상 조율", section_no=1)
 opts = [o for o, in c.execute("SELECT id FROM proposal_option WHERE proposal_id=? ORDER BY option_no", (pid,))]
@@ -44,10 +44,10 @@ report("① 새 버전 검증 위반 없음", verify(c, nt))
 report("① option_rows: 저장된 대안 = 대안 dict", sc.option_rows(c, option=alts[1], timetable_id=tt) == sorted(rows))
 
 # ② 다음 차수는 새 버전 기준
-nxt = sc.alternatives(c, 1, 1, nt, cid, n=3, time_limit=10)
+nxt = sc.alternatives(c, 1, 1, nt, cid, n=3, time_limit=10, exclude_sent=False)   # 이미 보낸 안 제외는 끄고 '현재 배정' 기준만 본다
 sigs = [sorted(info[st] for st, _ in a["placements"].values()) for a in nxt]
 report("② 새 버전 기준 대안: 현재 배정(B안)은 대안에서 빠짐", B not in sigs and len(nxt) > 0, f"({sigs})")
-old = sc.alternatives(c, 1, 1, tt, cid, n=3, time_limit=10)
+old = sc.alternatives(c, 1, 1, tt, cid, n=3, time_limit=10, exclude_sent=False)
 report("②   (옛 버전 기준이면 B안이 다시 나옴: 기준이 달라졌다는 확인)",
        B in [sorted(info[st] for st, _ in a["placements"].values()) for a in old])
 rs = sc.solve(c, 1, 1, time_limit=30, previous_timetable_id=nt)
