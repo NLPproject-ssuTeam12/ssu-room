@@ -118,7 +118,7 @@ export default function ServerApp() {
         <div className="wrap">
           <div className="logo">SSU<b>:</b>room</div>
           <span className="sub">강의시간표 편성·조율 도우미</span>
-          <span className="virt" title={`서버 ${API_BASE}`}>서버 연결 · 가명 데이터</span>
+          <span className="virt" title={`서버 ${API_BASE} · 실제 강의 목록에 교수 가명과 가상 희망을 넣은 시연 데이터`}>서버 연결 · 가명·가상 희망</span>
           <div className="spacer" />
           <button type="button" className="tog" aria-label={`테마 바꾸기, 지금 ${themeName}`} onClick={nextTheme}>테마: {themeName}</button>
           <div className="seg" role="group" aria-label="역할">
