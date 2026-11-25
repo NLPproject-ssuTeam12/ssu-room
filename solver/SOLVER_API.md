@@ -138,6 +138,21 @@ dict(stage="다른 수업은 그대로" | "같은 교수·같은 학년 필수�
 - 시간: 19:30 교시는 `late`(기본 60) 감점, 연속 2칸 이상 수업은 18:00 이후에 시작하지 않는다(하드).
 - 대안은 분반별 시작 칸 집합으로 비교한다. 회차 순서만 바꾼 같은 안은 다시 나오지 않는다.
 
+## 5-1. 교수 답장 선택과 수동 배치 (11/25)
+
+```python
+best = sc.pick_best(con, term_id, round_id, timetable_id, course_id, section_no,
+                    option_ids=[A안 id, B안 id], condition=기타_조건_또는_None)
+# -> 좋은 순 [dict(source='A'|'B'|'C'|'ETC', option_id, feasible, objective, stage, placements, ks, moves)]
+new_id = sc.add_option(con, proposal_id, best[0])      # source 'ETC'(기타 조건으로 만든 안)를 쓸 때 4번 대안으로 저장
+sc.load_option(con, option_id)                         # 저장된 대안 → placements·ks·slots
+sc.check_timetable(con, timetable_id)                  # 하드 규칙 위반 목록 (수동 배치 경고용)
+```
+
+- `pick_best`는 고른 안마다 **지금 시간표에서 그 안의 칸에만 놓도록** 풀어 엔진 점수(낮을수록 좋음)를 비교한다. 다른 수업은 그대로이고, 안 되면 같은 교수·같은 학년 필수과목을 조금 움직여 본다. 그래도 안 되면 `feasible=False`(맨 뒤).
+- 고정: 이전 시간표에서 `timetable_section.locked=1`인 분반은 `solve`(부분·전체)·`alternatives`·`pick_best`에서 움직이지 않는다. 고정 분반의 대안을 만들려 하면 `ValueError`(먼저 `db.set_lock`으로 푼다). 새 시간표에도 `MANUAL`·고정이 이어진다.
+- 수동 배치가 규칙을 어긴 채 고정돼 있어도 풀이가 막히지 않는다: 고정끼리의 위반은 그대로 두고, 나머지 수업이 피한다.
+
 ## 6. 서버 단계와 기타 요청 (`db.py`)
 
 ```python
