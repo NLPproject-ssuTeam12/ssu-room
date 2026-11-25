@@ -508,6 +508,7 @@ def _ask_pair_day(sec, day: str) -> Optional[str]:
 
 # ---------- 실행 ----------
 
+_KIND_TEXT = {"UNPLACED": "못 놓음", "MISMATCH": "희망에서 어긋남", "PARTIAL": "일부 어긋남"}
 _PROPOSALS: Dict[str, dict] = {}
 
 
@@ -630,6 +631,34 @@ def _pick_room(cmd: AssistantQuery, store, a) -> Optional[str]:
     return None
 
 
+STUB_NOTE = "(가짜 엔진 결과예요. 실제 계산은 DB 모드(SSUROOM_ENGINE=solver)에서 해요.)"
+
+
+def _db():
+    """DB 모드면 DBMode, 아니면 None (dbmode 가 main 을 거쳐 이 모듈을 부르므로 함수 안에서 가져온다)."""
+    from .. import dbmode
+    return dbmode.active()
+
+
+def _run_what_if(tt, change: dict) -> dict:
+    """DB 모드: 하윤 엔진으로 복사본에서 계산(dbmode.what_if). 메모리 모드: 가짜 엔진 + 가짜 표시."""
+    db = _db()
+    if db is not None:
+        return dict(db.what_if(change), real=True)
+    res = engine.what_if(tt, change)
+    return dict(res, supported=True, real=False, feasible=res["violations"] == 0, rules=[], moved=[], unplaced=[],
+                option=None, clash=None, note="")
+
+
+def _rule_lines(res: dict, by_title) -> List[str]:
+    out = []
+    if res.get("clash"):
+        out.append(res["clash"])
+    for r in res.get("rules", [])[:5]:
+        out.append(f"{r['rule']}: {by_title(r['section_id'])} ({r['detail']})")
+    return out
+
+
 def _explain(cmd: AssistantQuery, store) -> dict:
     sec = store.get_section(cmd.section_id)
     title = section_title(sec)
@@ -657,10 +686,20 @@ def _explain(cmd: AssistantQuery, store) -> dict:
                 lines.append(f"희망 칸 밖({', '.join(outside)})이에요. 불가 칸은 아니에요.")
             else:
                 lines.append("모두 교수 희망 칸 안이에요.")
+    db = _db()
+    if db is not None and sec.shape != "MANUAL":
+        # DB 모드: 하윤 check_timetable 로 이 분반이 낀 하드 규칙 위반
+        cid, no = db.section_key(sec.id)
+        vs = [v for v in db.violations() if v["course_id"] == cid and v["section_no"] == no]
+        lines.append(f"하드 규칙 위반 {len(vs)}건" + (f": {', '.join(v['rule'] for v in vs)}." if vs else "이에요."))
+        item = store.get_coord(sec.id)
+        if item and item.get("kind"):
+            lines.append(f"조율 대상 종류: {_KIND_TEXT.get(item['kind'], item['kind'])}.")
     if a.status == "COORD":
         item = store.get_coord(sec.id)
         state = {"OPEN": "메시지 보내기 전", "SENT": "답장 기다림", "PROPOSED": "처리안 확인 기다림",
-                 "RESOLVED": "반영됨", "KEPT": "현재대로 유지"}.get(item["state"], item["state"]) if item else ""
+                 "RESOLVED": "반영됨", "KEPT": "현재대로 유지", "HOLD": "조교 선택 대기", "NO_OPTION": "대안 없음",
+                 "OFFLINE": "따로 연락 중", "NEXT": "다음 차수로"}.get(item["state"], item["state"]) if item else ""
         lines.append(f"조율 중이에요{f' ({state})' if state else ''}. 밀린 이유: {a.reason or '기록 없음'}")
     elif a.status == "DONE":
         lines.append("배정이 정해진 상태(DONE)예요.")
@@ -708,11 +747,25 @@ def _what_if(cmd: AssistantQuery, store, as_move: bool) -> dict:
         else:
             change = {"kind": "free", "day": cmd.days[0], "start": cmd.start}
             what = f"{cmd.days[0]} {cmd.start}을(를) 비우면"
-        res = engine.what_if(tt, change)
-        changed = [s for s in res["changed"] if s in by_id]
-        rows = [row(s, "다시 배정 필요", "영향 받음") for s in changed]
-        return _result(f"{what} 분반 {len(changed)}개가 자리를 옮겨야 해요. 그때 규칙 위반은 {res['violations']}건이에요. "
-                       "(미리 보기만 했고 시간표는 그대로예요.)", rows)
+        res = _run_what_if(tt, change)
+        if not res["supported"]:
+            return _result(res["note"] or "이 가정은 아직 계산할 수 없어요.")
+        if not res["real"]:
+            changed = [s for s in res["changed"] if s in by_id]
+            rows = [row(s, "다시 배정 필요", "영향 받음") for s in changed]
+            return _result(f"{what} 분반 {len(changed)}개가 자리를 옮겨야 해요. 그때 규칙 위반은 {res['violations']}건이에요. "
+                           f"(미리 보기만 했고 시간표는 그대로예요.) {STUB_NOTE}", rows)
+        if not res["changed"]:
+            return _result(f"{what} 영향 받는 분반이 없어요. {res['note']}".strip())
+        moved = {m["section_id"]: m for m in res["moved"]}
+        rows = [row(s, moved[s]["after"] if s in moved else ("놓을 자리 없음" if s in res["unplaced"] else "그대로"),
+                    "옮김" if s in moved else ("못 놓음" if s in res["unplaced"] else "영향 없음"))
+                for s in res["changed"] if s in by_id]
+        lines = [f"{what} 분반 {len(res['changed'])}개를 엔진이 다시 놓아 봤어요: 옮겨짐 {len(moved)}개, "
+                 f"놓을 자리 없음 {len(res['unplaced'])}개, 새 규칙 위반 {res['violations']}건."]
+        lines += _rule_lines(res, lambda s: section_title(store.get_section(s)) if store.get_section(s) else s)
+        lines.append("(복사본에서 계산만 했고 시간표는 그대로예요.)")
+        return _result(" ".join(lines), rows)
 
     sec = store.get_section(cmd.section_id)
     title = section_title(sec)
@@ -739,13 +792,33 @@ def _what_if(cmd: AssistantQuery, store, as_move: bool) -> dict:
 
     change = {"kind": "move", "section_id": sec.id, "day": blocks[0].day, "start": blocks[0].start,
               "room": room, "blocks": [dump(b) for b in blocks]}
-    res = engine.what_if(tt, change)
+    res = _run_what_if(tt, change)
+    if not res["supported"]:
+        return _result(res["note"] or "이 가정은 아직 계산할 수 없어요.")
     others = [s for s in res["changed"] if s != sec.id and s in by_id]
     rows = [row(sec.id, _place_text(blocks), "옮김")]
     rows += [row(s, "겹침 → 다시 배정 필요", "영향 받음") for s in others]
 
     lines = [f"{title}을(를) {_place_text(blocks)}(으)로 옮기면"]
-    lines.append(f"같이 바뀌어야 하는 다른 분반 {len(others)}개, 규칙 위반 {res['violations']}건이에요.")
+    if res["real"]:
+        name = lambda s: section_title(store.get_section(s)) if store.get_section(s) else s   # noqa: E731
+        if res["feasible"]:
+            lines.append("하드 규칙 위반 없이 놓을 수 있어요.")
+        else:
+            lines.append(f"그대로는 놓을 수 없어요. 새 규칙 위반 {res['violations']}건.")
+            lines += _rule_lines(res, name)
+            opt = res.get("option")
+            if opt:
+                ms = opt["alternative"]["meetings"]
+                where = " / ".join(f"{DAYS[m['day']]} {m['start']}~{m['end']} {m['room']}" for m in ms)
+                lines.append(f"규칙을 지키며 그 시각에 놓는 안: {where}" +
+                             (f" (같이 움직이는 수업 {len(opt['moves'])}개)" if opt["moves"] else "") + ".")
+            else:
+                lines.append("규칙을 지키며 그 시각에 놓는 안도 엔진이 찾지 못했어요.")
+            if as_move:   # 새 위반이 생기는 안은 [적용]해도 엔진(apply_option)이 거부하므로 제안을 만들지 않는다
+                return _result(" ".join(lines), rows)
+    else:
+        lines.append(f"같이 바뀌어야 하는 다른 분반 {len(others)}개, 규칙 위반 {res['violations']}건이에요. {STUB_NOTE}")
     if late_penalty(blocks):
         lines.append(f"{LATE_SLOT} 교시는 다른 방법이 없을 때만 쓰는 늦은 교시예요(큰 감점).")
     if chapel_note:

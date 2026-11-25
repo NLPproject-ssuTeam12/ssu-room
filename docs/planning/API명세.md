@@ -334,6 +334,7 @@ fetch(`http://localhost:8000/coord/${encodeURIComponent(sectionId)}/message`, { 
 | `POST /coord/{id}/reply` | DB `add_reply`(누른 값 필수: 예전 `choice`나 글만 보내면 `ETC`로 넣음) → 해석 `save_interpretation`(판정·해석 JSON·모델 이름). 기타 글의 시간표 밖 요청(`note`)은 기타 요청 표로 |
 | `POST /coord/{id}/decide` | `decide_reply`. [확인] move는 엔진 `pick_best`(교수가 고른 안 중 지금 놓을 수 있는 첫 안, 글로 밝힌 순서 우선) → `apply_option`(새 시간표 버전, 새 규칙 위반이면 409) |
 | `POST /assistant/apply` | `apply_option`으로 새 시간표 버전 (사유 = 시간표 버전 사유) |
+| `POST /assistant` 가정 실행·이동 미리보기·이유 설명 | 지금 DB를 메모리로 복사(sqlite3 backup)해 **복사본에서만** 하윤 엔진으로 계산하고 버린다. 이동 = 그 칸에 놓아 본 새 위반(`check_timetable`) + 규칙을 지키는 안(`alternatives`, 같이 움직이는 수업), 강의실 못 씀·칸 비우기 = 영향 분반만 부분 재풀이(`solve(free_courses)`). 계산할 수 없는 가정은 "이 가정은 아직 계산할 수 없어요". 새 위반이 생기는 이동은 [적용] 제안을 만들지 않는다. 메모리 모드 답에는 "가짜 엔진 결과" 표시 |
 | `POST /finalize` | 엔진 `finalize` + 단계 FINAL. `/export.xlsx`는 그 시간표 |
 | `POST /reset` | 조율·시간표 기록을 지우고 희망 수집으로 (희망·과목·강의실은 그대로) |
 

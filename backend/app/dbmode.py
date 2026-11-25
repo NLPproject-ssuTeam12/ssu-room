@@ -534,6 +534,172 @@ class DBMode:
         self.adapter.reassign(Timetable(assignments=[]), sid, alt)
         return self.current_tt()
 
+    # ---------- 가정 실행 (AI 도우미) ----------
+
+    def what_if(self, change: dict) -> dict:
+        """가정 실행. 지금 DB를 메모리 DB로 복사(sqlite3 backup)해 그 복사본에서만 하윤 함수로 계산하고 버린다.
+        진짜 DB에는 아무것도 쓰지 않는다. change 모양은 stubs.what_if 와 같다:
+          {"kind": "move", "section_id", "blocks": [{day, start, slots, room}]}   분반을 그 자리로
+          {"kind": "room_off", "room": "정보과학관 21303"}                       그 강의실을 못 쓰면
+          {"kind": "free", "day": "수", "start": "15:00"}                        그 칸을 비우면
+        -> {supported, changed, violations(새로 생긴 위반 수), rules, moved, unplaced, feasible, option, engine, note}
+           supported=False 면 note 에 이유 (지어내지 않는다)."""
+        tt = self.current_tt()
+        if tt is None:
+            return _unsupported("아직 초안이 없어 계산할 수 없어요.")
+        mem = sqlite3.connect(":memory:")
+        try:
+            self.con.backup(mem)
+            mem.execute("PRAGMA foreign_keys = ON")
+            kind = change.get("kind", "move")
+            if kind == "move":
+                return self._what_move(mem, tt, change)
+            if kind == "room_off":
+                return self._what_room_off(mem, tt, change.get("room"))
+            if kind == "free":
+                return self._what_free(mem, tt, change.get("day"), change.get("start"))
+            return _unsupported("이 가정은 아직 계산할 수 없어요.")
+        finally:
+            mem.close()
+
+    def _new_violations(self, mem, base: int, new: int) -> List[dict]:
+        key = lambda v: (v["rule"], v["course_id"], v["section_no"], v["detail"])   # noqa: E731
+        before = [key(v) for v in self.sc.check_timetable(mem, base)]
+        out = []
+        for v in self.sc.check_timetable(mem, new):
+            if key(v) in before:
+                before.remove(key(v))
+            else:
+                out.append(v)
+        return out
+
+    def _sid(self, cid: int, sec: int) -> str:
+        return self.pairs.sid_of.get((cid, sec), f"{cid}-{sec}")
+
+    def _rule_text(self, v: dict) -> dict:
+        return dict(rule=v["rule"], section_id=self._sid(v["course_id"], v["section_no"]), detail=v["detail"])
+
+    def _moved(self, mem, base: int, new: int, keys) -> Tuple[List[dict], List[str]]:
+        """두 시간표 버전에서 그 분반들의 자리 비교 → (옮겨진 분반 [{section_id, before, after}], 못 놓인 분반 id)."""
+        b_start, b_ks = self.sc.load_assignment(mem, base)
+        n_start, n_ks = self.sc.load_assignment(mem, new)
+        b = assignments_from_db(b_start, b_ks, self.slots, self.rooms, self.pairs)
+        n = assignments_from_db(n_start, n_ks, self.slots, self.rooms, self.pairs)
+        moved, unplaced = [], []
+        for cid, sec in sorted(keys):
+            sid = self._sid(cid, sec)
+            nb = n.get(sid)
+            if nb is None or len(nb.blocks) < len(b[sid].blocks if sid in b else []):
+                unplaced.append(sid)
+                continue
+            if sid in b and dump(b[sid]) != dump(nb):
+                moved.append(dict(section_id=sid, before=_place(b[sid]), after=_place(nb)))
+        return moved, unplaced
+
+    def _what_move(self, mem, tt: int, change: dict) -> dict:
+        sid = change.get("section_id")
+        if sid not in self.pairs.key_of:
+            return _unsupported("조교 직접 배정 분반이거나 DB에 없는 분반이라 계산할 수 없어요.")
+        cid, sec = self.section_key(sid)
+        rows, day_slots = [], {}
+        blocks = sorted(change.get("blocks") or [], key=lambda b: (DAYS.index(b["day"]) if b["day"] in DAYS else 9, b["start"]))
+        for ss, b in enumerate(blocks, start=1):
+            start = self.slots.id_of.get((b["day"], b["start"]))
+            room = self.rooms.id_of.get(b.get("room") or "")
+            if start is None or room is None:
+                return _unsupported("교시 시작이 아니거나 DB에 없는 강의실이라 이 가정은 아직 계산할 수 없어요.")
+            cells = self.slots.covered(start, b["slots"])
+            if len(cells) < b["slots"]:
+                return _unsupported("그 시각에서는 연강 두 칸이 이어지지 않아 계산할 수 없어요.")
+            rows += [(sec, ss, c, room) for c in cells]
+            day_slots.setdefault(str(DAYS.index(b["day"])), []).extend(self.slots.info[c][2] for c in cells)
+        if not rows:
+            return _unsupported("옮길 자리가 없어 계산할 수 없어요.")
+        # (1) 그 칸·그 강의실에 그대로 놓아 본다 (규칙 검사 없이 복사본에 새 버전) → 새로 생기는 위반
+        rules, clash = [], None
+        try:
+            new = self.hdb.apply_option(mem, None, None, rows, "가정 실행", course_id=cid, base_timetable_id=tt)
+            rules = self._new_violations(mem, tt, new)
+        except ValueError as e:
+            clash = "같은 시간에 그 강의실을 다른 수업이 쓰고 있어요." if "강의실" in str(e) else str(e)
+            new = None
+        # (2) 규칙을 지키며 그 요일·교시에 놓는 안이 있는지 (엔진 alternatives, 강의실은 엔진이 고름, 필요하면 다른 수업도 조금 움직임)
+        cond = {"day_slots": {d: sorted(set(v)) for d, v in day_slots.items()}, "end_before": []}
+        opts = self.sc.alternatives(mem, self.term_id, self.wish_round, tt, cid, sec, condition=cond, n=1,
+                                    time_limit=self.alt_time_limit, exclude_sent=False)
+        option = None
+        if opts:
+            o = opts[0]
+            alt = option_to_alternative("A", o, cid, self.slots, self.rooms)
+            option = dict(alternative=dump(alt), stage=o["stage"],
+                          moves=[dict(section_id=self._sid(k[0], k[1]), before=self._cell(*b), after=self._cell(*a))
+                                 for k, b, a in o["moves"]])
+        changed = [sid] + sorted({r["section_id"] for r in map(self._rule_text, rules)} - {sid})
+        if option:
+            changed += [m["section_id"] for m in option["moves"] if m["section_id"] not in changed]
+        return dict(supported=True, kind="move", feasible=new is not None and not rules, clash=clash,
+                    changed=changed, violations=len(rules), rules=[self._rule_text(v) for v in rules],
+                    moved=[], unplaced=[], option=option, engine="하윤 엔진(복사본에서 계산)", note="")
+
+    def _cell(self, slot: int, room: int) -> str:
+        d, _p, st, _e = self.slots.info[slot]
+        return f"{d} {st} {self.rooms.name_of.get(room, room)}"
+
+    def _resolve(self, mem, tt: int, keys) -> dict:
+        """복사본에서 그 분반들만 다시 푼다 (나머지는 그대로 고정, 엔진 solve 부분 재풀이)."""
+        r = self.sc.solve(mem, self.term_id, self.wish_round, time_limit=self.alt_time_limit,
+                          previous_timetable_id=tt, free_courses=set(keys))
+        new = r.get("timetable_id")
+        if new is None:
+            return _unsupported(f"다시 풀지 못했어요 (엔진 상태 {r.get('status')}).")
+        moved, unplaced = self._moved(mem, tt, new, keys)
+        rules = self._new_violations(mem, tt, new)
+        changed = [self._sid(c, s) for c, s in sorted(keys)]
+        return dict(supported=True, feasible=not unplaced and not rules, clash=None, changed=changed,
+                    violations=len(rules), rules=[self._rule_text(v) for v in rules], moved=moved, unplaced=unplaced,
+                    option=None, engine="하윤 엔진(복사본에서 계산)", note="")
+
+    def _what_room_off(self, mem, tt: int, room: Optional[str]) -> dict:
+        rid = self.rooms.id_of.get(room or "")
+        if rid is None:
+            return _unsupported(f"DB에 없는 강의실이라 계산할 수 없어요: {room}")
+        keys = {(c, s) for c, s in mem.execute("SELECT DISTINCT course_id, section_no FROM assignment "
+                                                 "WHERE timetable_id=? AND room_id=?", (tt, rid))}
+        locked = {(c, s) for c, s in mem.execute("SELECT course_id, section_no FROM timetable_section "
+                                                   "WHERE timetable_id=? AND locked=1", (tt,))}
+        if keys & locked:
+            return _unsupported("그 강의실에 조교가 고정한 분반이 있어 계산할 수 없어요. 고정을 먼저 풀어 주세요.")
+        if not keys:
+            return dict(supported=True, kind="room_off", feasible=True, clash=None, changed=[], violations=0, rules=[],
+                        moved=[], unplaced=[], option=None, engine="하윤 엔진(복사본에서 계산)", note="그 강의실을 쓰는 분반이 없어요.")
+        # 그 강의실을 어느 학과도 못 쓰게: 없는 학과 전용으로 바꾼다 (엔진의 전용 강의실 규칙)
+        dept = mem.execute("INSERT INTO department(name) VALUES ('가정 실행: 사용 불가')").lastrowid
+        mem.execute("UPDATE room SET reserved_department_id=? WHERE id=?", (dept, rid))
+        mem.commit()
+        return dict(self._resolve(mem, tt, keys), kind="room_off")
+
+    def _what_free(self, mem, tt: int, day: Optional[str], start: Optional[str]) -> dict:
+        slot = self.slots.id_of.get((day, start))
+        if slot is None:
+            return _unsupported("교시 시작 칸이 아니라 계산할 수 없어요.")
+        keys = {(c, s) for c, s in mem.execute("SELECT DISTINCT course_id, section_no FROM assignment "
+                                                 "WHERE timetable_id=? AND slot_id=?", (tt, slot))}
+        if not keys:
+            return dict(supported=True, kind="free", feasible=True, clash=None, changed=[], violations=0, rules=[],
+                        moved=[], unplaced=[], option=None, engine="하윤 엔진(복사본에서 계산)", note="그 칸에는 수업이 없어요.")
+        # 그 칸을 그 분반 담당 교수 응답의 불가 칸으로 → 그 분반들만 다시 푼다
+        for cid, sec in keys:
+            row = mem.execute("""SELECT r.id FROM course_response r JOIN course_section cs ON cs.course_id = r.course_id
+                                 AND cs.section_no = r.section_no AND cs.professor_id = r.professor_id
+                                 WHERE r.round_id=? AND r.course_id=? AND r.section_no=?""",
+                              (self.wish_round, cid, sec)).fetchone()
+            if row is None:
+                return _unsupported("그 칸에 희망 입력이 없는 분반(미회신)이 있어 아직 계산할 수 없어요.")
+            mem.execute("INSERT OR REPLACE INTO response_slot(response_id, slot_id, kind) VALUES (?,?, 'BLOCK')",
+                        (row[0], slot))
+        mem.commit()
+        return dict(self._resolve(mem, tt, keys), kind="free")
+
     # ---------- 처음으로 ----------
 
     def reset(self) -> None:
@@ -589,3 +755,13 @@ def use(db: Optional[DBMode]) -> None:
     """테스트용: 이미 만든 DBMode 를 쓴다 (None 이면 다시 파일에서 연다)."""
     global _DB
     _DB = db
+
+
+def _unsupported(note: str) -> dict:
+    return dict(supported=False, feasible=False, clash=None, changed=[], violations=0, rules=[], moved=[], unplaced=[],
+                option=None, engine="하윤 엔진(복사본에서 계산)", note=note)
+
+
+def _place(a) -> str:
+    """배정 → '화 13:30 정보과학관 21303 / 목 13:30 …'."""
+    return " / ".join(f"{b.day} {b.start} {b.room or ''}".strip() for b in a.blocks) or "자리 없음"
