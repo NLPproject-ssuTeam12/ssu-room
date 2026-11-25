@@ -1,0 +1,80 @@
+{
+ "method": "keyword",
+ "rows": 20,
+ "skipped": 0,
+ "fallback": 0,
+ "intent_accuracy": 0.85,
+ "info": {
+  "precision": 0.964,
+  "recall": 0.871,
+  "f1": 0.915,
+  "tp": 27,
+  "fp": 1,
+  "fn": 4
+ },
+ "info_by_field": {
+  "section": {
+   "precision": 1.0,
+   "recall": 0.75,
+   "f1": 0.857,
+   "tp": 9,
+   "fp": 0,
+   "fn": 3
+  },
+  "professor": {
+   "precision": 1.0,
+   "recall": 1.0,
+   "f1": 1.0,
+   "tp": 3,
+   "fp": 0,
+   "fn": 0
+  },
+  "days": {
+   "precision": 1.0,
+   "recall": 1.0,
+   "f1": 1.0,
+   "tp": 10,
+   "fp": 0,
+   "fn": 0
+  },
+  "start": {
+   "precision": 1.0,
+   "recall": 1.0,
+   "f1": 1.0,
+   "tp": 4,
+   "fp": 0,
+   "fn": 0
+  },
+  "room": {
+   "precision": 0.0,
+   "recall": 0.0,
+   "f1": 0.0,
+   "tp": 0,
+   "fp": 1,
+   "fn": 1
+  },
+  "building": {
+   "precision": 1.0,
+   "recall": 1.0,
+   "f1": 1.0,
+   "tp": 1,
+   "fp": 0,
+   "fn": 0
+  }
+ },
+ "ask_back": {
+  "accuracy": 0.65,
+  "asked_when_needed": "4/8",
+  "asked_when_needed_rate": 0.5,
+  "quiet_when_not_needed": "9/12",
+  "quiet_when_not_needed_rate": 0.75
+ },
+ "intent_confusion": {
+  "move->out_of_scope": 1,
+  "out_of_scope->explain": 1,
+  "status->what_if": 1
+ },
+ "labels": [
+  "assistant_questions_daewon.csv"
+ ]
+}
