@@ -95,16 +95,22 @@ def build(rows, with_responses):
         for r in rows:
             if r["room"]:
                 bld_use[r["professor"]][r["room"].split()[0]] += 1
-        for i, ((cid, p), rs) in enumerate(by_cp.items(), 1):
+        i = 0
+        for (cid, p), rs in by_cp.items():
             lab = int(any(r["room"].split()[-1] in LABS for r in rs if r["room"]))
             single = "MUST" if all(r["_long"] for r in rs) else "NONE"
-            q("INSERT INTO course_response(id,round_id,course_id,professor_id,lab_requirement,single_day_pref) VALUES (?,?,?,?,?,?)",
-              (i, 1, cid, pid[p], lab, single))
             pref = {SL[(d, st)] for r in rs for d, st in r["_cells"] if (d, st) in SL}
-            for s in pref:
-                q("INSERT INTO response_slot VALUES (?,?,'PREFER')", (i, s))
-            for s in rnd.sample(sorted(set(SL.values()) - pref), 6):
-                q("INSERT INTO response_slot VALUES (?,?,'BLOCK')", (i, s))
+            block = rnd.sample(sorted(set(SL.values()) - pref), 6)
+            secs_p = [r[0] for r in q("SELECT section_no FROM course_section WHERE course_id=? AND professor_id=? ORDER BY 1",
+                                       (cid, pid[p])).fetchall()] or [1]
+            for sec in secs_p:                    # 희망 입력은 분반마다 (11/25). 같은 교수의 분반은 같은 값
+                i += 1
+                q("INSERT INTO course_response(id,round_id,course_id,section_no,professor_id,lab_requirement,single_day_pref) VALUES (?,?,?,?,?,?,?)",
+                  (i, 1, cid, sec, pid[p], lab, single))
+                for s in pref:
+                    q("INSERT INTO response_slot VALUES (?,?,'PREFER')", (i, s))
+                for s in block:
+                    q("INSERT INTO response_slot VALUES (?,?,'BLOCK')", (i, s))
         for p, cnt in bld_use.items():
             q("INSERT INTO professor_building_pref VALUES (?,?)", (pid[p], bid[cnt.most_common(1)[0][0]]))
     c.commit()
@@ -125,7 +131,7 @@ def measure(label, rows, with_responses, limit):
     ok = verify(c, r["timetable_id"]) if r["timetable_id"] else False
     if with_responses and r["timetable_id"]:
         same = c.execute("""SELECT COUNT(*) FROM (SELECT a.course_id, a.section_no FROM assignment a
-                            JOIN course_response cr ON cr.course_id=a.course_id
+                            JOIN course_response cr ON cr.course_id=a.course_id AND cr.section_no=a.section_no
                              AND cr.professor_id=(SELECT professor_id FROM course_section WHERE course_id=a.course_id AND section_no=a.section_no)
                             GROUP BY 1,2 HAVING SUM(a.slot_id IN (SELECT slot_id FROM response_slot WHERE response_id=cr.id AND kind='PREFER'))=COUNT(*))""").fetchone()[0]
         inb = c.execute("""SELECT AVG(r.building_id = p.building_id) FROM v_schedule v JOIN room r ON r.id=v.room_id

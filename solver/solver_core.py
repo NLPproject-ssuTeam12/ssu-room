@@ -8,6 +8,7 @@ DB(schema.sql)에서 입력을 읽어 초안 시간표를 만들고 같은 DB에
     (번호·담당 교수·수강 인원). 솔버는 분반 수를 바꾸지 않는다. 번호는 1부터 빈틈없이. 행이 없는 과목은
     course.professor_id 가 맡는 1분반 하나로 본다.
   분반마다 담당 교수가 다를 수 있다. 교수 겹침·응답(불가 시간·실습실·연강)은 분반의 교수 기준.
+  희망 입력은 분반마다(course_response.section_no, 11/25): 칠한 칸·실습실·주 1회 연강. 그 분반 담당 교수의 응답만 읽는다.
   수강 인원(course_section.enrollment)이 강의실 정원보다 많으면 그 강의실은 후보에서 뺀다(하드). 인원이 비어 있으면 검사하지 않는다.
   희망 건물: 교수당 하나(professor_building_pref). 그 밖의 건물에 배정하면 벌점.
   강의실묶음 = 건물·정원·실습실 여부·전용 학과가 모두 같은 강의실들. 묶음 안의 방은 서로 구별할 필요가
@@ -18,8 +19,9 @@ DB(schema.sql)에서 입력을 읽어 초안 시간표를 만들고 같은 DB에
     주 1회 연강 = 한 분반이 하루에 2칸을 이어서 수업 (course_response.single_day_pref)
         MUST   하루에 연속 2칸 한 번으로만 배정
         NONE   1칸씩 두 번(이틀)으로만 배정   ※ 주당 2칸짜리 수업에만 적용. '선호'(PREFER)는 11/24에 없앰
-    분반 연강/교차 = 한 교수가 한 과목의 두 분반을 맡을 때 가반 끝나자마자 나반
-        (교수 응답 course_response.section_pair: BACK_TO_BACK / CROSS. 그 교수의 그 과목 분반이 정확히 둘일 때)
+    분반 연강/교차 = 한 교수가 한 과목의 두 분반 이상을 맡을 때 가반 끝나자마자 나반 / 교차
+        (pair_request: 과목 단위로 한 번, 모드 BACK_TO_BACK / CROSS와 붙일 분반을 교수가 적은 순서대로.
+         솔버는 앞 두 분반만 붙인다. 셋째 분반부터는 unsupported 로 알리고 조교가 수동 배치·고정한다. 11/25)
   필수과목(같은 학과·같은 학년끼리만, 학년이 다르면 겹쳐도 됨. 11/24):
         교양필수 ↔ 전공필수는 겹치지 않는다(하드). 교양필수끼리는 겹쳐도 된다.
         서로 다른 전공필수 과목 A·B는 겹치지 않는다(하드). 다만 둘 다 분반이 둘 이상이면 일부 겹쳐도 된다:
@@ -36,6 +38,9 @@ DB(schema.sql)에서 입력을 읽어 초안 시간표를 만들고 같은 DB에
 공개 함수
   solve(...)          전체 풀이 또는 일부 과목·분반만 다시 풀기(free_courses)
   alternatives(...)   못 놓은 과목(분반)의 대안 N개. 조율 쪽 조건(days/window/end_before 또는 slot_ids)을 받는다
+  coord_targets(...)  조율 대상 분반: 못 놓음(UNPLACED) / 희망에서 어긋남(MISMATCH) / 일부 어긋남(PARTIAL)
+  open_coord_proposals(...) 조율 대상마다 대안을 만들어 안건으로 저장 (OPEN 자동 보냄 / HOLD 조교 선택 / NO_OPTION 대안 없음)
+  fill_options(...)   다음 차수 안건(db.open_next_proposal)에 대안을 채움. 없으면 NO_OPTION
   pick_best(...)      교수가 고른 대안(여러 개 가능)과 기타 조건으로 만든 안 중 점수가 가장 좋은 안
   check_timetable(...) 시간표의 하드 규칙 위반 목록 (조교 수동 배치 경고용)
   save_proposal(...)  대안을 proposal 테이블에 저장 / add_option(...) 안건에 대안 하나 더
@@ -112,16 +117,21 @@ def load_input(con, term_id, round_id):
                FROM course WHERE term_id=?""", (term_id,)):
         courses[cid] = dict(id=cid, name=name, prof=prof, dept=dept, cat=cat, year=yr,
                             sessions=sc, k=sps, sections=1)
-    resp = {}                                   # (과목, 교수) -> 응답
-    for rid, cid, prof, lab, single_day, pair in q(
-            """SELECT id, course_id, professor_id, lab_requirement, single_day_pref, section_pair
+    resp = {}                                   # (과목, 분반, 교수) -> 그 분반 응답 (11/25: 분반마다)
+    for rid, cid, sec, prof, lab, single_day in q(
+            """SELECT id, course_id, section_no, professor_id, lab_requirement, single_day_pref
                FROM course_response WHERE round_id=?""", (round_id,)):
         if cid not in courses:
             continue
-        r = dict(lab=lab, single_day=single_day, pair=pair, block=set(), prefer=set(), id=rid)
+        r = dict(lab=lab, single_day=single_day, block=set(), prefer=set(), id=rid)
         for sid, kind in q("SELECT slot_id, kind FROM response_slot WHERE response_id=?", (rid,)):
             r[{"BLOCK": "block", "PREFER": "prefer"}[kind]].add(sid)
-        resp[(cid, prof)] = r
+        resp[(cid, sec, prof)] = r
+    pair_req = defaultdict(list)                # 과목 -> [(교수, 모드, [교수가 적은 순서의 분반])]
+    for pid, cid, prof, mode in q("SELECT id, course_id, professor_id, mode FROM pair_request WHERE round_id=?", (round_id,)):
+        if cid in courses:
+            order = [r[0] for r in q("SELECT section_no FROM pair_request_section WHERE request_id=? ORDER BY seq", (pid,))]
+            pair_req[cid].append((prof, mode, order))
     # 분반: 조교가 course_section 에 넣은 행 그대로 (오프라인 회의에서 정한 분반 수·담당 교수·수강 인원).
     #   행이 없는 과목은 course.professor_id 가 맡는 1분반 하나 (인원 미정). 번호는 1부터 빈틈없어야 한다.
     given = defaultdict(dict)                    # 과목 -> {분반: (교수, 인원)}
@@ -135,22 +145,24 @@ def load_input(con, term_id, round_id):
         c["sections"] = len(rows)
         c["section_prof"] = {sec: p for sec, (p, _) in rows.items()}
         c["section_enroll"] = {sec: e for sec, (_, e) in rows.items()}
-    # 분반 연강·교차: 교수 응답 칸(section_pair). 그 교수가 이 과목에서 맡은 분반이 정확히 둘이면 (작은 번호=가반, 큰 번호=나반)
+    # 분반 연강·교차 (pair_request): 교수가 적은 순서에서 그 교수가 맡은 분반만. 적은 분반이 없으면 맡은 분반 번호 순서.
+    #   솔버는 앞 두 분반(가반·나반)만 붙인다.
     for c in courses.values():
-        c["pairs"] = []                          # [([그 교수의 분반 번호들], 모드)]
-        for (cc, prof), r in resp.items():
-            if cc != c["id"] or r["pair"] in (None, "NONE"):
-                continue
-            mine = sorted(sec for sec, p in c["section_prof"].items() if p == prof)
-            c["pairs"].append((mine, r["pair"]))
+        c["pairs"] = []                          # [([분반 번호들, 교수가 적은 순서], 모드)]
+        for prof, mode, order in pair_req.get(c["id"], []):
+            if order:
+                mine = [sec for sec in order if c["section_prof"].get(sec) == prof]
+            else:
+                mine = sorted(sec for sec, p in c["section_prof"].items() if p == prof)
+            c["pairs"].append((mine, mode))
     secs = {}
     for c in courses.values():
         for sec in range(1, c["sections"] + 1):
             prof = c["section_prof"][sec]
-            r = resp.get((c["id"], prof))
+            r = resp.get((c["id"], sec, prof))
             secs[(c["id"], sec)] = dict(
                 prof=prof, responded=r is not None, enroll=c["section_enroll"][sec],
-                paired=any(sec in mine for mine, _ in c["pairs"]),
+                paired=any(sec in mine[:2] for mine, _ in c["pairs"] if len(mine) >= 2),
                 lab=r["lab"] if r else None, single_day=r["single_day"] if r else None,
                 block=r["block"] if r else set(), prefer=r["prefer"] if r else set(),
                 )
@@ -468,12 +480,15 @@ def _solve_model(con, term_id, round_id, W, time_limit, workers, prev, prevk, fr
         else:
             m.Add(0 >= 1)                                # 후보가 없음 → 불가능
 
-    # 한 교수의 두 분반 연강/교차 (교수 응답 section_pair)
+    # 한 교수의 분반 연강/교차 (pair_request). 교수가 적은 순서의 앞 두 분반만 붙인다
     for c, (mine, mode) in [(c, pr) for c in courses.values() for pr in c["pairs"]]:
-        if len(mine) != 2 or c["k"] != 1:
-            unsupported.append((c["id"], "분반 연강·교차는 그 교수가 맡은 분반이 정확히 2개이고 1회 수업이 한 칸일 때만 지원"))
+        if len(mine) < 2 or c["k"] != 1:
+            unsupported.append((c["id"], "분반 연강·교차는 그 교수가 맡은 분반이 둘 이상이고 1회 수업이 한 칸일 때만 지원"))
             continue
-        sa, sb = mine
+        if len(mine) > 2:
+            unsupported.append((c["id"], f"분반 연강·교차는 교수가 적은 순서의 앞 두 분반({mine[0]}·{mine[1]})만 붙입니다. "
+                                         f"나머지 분반({', '.join(map(str, mine[2:]))})은 조교가 수동 배치·고정하세요"))
+        sa, sb = mine[:2]
         S = c["sessions"]
         K = lambda sec, ss: (c["id"], sec, ss, 1)
         if any(K(sa, ss) not in unplaced or K(sb, ss) not in unplaced for ss in range(1, S + 1)):
@@ -643,7 +658,7 @@ def solve(con, term_id, round_id, weights=None, time_limit=30, workers=8,
 
 
 def alternatives(con, term_id, round_id, timetable_id, course_id, section_no=None, condition=None,
-                 n=3, time_limit=15, weights=None, workers=8):
+                 n=3, time_limit=15, weights=None, workers=8, exclude_sent=True):
     """못 놓은(또는 바꿔야 할) 과목·분반의 대안 n개.
     section_no를 주면 그 분반만, 안 주면 과목의 모든 분반을 새로 놓는다.
     condition(조율 쪽에서 넘기는 모양, 모두 선택 사항):
@@ -660,7 +675,8 @@ def alternatives(con, term_id, round_id, timetable_id, course_id, section_no=Non
                                          안에서 days/slot_ids로 바뀐다. end_before는 그대로 쓴다.}
     1단계: 다른 수업은 그대로 두고 대상만 새로 놓는다.
     2단계(모자라면): 같은 교수의 다른 수업과, 대상과 겹칠 수 없는 같은 학년 필수과목(교필↔전필, 분반 하나인 전필↔전필)까지 움직일 수 있게 하고, 움직인 수업을 함께 알려 준다.
-    같은 분반 칸 집합이 같은 안(회차 순서만 다른 안)은 하나로 본다.
+    같은 분반 칸 집합이 같은 안(회차 순서만 다른 안, 강의실만 다른 안)은 하나로 본다.
+    exclude_sent: 그 분반에 이미 보낸 대안(이전 차수 포함, 답 기다림 이후 상태의 안건)과 같은 안은 다시 내지 않는다(11/25).
     반환: [dict(stage, placements{(분반,회차):(시작칸,강의실)}, ks{(분반,회차):칸 수}, moves[(키,이전,이후)], objective)]"""
     W = {**DEFAULT_WEIGHTS, **(weights or {})}
     prev, prevk = load_assignment(con, timetable_id)
@@ -678,6 +694,8 @@ def alternatives(con, term_id, round_id, timetable_id, course_id, section_no=Non
     cur = {k: v[0] for k, v in prev.items() if (k[0], k[1]) in t_secs}
     if cur:
         forbid.append((cur, 0))                              # 현재 배정과 같은 안은 대안이 아니다
+    if exclude_sent:
+        forbid += [(m, 0) for m in _sent_mappings(con, term_id, course_id, t_secs)]   # 이미 보낸 대안도 아니다
     for stage_name, free in stages:
         if len(results) >= n:
             break
@@ -710,6 +728,22 @@ def alternatives(con, term_id, round_id, timetable_id, course_id, section_no=Non
                                 moves=moves, objective=out["objective"]))
             forbid.append((mapping, 0))
     return results
+
+
+def _sent_mappings(con, term_id, course_id, t_secs):
+    """그 분반들에 이미 보낸 대안(같은 학기, 이전 차수 포함) → forbid 모양 [{(과목, 분반, 회차): 시작칸}].
+    보내기 전(OPEN)·조교 선택 대기(HOLD)·대안 없음(NO_OPTION) 안건의 대안은 보내지 않았으므로 빼지 않는다.
+    대상 분반을 모두 담은 대안만 비교한다."""
+    out = []
+    for (oid,) in con.execute("""SELECT o.id FROM proposal_option o JOIN proposal p ON p.id = o.proposal_id
+                                 JOIN round r ON r.id = p.round_id
+                                 WHERE r.term_id=? AND p.course_id=? AND p.status NOT IN ('OPEN','HOLD','NO_OPTION')""",
+                              (term_id, course_id)).fetchall():
+        o = load_option(con, oid)
+        m = {(course_id, sec, ss): st for (sec, ss), (st, _) in o["placements"].items() if (course_id, sec) in t_secs}
+        if m and {(c, s) for c, s, _ in m} == set(t_secs):
+            out.append(m)
+    return out
 
 
 def _targets(courses, secs, course_id, section_no):
@@ -774,7 +808,7 @@ def pick_best(con, term_id, round_id, timetable_id, course_id, section_no=None, 
         cands.append(("ABC"[o["option_no"] - 1] if 1 <= o["option_no"] <= 3 else "ETC", oid, o["slots"]))
     if condition:
         new = alternatives(con, term_id, round_id, timetable_id, course_id, section_no, condition=condition,
-                           n=1, time_limit=time_limit, weights=weights, workers=workers)
+                           n=1, time_limit=time_limit, weights=weights, workers=workers, exclude_sent=False)
         if new:
             slots = set()
             for (sec, ss), (start, _) in new[0]["placements"].items():
@@ -820,7 +854,7 @@ def check_timetable(con, timetable_id):
     교수 겹침, 불가 칸, 정원, 실습실, 채플, 교필↔전필, 전필↔전필(분반 기준), 18:00 이후 시작 연강."""
     q = lambda sql: con.execute(sql, (timetable_id,)).fetchall()
     prof_sql = "COALESCE((SELECT professor_id FROM course_section WHERE course_id=a.course_id AND section_no=a.section_no), c.professor_id)"
-    resp_sql = f"""(SELECT id FROM course_response WHERE course_id=a.course_id AND professor_id={prof_sql}
+    resp_sql = f"""(SELECT id FROM course_response WHERE course_id=a.course_id AND section_no=a.section_no AND professor_id={prof_sql}
                      ORDER BY round_id DESC, id DESC LIMIT 1)"""
     out = []
     for prof, sid, n in q("SELECT professor_id, slot_id, n FROM v_professor_conflict WHERE timetable_id=?"):
@@ -908,15 +942,28 @@ def _signature(mapping):
 make_alternatives = alternatives          # 조율 쪽 이름
 
 
-def save_proposal(con, round_id, timetable_id, course_id, options, reason="", section_no=None):
-    """alternatives() 결과를 proposal 테이블에 저장한다. 조교가 교수에게 보낼 메시지의 근거가 된다."""
-    pid = con.execute("INSERT INTO proposal(round_id, timetable_id, course_id, section_no, reason) VALUES (?,?,?,?,?)",
-                      (round_id, timetable_id, course_id, section_no, reason)).lastrowid
+def _day_ids(con, timetable_id):
+    """그 시간표 학기의 요일 -> [칸 id, 교시 순]"""
     by_day = defaultdict(list)
     for sid, day in con.execute("""SELECT ts.id, ts.day FROM time_slot ts
              JOIN term t ON t.grid_id=ts.grid_id JOIN timetable tt ON tt.term_id=t.id
              WHERE tt.id=? ORDER BY ts.day, ts.period_no""", (timetable_id,)):
         by_day[day].append(sid)
+    return by_day
+
+
+def save_proposal(con, round_id, timetable_id, course_id, options, reason="", section_no=None,
+                  target_kind=None, status=None):
+    """alternatives() 결과를 proposal 테이블에 저장한다. 조교가 교수에게 보낼 메시지의 근거가 된다.
+    target_kind: 조율 대상 종류 UNPLACED / MISMATCH / PARTIAL (coord_targets).
+    status: 없으면 OPEN. HOLD(조교 선택 대기)처럼 직접 줄 수 있다.
+            대안이 하나도 없으면 무엇을 주든 NO_OPTION (메시지를 보내지 않고 조교가 확인)."""
+    if not options:
+        status = "NO_OPTION"
+    pid = con.execute("INSERT INTO proposal(round_id, timetable_id, course_id, section_no, reason, status, target_kind) "
+                      "VALUES (?,?,?,?,?,?,?)",
+                      (round_id, timetable_id, course_id, section_no, reason, status or "OPEN", target_kind)).lastrowid
+    by_day = _day_ids(con, timetable_id)
     for no, opt in enumerate(options, 1):
         _write_option(con, pid, no, opt, by_day)
     con.commit()
@@ -940,15 +987,118 @@ def add_option(con, proposal_id, option, source="SOLVER"):
     row = con.execute("SELECT timetable_id FROM proposal WHERE id=?", (proposal_id,)).fetchone()
     if row is None:
         raise ValueError(f"없는 조율 안건: {proposal_id}")
-    by_day = defaultdict(list)
-    for sid, day in con.execute("""SELECT ts.id, ts.day FROM time_slot ts
-             JOIN term t ON t.grid_id=ts.grid_id JOIN timetable tt ON tt.term_id=t.id
-             WHERE tt.id=? ORDER BY ts.day, ts.period_no""", (row[0],)):
-        by_day[day].append(sid)
+    by_day = _day_ids(con, row[0])
     no = con.execute("SELECT COALESCE(MAX(option_no), 0) + 1 FROM proposal_option WHERE proposal_id=?", (proposal_id,)).fetchone()[0]
     oid = _write_option(con, proposal_id, no, option, by_day, source)
     con.commit()
     return oid
+
+
+TARGET_KINDS = {"UNPLACED": "못 놓음", "MISMATCH": "희망에서 어긋남", "PARTIAL": "일부 어긋남"}
+
+
+def coord_targets(con, term_id, round_id, timetable_id):
+    """조율 메시지를 보낼 대상 분반 (11/25).
+      UNPLACED 못 놓음         회차가 하나라도 시간표에 없음                          → 대안과 함께 자동으로 보냄
+      MISMATCH 희망에서 어긋남  모든 회차가 희망 칸 밖, 또는 모든 회차가 희망 건물 밖  → 대안과 함께 자동으로 보냄
+      PARTIAL  일부 어긋남      일부 회차만 희망 칸 밖 또는 희망 건물 밖                → 보내지 않고 조교 화면에 (조교가 골라 보냄)
+    - 한 회차가 희망 칸에 맞다 = 그 회차가 차지한 칸이 모두 그 분반 응답의 희망(PREFER) 칸.
+      희망 칸을 칠하지 않은 분반(미회신 포함)은 시간으로는 대상이 아니다.
+    - 한 회차가 희망 건물에 맞다 = 그 회차 강의실이 담당 교수의 희망 건물(professor_building_pref).
+      희망 건물이 없는 교수는 건물로는 대상이 아니다. (미회신 교수의 전년도 건물은 희망이 아니므로 보지 않는다)
+    - 고정된 분반(locked)·조교가 정한 분반(MANUAL)은 뺀다.
+    -> [dict(course_id, section_no, kind, reason, time_off=[회차], building_off=[회차])], 못 놓음·어긋남·일부 순"""
+    _, courses, secs, rooms, pref, slot_info = load_input(con, term_id, round_id)
+    skip = {(c, s) for c, s in con.execute(
+        "SELECT course_id, section_no FROM timetable_section WHERE timetable_id=? AND (locked=1 OR status='MANUAL')",
+        (timetable_id,))}
+    cells = defaultdict(lambda: defaultdict(list))       # (과목, 분반) -> 회차 -> [(칸, 강의실)]
+    for cid, sec, ss, sid, room in con.execute(
+            "SELECT course_id, section_no, session_no, slot_id, room_id FROM assignment WHERE timetable_id=?", (timetable_id,)):
+        cells[(cid, sec)][ss].append((sid, room))
+    bname = dict(con.execute("SELECT id, name FROM building").fetchall())
+
+    def when(cs):
+        d, _, st, _ = slot_info[min(cs, key=lambda x: slot_info[x[0]][1])[0]]
+        return f"{d} {st}"
+    out = []
+    for (cid, sec), sd in sorted(secs.items()):
+        if (cid, sec) in skip:
+            continue
+        c = courses[cid]
+        sess = cells.get((cid, sec), {})
+        if sum(len(v) for v in sess.values()) < c["sessions"] * c["k"]:
+            out.append(dict(course_id=cid, section_no=sec, kind="UNPLACED", reason="시간표에 놓지 못함",
+                            time_off=[], building_off=[]))
+            continue
+        time_off = [ss for ss, cs in sorted(sess.items())
+                    if sd["prefer"] and not all(sid in sd["prefer"] for sid, _ in cs)]
+        bp = pref.get(sd["prof"])
+        bld_off = [ss for ss, cs in sorted(sess.items())
+                   if bp is not None and any(rooms[r]["bld"] != bp for _, r in cs)]
+        if not time_off and not bld_off:
+            continue
+        n = len(sess)
+        kind = "MISMATCH" if len(time_off) == n or len(bld_off) == n else "PARTIAL"
+        why = []
+        if time_off:
+            why.append("희망 시간 밖: " + ", ".join(when(sess[ss]) for ss in time_off))
+        if bld_off:
+            why.append(f"희망 건물({bname.get(bp, bp)}) 밖: " + ", ".join(when(sess[ss]) for ss in bld_off))
+        out.append(dict(course_id=cid, section_no=sec, kind=kind, reason=" / ".join(why),
+                        time_off=time_off, building_off=bld_off))
+    order = {"UNPLACED": 0, "MISMATCH": 1, "PARTIAL": 2}
+    out.sort(key=lambda t: (order[t["kind"]], t["course_id"], t["section_no"]))
+    return out
+
+
+def open_coord_proposals(con, term_id, round_id, timetable_id, n=3, time_limit=15, weights=None, workers=8,
+                         targets=None):
+    """조율 대상(coord_targets, 또는 targets 로 준 목록)마다 대안 n개를 만들어 안건으로 저장한다 (11/25).
+      UNPLACED·MISMATCH → OPEN       서버가 대안 A·B·C와 함께 자동으로 보낸다
+      PARTIAL           → HOLD       보내지 않고 조교 화면에. 조교가 고르면 db.release_hold(send=True) → OPEN → 보냄
+      대안이 하나도 없음 → NO_OPTION  종류와 상관없이 메시지를 보내지 않는다. 조교가 db.ack_no_option 으로
+                                      '대안이 없어 보내지 못함'을 확인하면 OFFLINE(따로 연락) → db.manual_place
+    - 같은 차수에 그 분반의 안건이 이미 있으면 다시 열지 않는다(두 번 불러도 안전).
+    - 대안은 그 분반에 이미 보낸 대안과 겹치지 않는다(alternatives exclude_sent).
+    -> [dict(proposal_id, course_id, section_no, kind, status, options)]"""
+    out = []
+    for t in (targets if targets is not None else coord_targets(con, term_id, round_id, timetable_id)):
+        cid, sec, kind = t["course_id"], t["section_no"], t["kind"]
+        if con.execute("SELECT 1 FROM proposal WHERE round_id=? AND course_id=? AND section_no IS ?",
+                       (round_id, cid, sec)).fetchone():
+            continue
+        opts = alternatives(con, term_id, round_id, timetable_id, cid, sec, n=n, time_limit=time_limit,
+                            weights=weights, workers=workers)
+        pid = save_proposal(con, round_id, timetable_id, cid, opts, reason=t.get("reason", ""), section_no=sec,
+                            target_kind=kind, status="HOLD" if kind == "PARTIAL" else "OPEN")
+        st = con.execute("SELECT status FROM proposal WHERE id=?", (pid,)).fetchone()[0]
+        out.append(dict(proposal_id=pid, course_id=cid, section_no=sec, kind=kind, status=st, options=len(opts)))
+    return out
+
+
+def fill_options(con, proposal_id, condition=None, n=3, time_limit=15, weights=None, workers=8):
+    """다음 차수 안건(db.open_next_proposal 로 연 OPEN 안건, 대안 없음)에 대안 n개를 채운다.
+    condition 은 이어받은 조건(db.carried_conditions). 이미 보낸 대안(이전 차수 포함)과 같은 안은 내지 않는다.
+    대안이 하나도 없으면 안건을 NO_OPTION(보내지 않음, 조교 확인)으로 바꾼다. -> 채운 대안 수"""
+    row = con.execute("""SELECT p.round_id, p.timetable_id, p.course_id, p.section_no, p.status, r.term_id
+                         FROM proposal p JOIN round r ON r.id = p.round_id WHERE p.id=?""", (proposal_id,)).fetchone()
+    if row is None:
+        raise ValueError(f"없는 조율 안건: {proposal_id}")
+    round_id, tt, cid, sec, status, term_id = row
+    if status != "OPEN":
+        raise ValueError(f"보내기 전(OPEN) 안건만 대안을 채웁니다: 안건 {proposal_id} 상태 {status}")
+    if con.execute("SELECT 1 FROM proposal_option WHERE proposal_id=?", (proposal_id,)).fetchone():
+        raise ValueError(f"이미 대안이 있는 안건입니다: 안건 {proposal_id}")
+    opts = alternatives(con, term_id, round_id, tt, cid, sec, condition=condition, n=n, time_limit=time_limit,
+                        weights=weights, workers=workers)
+    by_day = _day_ids(con, tt)
+    for no, opt in enumerate(opts, 1):
+        _write_option(con, proposal_id, no, opt, by_day)
+    if not opts:
+        con.execute("UPDATE proposal SET status='NO_OPTION' WHERE id=?", (proposal_id,))
+    con.commit()
+    return len(opts)
 
 
 def finalize(con, timetable_id):

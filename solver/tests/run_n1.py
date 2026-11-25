@@ -7,7 +7,7 @@ tt = r['timetable_id']; verify(c, tt); pair_check(c, tt, modes)
 # 연강 응답별 결과
 for pref in ('MUST','NONE',None):
     q = """SELECT COUNT(*), SUM(n=2) FROM (SELECT a.course_id, a.section_no, a.session_no, COUNT(*) n FROM assignment a WHERE a.timetable_id=? GROUP BY 1,2,3) s
-           JOIN course c ON c.id=s.course_id LEFT JOIN course_response cr ON cr.course_id=c.id AND cr.professor_id=COALESCE((SELECT professor_id FROM course_section WHERE course_id=s.course_id AND section_no=s.section_no), c.professor_id)
+           JOIN course c ON c.id=s.course_id LEFT JOIN course_response cr ON cr.course_id=c.id AND cr.section_no=s.section_no AND cr.professor_id=COALESCE((SELECT professor_id FROM course_section WHERE course_id=s.course_id AND section_no=s.section_no), c.professor_id)
            WHERE """ + ("cr.single_day_pref IS NULL" if pref is None else f"cr.single_day_pref='{pref}'")
     n, longn = c.execute(q, (tt,)).fetchone()
     print(f"  연강 응답 {pref}: 회차 {n}개 중 연속 2칸 {longn or 0}개")

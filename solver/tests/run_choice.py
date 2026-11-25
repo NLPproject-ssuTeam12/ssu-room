@@ -24,7 +24,7 @@ cid, prof, other = c.execute("""SELECT s.course_id, s.professor_id, (SELECT MIN(
                                        WHERE s2.professor_id=s.professor_id AND s2.course_id<>s.course_id)
                                 FROM course_section s JOIN course_response r ON r.course_id=s.course_id AND r.professor_id=s.professor_id
                                 WHERE (SELECT COUNT(*) FROM course_section x WHERE x.course_id=s.course_id)=1
-                                  AND r.single_day_pref='NONE' AND r.section_pair='NONE'
+                                  AND r.single_day_pref='NONE'
                                   AND EXISTS (SELECT 1 FROM course_section s2 WHERE s2.professor_id=s.professor_id AND s2.course_id<>s.course_id)
                                 ORDER BY s.course_id LIMIT 1""").fetchone()
 print(f"대상: 과목{cid} (교수 {prof}, 같은 교수의 다른 과목 {other})")
