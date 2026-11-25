@@ -160,6 +160,26 @@
 - 되는 시간 없이 거절하면 다음 차수에 넘길 조건이 없다. 시스템이 조건을 지어내지 않고 조교가 교수와 직접 정한다 (11/25, 예전에는 조건 없이 `next`를 내서 DB 저장 오류가 났음)
 - 처리안 문구 끝에는 교수 요청(`note`)이 "교수님 요청: …"으로 붙는다. 시간표 밖 요청(실습 조교 등)은 서버가 하윤 `db.add_reply_request`로 기타 요청 표에 남기고, 분반 연강·교차 요청은 조교 [확인](`pair`)으로 반영한다
 
+## 서버 연결 할 일 (#19 기준, 대원)
+
+#19(`choices`·`ordered`·`decide`/[따로 연락]·`keep`·`current`)가 main에 들어가면 서버에서 맞출 곳. main `ebd99ab` 기준으로 확인함.
+
+| # | 파일 | 할 일 | 안 하면 |
+|---|---|---|---|
+| 1 | `stubs.py` `parse_reply` | 인자 모양을 진짜와 똑같이: `parse_reply(text, choice=None, *, choices=None, alternatives=None, message="", method="keyword", can_keep=False)` | `engine.py`의 `signature_diff`가 모양이 다르다고 보고 **가짜 함수로 바꿔 씀** (경고만 남음) |
+| 2 | `contracts.py` 사본 | `ReplyParse`에 `ordered: bool = False`, `keep: bool = False`, `fallback_reason: str = ""` / `MessageInput`에 `current: Optional[str] = None` / `Proposal.action`에 `"keep"` | 사본으로 다시 읽거나 저장할 때 칸이 빠지거나 `keep` 처리안이 검증 오류 |
+| 3 | `main.py` `ReplyIn` | `choices: Optional[List[Literal["A", "B", "C", "ETC", "KEEP"]]]` 추가(예전 `choice`는 남겨도 됨), "글이나 버튼 하나는 있어야" 검사를 `choices`까지, `ETC`면 글 필수 | 여러 개 누름·기타·지금 자리 그대로를 받을 수 없음 |
+| 4 | `main.py` `post_reply` | `engine.parse_reply(body.text, body.choice, choices=body.choices, alternatives=alts, message=..., method=..., can_keep=<지금 자리 있음>)` | 버튼 값이 해석에 안 들어감 |
+| 5 | `store.py` `message_input` | 희망 밖에라도 놓인 분반(11/25 결정 2·3번)은 `current`에 지금 자리를 넣는다. 모양은 대안 줄과 같게: 지금 배정을 `Alternative`로 만들어 `coord.alt_label`에 넣으면 됨 (`"화·목 10:30~11:45 · 정보과학관 21304"`). 못 놓인 분반은 `None` | 메시지에 지금 자리 줄이 안 나오고, 교수 화면에 `KEEP` 버튼을 띄울 근거가 없음 |
+| 6 | 교수 답장 화면 | `current`가 있던 분반만 `KEEP`(지금 자리 그대로) 버튼을 보여 준다 | 못 놓인 분반에서 KEEP이 눌릴 수 있음 |
+| 7 | `main.py` `post_decide` | 처리안이 `keep`이면 [확인] = [현재대로 유지] (`state="KEPT"`, DB는 `decide_reply(..., 'KEEP')`). 지금은 `move`가 아니면 [확인]이 409 | 교수가 지금 자리를 골랐는데 조교 [확인]이 막힘 |
+| 8 | `main.py` `post_decide` | 처리안이 `move`이고 `picks`가 둘 이상이면 하윤 `pick_best(option_ids=picks, respect_order=ordered)`로 최종 안을 고른다 (#18) | 교수가 밝힌 순서를 무시하거나, 그사이 못 쓰게 된 안을 고를 수 있음 |
+| 9 | `main.py` `DecideIn`·`post_decide` | 조교 선택에 [따로 연락] 추가 → DB `decide_reply(..., 'OFFLINE')`, 조교가 칸을 정하면 `manual_place`(하윤 #17). `decide` 처리안 문구가 이 버튼을 가리킨다 | 되는 시간 없는 거절·3차 끝을 조교가 닫을 길이 [수정]·[현재대로 유지]뿐 |
+
+- 1·2번은 #19 병합과 같이 해야 한다. 7번 이후는 화면(민우)·DB 연결 때 같이 해도 된다
+- 8번 `pick_best`는 #18(`feat/pick-order`, `solver_core.pick_best`), 9번 `OFFLINE`·`manual_place`는 #17(`feat/reply-choice`, migration 007)이 병합돼야 쓸 수 있다 (11/25 밤 기준 둘 다 병합 전)
+- #19와 별개: 11/25 결정의 "메시지 보낼 분반 고르기"(못 놓음 + 희망 칸 하나도 못 받음만 자동, 희망 일부만은 조교 표시, 대안 0개면 따로 연락)는 서버가 분반을 고르는 일이라 조율 함수 밖이다
+
 ## DB에 남길 것 (하윤 스키마 기준 제안)
 
 | 값 | 테이블.칸 |
