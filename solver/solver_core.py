@@ -29,10 +29,16 @@ DB(schema.sql)에서 입력을 읽어 초안 시간표를 만들고 같은 DB에
   시간: 19:30 교시는 큰 감점(late), 18:00 이후 시작하는 연속 2칸 이상 수업은 놓지 않는다(하드).
   실습실: 1(쓴다 → 실습실만 배정) / 0(안 쓴다 → 실습실 쓰면 약한 벌점). 희망 칸: PREFER(희망)/BLOCK(불가), 칠하지 않으면 상관없음
 
+  고정: 이전 시간표에서 고정(timetable_section.locked=1)된 분반은 모든 풀이(부분 재풀이·대안·전체 재풀이)에서 움직이지 않는다.
+        조교가 교수와 따로 정해 수동 배치한 분반이 규칙을 어겨도 풀이가 막히지 않도록, 고정된 수업끼리의 위반은 그대로 두고
+        나머지 수업만 피하게 한다.
+
 공개 함수
   solve(...)          전체 풀이 또는 일부 과목·분반만 다시 풀기(free_courses)
   alternatives(...)   못 놓은 과목(분반)의 대안 N개. 조율 쪽 조건(days/window/end_before 또는 slot_ids)을 받는다
-  save_proposal(...)  대안을 proposal 테이블에 저장
+  pick_best(...)      교수가 고른 대안(여러 개 가능)과 기타 조건으로 만든 안 중 점수가 가장 좋은 안
+  check_timetable(...) 시간표의 하드 규칙 위반 목록 (조교 수동 배치 경고용)
+  save_proposal(...)  대안을 proposal 테이블에 저장 / add_option(...) 안건에 대안 하나 더
   finalize(...)       시간표를 FINAL로 확정 (다음 해의 건물·강의실 기본값이 됨)
 """
 import json
@@ -248,13 +254,14 @@ def _structures(c, sd):
 
 # ---------------------------------------------------------------- 모델
 def _solve_model(con, term_id, round_id, W, time_limit, workers, prev, prevk, free,
-                 seed, forbid=None, must_sections=None, cond=None, cond_sections=None):
+                 seed, forbid=None, must_sections=None, cond=None, cond_sections=None, locked=None):
     """모델을 만들어 풀고 결과를 메모리로 돌려준다(DB에는 쓰지 않음).
     prev/prevk: 이전 시간표 {(과목,분반,회차): (시작칸, 강의실)} / {(과목,분반,회차): 칸 수}
     free: None이면 전부 새로 풀고, 집합(과목 id 또는 (과목,분반))이면 그 분반만 풀고 나머지는 prev 그대로 고정
     forbid: [(dict(세션키 -> 시작칸), 허용되는 같은 칸 수)]  대안끼리 달라지게 하는 금지 조건
     must_sections: 모든 회차를 반드시 놓아야 하는 (과목, 분반) 집합
-    cond/cond_sections: 조율 쪽 조건(요일·시간대)과 그것이 적용될 (과목, 분반) 집합"""
+    cond/cond_sections: 조율 쪽 조건(요일·시간대)과 그것이 적용될 (과목, 분반) 집합
+    locked: 고정된 (과목, 분반) 집합. free 에 들어 있어도 prev 그대로 둔다"""
     by_day, courses, secs, rooms, pref, slot_info = load_input(con, term_id, round_id)
     hist_bld, hist_room = load_history(con, term_id)
     classes, room2class = make_classes(rooms)
@@ -268,6 +275,7 @@ def _solve_model(con, term_id, round_id, W, time_limit, workers, prev, prevk, fr
 
     m = cp_model.CpModel()
     x, cost = {}, {}
+    fixed = set()                               # 고정된 수업의 변수 번호 (항상 1)
     occ_room, occ_prof = defaultdict(list), defaultdict(list)
     occ_req = defaultdict(lambda: defaultdict(list))   # (학과, 학년, 칸, 교필/전필) -> 변수들
     maj_sec = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))   # (학과, 학년) -> 전필 과목 -> (분반, 칸) -> 변수들
@@ -309,7 +317,9 @@ def _solve_model(con, term_id, round_id, W, time_limit, workers, prev, prevk, fr
             structs = _structures(c, sd)
             ps = sorted((ss, prevk[(cid, sec, ss)]) for ss in prev_by_sec.get((cid, sec), {}))
             matched = next((st for st in structs if sorted(st) == ps), None) if ps else None
-            frozen = (not is_free(cid, sec)) and matched is not None
+            if locked and (cid, sec) in locked and ps:   # 고정: 구성이 응답과 달라도(수동 배치) 그대로
+                matched, structs = ps, [ps]
+            frozen = ((not is_free(cid, sec)) or bool(locked and (cid, sec) in locked)) and matched is not None
             if frozen:
                 structs = [matched]
                 frozen_secs.add((cid, sec))
@@ -363,6 +373,8 @@ def _solve_model(con, term_id, round_id, W, time_limit, workers, prev, prevk, fr
                                         continue
                                 var = m.NewBoolVar(f"x{skey}{covered[0]}_{cl['id']}")
                                 x[(skey, covered[0], cl["id"])] = var
+                                if frozen:
+                                    fixed.add(var.Index())
                                 day_terms[skey].append(day_idx[day] * var)     # 이 회차의 요일 번호
                                 per_terms[skey].append(chunk[0][0] * var)      # 이 회차의 교시 번호
                                 feasible.append(var)
@@ -400,12 +412,13 @@ def _solve_model(con, term_id, round_id, W, time_limit, workers, prev, prevk, fr
                     if frozen or (must_sections and (cid, sec) in must_sections):
                         m.Add(un == 0)                       # 고정된 수업·반드시 놓을 수업은 빠질 수 없다
 
+    nfix = lambda vs: sum(1 for v in vs if v.Index() in fixed)
     cap_of = {cl["id"]: len(cl["rooms"]) for cl in classes}
     for (clid, sid), vs in occ_room.items():
         if len(vs) > cap_of[clid]:
-            m.Add(sum(vs) <= cap_of[clid])               # 같은 칸에 그 묶음의 방 수보다 많이 못 씀
+            m.Add(sum(vs) <= max(cap_of[clid], nfix(vs)))   # 같은 칸에 그 묶음의 방 수보다 많이 못 씀 (고정끼리 넘친 것은 그대로)
     for vs in occ_prof.values():
-        if len(vs) > 1: m.Add(sum(vs) <= 1)              # 같은 교수 동시 수업 불가
+        if len(vs) > 1: m.Add(sum(vs) <= max(1, nfix(vs)))  # 같은 교수 동시 수업 불가 (고정끼리 겹친 것은 그대로)
     for vs in day_use.values():
         if len(vs) > 1: m.Add(sum(vs) <= 1)              # 같은 분반은 하루 한 번
     def _any(vs, name):                          # vs 중 하나라도 1이면 1 (겹침 금지 제약에만 쓰므로 한 방향이면 충분)
@@ -416,7 +429,12 @@ def _solve_model(con, term_id, round_id, W, time_limit, workers, prev, prevk, fr
     for (dept, yr, sid), by_cat in occ_req.items():   # 같은 학과·학년 교양필수 ↔ 전공필수 불가
         maj, gen = by_cat.get(MAJOR_REQUIRED), by_cat.get(GENERAL_REQUIRED)
         if maj and gen:
-            m.Add(_any(gen, f"gen{dept}_{yr}_{sid}") + _any(maj, f"maj{dept}_{yr}_{sid}") <= 1)
+            if nfix(gen) and nfix(maj):                  # 고정끼리 이미 겹침 → 그 칸에는 다른 수업을 더 넣지 않음
+                for v in gen + maj:
+                    if v.Index() not in fixed:
+                        m.Add(v == 0)
+            else:
+                m.Add(_any(gen, f"gen{dept}_{yr}_{sid}") + _any(maj, f"maj{dept}_{yr}_{sid}") <= 1)
     for (dept, yr), by_course in maj_sec.items():     # 같은 학과·학년의 서로 다른 전공필수 과목
         ids = sorted(by_course)
         for i, a in enumerate(ids):
@@ -430,14 +448,19 @@ def _solve_model(con, term_id, round_id, W, time_limit, workers, prev, prevk, fr
                             vb = by_course[b].get((sb, sid)) if s1 == sa else None
                             if vb:                       # 한 분반은 한 칸에 많아야 한 번 → 합이 0/1
                                 m.Add(sum(va) + sum(vb) - 1 <= o)
+                fa = {sa: (a, sa) in frozen_secs for sa in range(1, na + 1)}   # 고정끼리의 위반은 그대로 둔다
+                fb = {sb: (b, sb) in frozen_secs for sb in range(1, nb + 1)}
                 if na == 1 or nb == 1:                   # 한쪽이라도 분반 하나 → 전혀 겹치지 않음
-                    for o in ov.values():
-                        m.Add(o == 0)
+                    for (sa, sb), o in ov.items():
+                        if not (fa[sa] and fb[sb]):
+                            m.Add(o == 0)
                 else:                                    # 분반마다 안 겹치는 상대 분반이 하나 이상
                     for sa in range(1, na + 1):
-                        m.Add(sum(ov[(sa, sb)] for sb in range(1, nb + 1)) <= nb - 1)
+                        if not (fa[sa] and all(fb.values())):
+                            m.Add(sum(ov[(sa, sb)] for sb in range(1, nb + 1)) <= nb - 1)
                     for sb in range(1, nb + 1):
-                        m.Add(sum(ov[(sa, sb)] for sa in range(1, na + 1)) <= na - 1)
+                        if not (fb[sb] and all(fa.values())):
+                            m.Add(sum(ov[(sa, sb)] for sa in range(1, na + 1)) <= na - 1)
     if cond_single_day is not None:
         if cond_day_vars:
             m.Add(sum(cond_day_vars) >= 1)               # 요일이 하나면 그 요일이 들어간 안
@@ -490,7 +513,8 @@ def _solve_model(con, term_id, round_id, W, time_limit, workers, prev, prevk, fr
     status = s.Solve(m)
     status_name = s.StatusName(status)
     out = dict(status=status_name, unsupported=unsupported, courses=courses, secs=secs, rooms=rooms,
-               classes=classes, room2class=room2class, by_day=by_day, hist_room=hist_room)
+               classes=classes, room2class=room2class, by_day=by_day, hist_room=hist_room,
+               locked={k for k in (locked or ()) if k in frozen_secs}, slot_info=slot_info)
     if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
         out.update(placements=None, ks=None, unplaced=[], objective=None, seconds=s.WallTime())
         return out
@@ -571,14 +595,24 @@ def _persist(con, out, term_id, round_id, W, time_limit, previous_timetable_id, 
     for c in courses.values():
         n = c["sections"]
         for sec in range(1, n + 1):
-            con.execute("INSERT INTO timetable_section(timetable_id, course_id, section_no, planned_enrollment) VALUES (?,?,?,?)",
-                        (tt, c["id"], sec, out["secs"][(c["id"], sec)]["enroll"]))
+            lk = (c["id"], sec) in out.get("locked", ())          # 고정된 분반은 새 시간표에서도 고정(MANUAL)
+            con.execute("INSERT INTO timetable_section(timetable_id, course_id, section_no, planned_enrollment, status, locked) "
+                        "VALUES (?,?,?,?,?,?)",
+                        (tt, c["id"], sec, out["secs"][(c["id"], sec)]["enroll"], "MANUAL" if lk else "DONE", int(lk)))
     sorted_days = {d: sorted(p) for d, p in by_day.items()}
     for key, (start, room_id) in out["placements"].items():
         for sid in _covered(start, out["ks"][key], sorted_days):
             con.execute("INSERT INTO assignment VALUES (?,?,?,?,?,?)", (tt, key[0], key[1], key[2], sid, room_id))
     con.commit()
     return run_id, tt
+
+
+def load_locked(con, timetable_id):
+    """그 시간표에서 고정된 (과목, 분반) 집합."""
+    if not timetable_id:
+        return set()
+    return {(c, s) for c, s in con.execute(
+        "SELECT course_id, section_no FROM timetable_section WHERE timetable_id=? AND locked=1", (timetable_id,))}
 
 
 def _covered(start, k, sorted_days):
@@ -600,7 +634,8 @@ def solve(con, term_id, round_id, weights=None, time_limit=30, workers=8,
     if free_courses is not None and not prev:
         raise ValueError("free_courses는 previous_timetable_id와 함께 써야 합니다")
     out = _solve_model(con, term_id, round_id, W, time_limit, workers, prev, prevk,
-                       set(free_courses) if free_courses is not None else None, seed)
+                       set(free_courses) if free_courses is not None else None, seed,
+                       locked=load_locked(con, previous_timetable_id))
     run_id, tt = _persist(con, out, term_id, round_id, W, time_limit, previous_timetable_id, created_by)
     return dict(status=out["status"], run_id=run_id, timetable_id=tt, unplaced=out["unplaced"],
                 objective=out["objective"], seconds=out["seconds"], unsupported=out["unsupported"])
@@ -631,18 +666,10 @@ def alternatives(con, term_id, round_id, timetable_id, course_id, section_no=Non
     _, courses, secs, _, _, slot_info = load_input(con, term_id, round_id)
     if condition and condition.get("day_slots") is not None:
         condition = _apply_day_slots(condition, slot_info)
-    target = courses[course_id]
-    t_secs = {(course_id, s) for s in (range(1, target["sections"] + 1) if section_no is None else [section_no])}
-    t_profs = {secs[ts]["prof"] for ts in t_secs}
-    expanded = set(t_secs)
-    req = {MAJOR_REQUIRED: GENERAL_REQUIRED, GENERAL_REQUIRED: MAJOR_REQUIRED}
-    for (cid, sec), sd in secs.items():
-        c = courses[cid]
-        same_cohort = c["dept"] == target["dept"] and c["year"] and str(c["year"]) == str(target["year"]) and cid != course_id
-        blocks = (target["cat"] in req and c["cat"] == req[target["cat"]]) or (   # 겹칠 수 없는 같은 학년 교필↔전필
-            target["cat"] == c["cat"] == MAJOR_REQUIRED)                          # 다른 전필 과목
-        if sd["prof"] in t_profs or (same_cohort and blocks):
-            expanded.add((cid, sec))
+    t_secs, expanded = _targets(courses, secs, course_id, section_no)
+    locked = load_locked(con, timetable_id)
+    if t_secs & locked:
+        raise ValueError(f"고정된 분반은 대안을 만들지 않습니다: {sorted(t_secs & locked)}. 고정을 먼저 푸세요(db.set_lock)")
     stages = [("다른 수업은 그대로", t_secs),
               ("같은 교수·같은 학년 필수과목 일부 이동", expanded)]
     results = []
@@ -662,7 +689,7 @@ def alternatives(con, term_id, round_id, timetable_id, course_id, section_no=Non
                 fb = [(f, 0 if max_same == 0 else max(len(f) - 1, 0)) for f, _ in forbid]
                 out = _solve_model(con, term_id, round_id, W, time_limit, workers, prev, prevk, free,
                                    seed=len(results), forbid=fb, must_sections=must,
-                                   cond=condition, cond_sections=t_secs)
+                                   cond=condition, cond_sections=t_secs, locked=locked)
                 if out["placements"] is not None or not forbid:
                     break
             if out is None or out["placements"] is None:
@@ -682,6 +709,159 @@ def alternatives(con, term_id, round_id, timetable_id, course_id, section_no=Non
                                 moves=moves, objective=out["objective"]))
             forbid.append((mapping, 0))
     return results
+
+
+def _targets(courses, secs, course_id, section_no):
+    """대상 분반 집합과, 2단계에서 함께 움직일 수 있는 분반 집합(같은 교수 + 대상과 겹칠 수 없는 같은 학년 필수과목)."""
+    target = courses[course_id]
+    t_secs = {(course_id, s) for s in (range(1, target["sections"] + 1) if section_no is None else [section_no])}
+    t_profs = {secs[ts]["prof"] for ts in t_secs}
+    expanded = set(t_secs)
+    req = {MAJOR_REQUIRED: GENERAL_REQUIRED, GENERAL_REQUIRED: MAJOR_REQUIRED}
+    for (cid, sec), sd in secs.items():
+        c = courses[cid]
+        same_cohort = c["dept"] == target["dept"] and c["year"] and str(c["year"]) == str(target["year"]) and cid != course_id
+        blocks = (target["cat"] in req and c["cat"] == req[target["cat"]]) or (   # 겹칠 수 없는 같은 학년 교필↔전필
+            target["cat"] == c["cat"] == MAJOR_REQUIRED)                          # 다른 전필 과목
+        if sd["prof"] in t_profs or (same_cohort and blocks):
+            expanded.add((cid, sec))
+    return t_secs, expanded
+
+
+def load_option(con, option_id):
+    """저장된 대안(proposal_option) → dict(proposal_id, option_no, placements{(분반,회차):(시작칸,강의실)}, ks{(분반,회차):칸 수}, slots)"""
+    row = con.execute("SELECT proposal_id, option_no FROM proposal_option WHERE id=?", (option_id,)).fetchone()
+    if row is None:
+        raise ValueError(f"없는 대안: {option_id}")
+    cells = defaultdict(list)
+    for sec, ss, sid, room, day, per in con.execute(
+            """SELECT os.section_no, os.session_no, os.slot_id, os.room_id, ts.day, ts.period_no
+               FROM proposal_option_slot os JOIN time_slot ts ON ts.id = os.slot_id WHERE os.option_id=?""", (option_id,)):
+        cells[(sec, ss)].append((DAYS.index(day) if day in DAYS else 9, per, sid, room))
+    placements, ks, slots = {}, {}, set()
+    for key, cs in cells.items():
+        cs.sort()
+        placements[key] = (cs[0][2], cs[0][3])
+        ks[key] = len(cs)
+        slots |= {c[2] for c in cs}
+    return dict(proposal_id=row[0], option_no=row[1], placements=placements, ks=ks, slots=slots)
+
+
+def pick_best(con, term_id, round_id, timetable_id, course_id, section_no=None, option_ids=(), condition=None,
+              time_limit=15, weights=None, workers=8):
+    """교수가 고른 대안(option_ids, 여러 개 가능)과 기타 조건(condition, 있으면 그 조건에 맞는 새 안 하나)을
+    지금 시간표(timetable_id)에 넣었을 때의 점수로 비교한다. 점수는 엔진 목적함수(낮을수록 좋음), 다른 수업은 그대로.
+    고른 안이 지금은 놓을 수 없으면(그사이 다른 수업이 그 칸을 씀) 같은 교수·같은 학년 필수과목을 조금 움직여 보고,
+    그래도 안 되면 feasible=False.
+    반환: 좋은 순서 [dict(source='A'|'B'|'C'|'ETC', option_id, feasible, objective, stage, placements, ks, moves)]
+      source 'ETC' 는 기타 조건으로 만든 새 안(option_id=None, 쓰려면 add_option 으로 저장).
+      feasible 인 안이 하나도 없으면 처리안은 '조교가 정함'([수정]·[현재대로 유지]·[따로 연락])."""
+    W = {**DEFAULT_WEIGHTS, **(weights or {})}
+    prev, prevk = load_assignment(con, timetable_id)
+    by_day, courses, secs, _, _, slot_info = load_input(con, term_id, round_id)
+    sorted_days = {d: sorted(p_) for d, p_ in by_day.items()}
+    t_secs, expanded = _targets(courses, secs, course_id, section_no)
+    locked = load_locked(con, timetable_id)
+    if t_secs & locked:
+        raise ValueError(f"고정된 분반입니다: {sorted(t_secs & locked)}")
+    cands = []
+    for oid in option_ids:
+        o = load_option(con, oid)
+        cands.append(("ABC"[o["option_no"] - 1] if 1 <= o["option_no"] <= 3 else "ETC", oid, o["slots"]))
+    if condition:
+        new = alternatives(con, term_id, round_id, timetable_id, course_id, section_no, condition=condition,
+                           n=1, time_limit=time_limit, weights=weights, workers=workers)
+        if new:
+            slots = set()
+            for (sec, ss), (start, _) in new[0]["placements"].items():
+                slots |= set(_covered(start, new[0]["ks"][(sec, ss)], sorted_days))
+            cands.append(("ETC", None, slots))
+    out_list = []
+    for source, oid, slots in cands:
+        best = dict(source=source, option_id=oid, feasible=False, objective=None, stage=None,
+                    placements=None, ks=None, moves=[])
+        for stage_name, free in (("다른 수업은 그대로", t_secs), ("같은 교수·같은 학년 필수과목 일부 이동", expanded)):
+            if stage_name != "다른 수업은 그대로" and free == t_secs:
+                continue
+            must = {(k[0], k[1]) for k in prev if (k[0], k[1]) in free} | t_secs
+            out = _solve_model(con, term_id, round_id, W, time_limit, workers, prev, prevk, free, seed=0,
+                               must_sections=must, cond={"slot_ids": sorted(slots)}, cond_sections=t_secs, locked=locked)
+            if out["placements"] is None:
+                continue
+            pl = out["placements"]
+            got = set()
+            for k in pl:
+                if (k[0], k[1]) in t_secs:
+                    got |= set(_covered(pl[k][0], out["ks"][k], sorted_days))
+            if got != set(slots):                        # 고른 안의 칸을 모두 그대로 써야 그 안이다
+                continue
+            best.update(feasible=True, objective=out["objective"], stage=stage_name,
+                        placements={k[1:]: v for k, v in pl.items() if (k[0], k[1]) in t_secs},
+                        ks={k[1:]: out["ks"][k] for k in pl if (k[0], k[1]) in t_secs},
+                        moves=[(k, prev[k], pl[k]) for k in pl
+                               if k in prev and (k[0], k[1]) not in t_secs and pl[k] != prev[k]])
+            break
+        out_list.append(best)
+    out_list.sort(key=lambda d: (not d["feasible"], d["stage"] != "다른 수업은 그대로",
+                                 d["objective"] if d["objective"] is not None else 0))
+    return out_list
+
+
+def check_timetable(con, timetable_id):
+    """시간표의 하드 규칙 위반 목록 (조교 수동 배치 뒤 경고용). -> [dict(rule, course_id, section_no, detail)]
+    교수 겹침, 불가 칸, 정원, 실습실, 채플, 교필↔전필, 전필↔전필(분반 기준), 18:00 이후 시작 연강."""
+    q = lambda sql: con.execute(sql, (timetable_id,)).fetchall()
+    prof_sql = "COALESCE((SELECT professor_id FROM course_section WHERE course_id=a.course_id AND section_no=a.section_no), c.professor_id)"
+    resp_sql = f"""(SELECT id FROM course_response WHERE course_id=a.course_id AND professor_id={prof_sql}
+                     ORDER BY round_id DESC, id DESC LIMIT 1)"""
+    out = []
+    for prof, sid, n in q("SELECT professor_id, slot_id, n FROM v_professor_conflict WHERE timetable_id=?"):
+        out.append(dict(rule="교수 겹침", course_id=None, section_no=None, detail=f"교수 {prof} 칸 {sid}에 수업 {n}개"))
+    for cid, sec, sid in q(f"""SELECT a.course_id, a.section_no, a.slot_id FROM assignment a JOIN course c ON c.id=a.course_id
+                               WHERE a.timetable_id=? AND a.slot_id IN (SELECT slot_id FROM response_slot
+                                     WHERE response_id={resp_sql} AND kind='BLOCK')"""):
+        out.append(dict(rule="불가 칸", course_id=cid, section_no=sec, detail=f"칸 {sid}"))
+    for cid, sec, room, enr, cap in q("""SELECT DISTINCT a.course_id, a.section_no, r.id, s.enrollment, r.capacity FROM assignment a
+                                         JOIN course_section s ON s.course_id=a.course_id AND s.section_no=a.section_no
+                                         JOIN room r ON r.id=a.room_id WHERE a.timetable_id=? AND s.enrollment > r.capacity"""):
+        out.append(dict(rule="정원", course_id=cid, section_no=sec, detail=f"인원 {enr} > 강의실 {room} 정원 {cap}"))
+    for cid, sec, room in q(f"""SELECT DISTINCT a.course_id, a.section_no, r.id FROM assignment a JOIN course c ON c.id=a.course_id
+                               JOIN room r ON r.id=a.room_id JOIN course_response cr ON cr.id={resp_sql}
+                               WHERE a.timetable_id=? AND cr.lab_requirement=1 AND r.is_lab=0"""):
+        out.append(dict(rule="실습실", course_id=cid, section_no=sec, detail=f"실습실이 아닌 강의실 {room}"))
+    for cid, sec, sid in q("""SELECT a.course_id, a.section_no, a.slot_id FROM assignment a JOIN course c ON c.id=a.course_id
+                              JOIN timetable t ON t.id=a.timetable_id
+                              JOIN chapel_slot ch ON ch.term_id=t.term_id AND ch.target_year=c.target_year AND ch.slot_id=a.slot_id
+                              WHERE a.timetable_id=? AND c.category='전공필수'"""):
+        out.append(dict(rule="채플", course_id=cid, section_no=sec, detail=f"채플 칸 {sid}"))
+    for g, j, sid in q("""SELECT DISTINCT a.course_id, b.course_id, a.slot_id FROM assignment a JOIN course g ON g.id=a.course_id AND g.category='교양필수'
+                          JOIN assignment b ON b.timetable_id=a.timetable_id AND b.slot_id=a.slot_id
+                          JOIN course j ON j.id=b.course_id AND j.category='전공필수'
+                          WHERE a.timetable_id=? AND g.target_year=j.target_year AND g.department_id IS j.department_id"""):
+        out.append(dict(rule="교필↔전필", course_id=j, section_no=None, detail=f"교필 과목 {g}와 칸 {sid}"))
+    slots = defaultdict(set)
+    for cid, sec, sid in q("SELECT course_id, section_no, slot_id FROM assignment WHERE timetable_id=?"):
+        slots[(cid, sec)].add(sid)
+    nsec = dict(con.execute("SELECT course_id, COUNT(*) FROM course_section GROUP BY course_id").fetchall())
+    groups = defaultdict(list)
+    for cid, dept, yr in con.execute("SELECT id, department_id, target_year FROM course WHERE category='전공필수' AND target_year IS NOT NULL"):
+        groups[(dept, yr)].append(cid)
+    for ids in groups.values():
+        for i, a in enumerate(ids):
+            for b in ids[i + 1:]:
+                na, nb = max(nsec.get(a, 1), 1), max(nsec.get(b, 1), 1)
+                A = {x: slots.get((a, x), set()) for x in range(1, na + 1)}
+                B = {x: slots.get((b, x), set()) for x in range(1, nb + 1)}
+                if na == 1 or nb == 1:
+                    if any(u & v for u in A.values() for v in B.values()):
+                        out.append(dict(rule="전필↔전필", course_id=a, section_no=None, detail=f"분반 하나인 과목과 과목 {b}가 겹침"))
+                elif any(all(u & v for v in B.values()) for u in A.values()) or any(all(u & v for u in A.values()) for v in B.values()):
+                    out.append(dict(rule="전필↔전필", course_id=a, section_no=None, detail=f"과목 {b}와 피할 분반이 없음"))
+    for cid, sec, ss, st in q("""SELECT a.course_id, a.section_no, a.session_no, MIN(ts.start_time) FROM assignment a
+                                 JOIN time_slot ts ON ts.id=a.slot_id WHERE a.timetable_id=?
+                                 GROUP BY 1,2,3 HAVING COUNT(*) >= 2 AND MIN(ts.start_time) > '16:30'"""):
+        out.append(dict(rule="18:00 이후 연강", course_id=cid, section_no=sec, detail=f"{ss}회차 {st} 시작"))
+    return out
 
 
 def _signature(mapping):
@@ -705,16 +885,37 @@ def save_proposal(con, round_id, timetable_id, course_id, options, reason="", se
              WHERE tt.id=? ORDER BY ts.day, ts.period_no""", (timetable_id,)):
         by_day[day].append(sid)
     for no, opt in enumerate(options, 1):
-        oid = con.execute("INSERT INTO proposal_option(proposal_id, option_no, source) VALUES (?,?,?)",
-                          (pid, no, "SOLVER")).lastrowid
-        for (sec, ss), (start, room) in opt["placements"].items():
-            for d, ids in by_day.items():
-                if start in ids:
-                    i = ids.index(start)
-                    for sid in ids[i:i + opt["ks"][(sec, ss)]]:
-                        con.execute("INSERT INTO proposal_option_slot VALUES (?,?,?,?,?)", (oid, sec, ss, sid, room))
+        _write_option(con, pid, no, opt, by_day)
     con.commit()
     return pid
+
+
+def _write_option(con, pid, no, opt, by_day, source="SOLVER"):
+    oid = con.execute("INSERT INTO proposal_option(proposal_id, option_no, source) VALUES (?,?,?)",
+                      (pid, no, source)).lastrowid
+    for (sec, ss), (start, room) in opt["placements"].items():
+        for d, ids in by_day.items():
+            if start in ids:
+                i = ids.index(start)
+                for sid in ids[i:i + opt["ks"][(sec, ss)]]:
+                    con.execute("INSERT INTO proposal_option_slot VALUES (?,?,?,?,?)", (oid, sec, ss, sid, room))
+    return oid
+
+
+def add_option(con, proposal_id, option, source="SOLVER"):
+    """안건에 대안 하나를 더 저장한다 (예: pick_best 가 기타 조건으로 만든 안). 번호는 기존 대안 다음(4, 5, …). -> 새 대안 id"""
+    row = con.execute("SELECT timetable_id FROM proposal WHERE id=?", (proposal_id,)).fetchone()
+    if row is None:
+        raise ValueError(f"없는 조율 안건: {proposal_id}")
+    by_day = defaultdict(list)
+    for sid, day in con.execute("""SELECT ts.id, ts.day FROM time_slot ts
+             JOIN term t ON t.grid_id=ts.grid_id JOIN timetable tt ON tt.term_id=t.id
+             WHERE tt.id=? ORDER BY ts.day, ts.period_no""", (row[0],)):
+        by_day[day].append(sid)
+    no = con.execute("SELECT COALESCE(MAX(option_no), 0) + 1 FROM proposal_option WHERE proposal_id=?", (proposal_id,)).fetchone()[0]
+    oid = _write_option(con, proposal_id, no, option, by_day, source)
+    con.commit()
+    return oid
 
 
 def finalize(con, timetable_id):

@@ -84,7 +84,7 @@ results = []
 
 # 1) [확인]: 해석한 조건을 조교가 그대로 확인
 pid, prof = open_proposal(cid)
-m = hdb.add_reply(c, pid, prof, "화요일이나 목요일이면 됩니다. 화요일은 오전만요. (가상 답장)")
+m = hdb.add_reply(c, pid, prof, "화요일이나 목요일이면 됩니다. 화요일은 오전만요. (가상 답장)", choices=["ETC"])
 cond1 = {"day_slots": {"1": ["09:00", "10:30"], "3": []}, "end_before": []}
 hdb.save_interpretation(c, m, "CONDITIONAL", {"conditions": cond1}, model_name="test")
 hdb.decide_reply(c, m, TA, "CONFIRM", conditions=cond1, proposal_action="move")
@@ -96,7 +96,7 @@ results.append(good)
 
 # 2) [수정]: 조교가 조건을 고쳐 확인 (수요일 + 수 13:30 전 종료)
 pid2, _ = open_proposal(cid)
-m2 = hdb.add_reply(c, pid2, prof, "수요일만 됩니다. (가상 답장)")
+m2 = hdb.add_reply(c, pid2, prof, "수요일만 됩니다. (가상 답장)", choices=["ETC"])
 hdb.save_interpretation(c, m2, "CONDITIONAL", {"conditions": {"day_slots": {"2": []}, "end_before": []}})
 cond2 = {"day_slots": {"1": [], "2": []}, "end_before": [{"day": 2, "time": "13:30"}]}
 hdb.decide_reply(c, m2, TA, "EDIT", reason="교수님과 통화: 화요일도 가능, 수요일은 오전만(가상)", conditions=cond2)
@@ -108,7 +108,7 @@ results.append(good2)
 
 # 3) 조건 없음: [현재대로 유지] → None → 조건 없이 만든 대안과 같음
 pid3, _ = open_proposal(cid)
-m3 = hdb.add_reply(c, pid3, prof, "셋 다 어렵습니다. (가상 답장)")
+m3 = hdb.add_reply(c, pid3, prof, "셋 다 어렵습니다. (가상 답장)", choices=["ETC"])
 hdb.save_interpretation(c, m3, "REJECT", {})
 hdb.decide_reply(c, m3, TA, "KEEP")
 got3 = hdb.confirmed_conditions(c, pid3)
@@ -121,7 +121,7 @@ results.append(good3)
 
 # 4) 아직 결정 전(PROPOSED)이면 None
 pid4, _ = open_proposal(cid)
-m4 = hdb.add_reply(c, pid4, prof, "목요일 오후요. (가상 답장)")
+m4 = hdb.add_reply(c, pid4, prof, "목요일 오후요. (가상 답장)", choices=["ETC"])
 hdb.save_interpretation(c, m4, "CONDITIONAL", {"conditions": {"day_slots": {"3": ["13:30", "15:00", "16:30"]}, "end_before": []}})
 good4 = hdb.confirmed_conditions(c, pid4) is None
 print(f"[결정 전] confirmed_conditions=None {'OK' if good4 else '다름!!'}")
@@ -130,7 +130,7 @@ results.append(good4)
 # 5) 다음 차수: 1차 [확인](next) → 2차 새 안건 → 이어받은 조건으로 대안
 c.execute("INSERT INTO round(id,term_id,round_no,deadline_at,status) VALUES (2,1,2,'2026-11-27','OPEN')"); c.commit()
 pid5, _ = open_proposal(cid)
-m5 = hdb.add_reply(c, pid5, prof, "이번 안은 다 어렵고, 목요일이면 됩니다. 17시 전에 끝나야 해요. (가상 답장)")
+m5 = hdb.add_reply(c, pid5, prof, "이번 안은 다 어렵고, 목요일이면 됩니다. 17시 전에 끝나야 해요. (가상 답장)", choices=["ETC"])
 cond5 = {"day_slots": {"3": []}, "end_before": [{"day": 3, "time": "17:00"}]}
 hdb.save_interpretation(c, m5, "CONDITIONAL", {"conditions": cond5})
 hdb.decide_reply(c, m5, TA, "CONFIRM", conditions=cond5, proposal_action="next")
