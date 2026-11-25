@@ -225,13 +225,13 @@ def test_wish_ok(client):
     assert r.status_code == 200, r.text
     w = next(x for x in client.get("/wishes").json()["wishes"] if x["section_id"] == sid)
     assert w["cells"] == {"월-09:00": "PREFER", "금-19:30": "BLOCK"}
-    assert w["lab"] == "MUST" and w["single_day"] == "PREFER"
+    assert w["lab"] == "MUST" and w["single_day"] == "NONE"     # 옛 값 PREFER는 NONE으로 받는다 (11/24)
 
 
 @pytest.mark.parametrize("extra", [
     {"lab": "PREFER"},             # 실습실은 MUST(필요)·NONE(필요 없음) 두 가지만
     {"lab": "있으면 좋음"},
-    {"single_day": "YES"},         # 주 1회 연강은 MUST·PREFER·NONE
+    {"single_day": "YES"},         # 주 1회 연강은 MUST·NONE (옛 PREFER는 NONE으로 받음)
 ])
 def test_wish_lab_and_single_day_values_422(client, extra):
     sid = first_auto_section(client)
@@ -242,7 +242,7 @@ def test_wish_lab_and_single_day_values_422(client, extra):
 def test_wishes_shape_after_team_decisions(client):
     body = client.get("/wishes").json()
     assert all(w["lab"] in ("MUST", "NONE") for w in body["wishes"])
-    assert all(w["single_day"] in ("MUST", "PREFER", "NONE") for w in body["wishes"])
+    assert all(w["single_day"] in ("MUST", "NONE") for w in body["wishes"])
     assert all(s["lab_need"] in ("MUST", "NONE") for s in sections(client))
     # 예전 '연강'(consecutive) 칸은 없다. professors는 교수별 맡은 분반
     assert "consecutive" not in str(body)

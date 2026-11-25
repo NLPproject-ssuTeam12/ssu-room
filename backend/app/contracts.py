@@ -23,8 +23,9 @@ BlockDay = Literal["월", "화", "수", "목", "금", "토"]
 # 실습실: 필요 / 필요 없음 두 가지 (팀 결정 11/21). 값 이름은 하윤 DB lab_requirement와 같게 MUST·NONE.
 # (DB에는 PREFER도 있지만 서버·화면은 쓰지 않는다)
 LabNeed = Literal["MUST", "NONE"]
-# 주 1회 연강(하루에 두 교시를 이어서): 무조건 / 선호 / 필요 없음(주 2회). 하윤 DB single_day_pref와 같은 이름 (11/21)
-SingleDay = Literal["MUST", "PREFER", "NONE"]
+# 주 1회 연강(하루에 두 교시를 이어서): 무조건 / 필요 없음(주 2회). 하윤 DB single_day_pref와 같은 이름.
+# '선호'(PREFER)는 11/24 회의에서 뺐다. 옛 화면이 PREFER를 보내도 받아서 NONE으로 바꾼다 (Wish 검사)
+SingleDay = Literal["MUST", "NONE"]
 Shape = Literal["TWICE", "ONCE_LONG", "MANUAL"]
 
 _HHMM = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
@@ -76,12 +77,17 @@ class Wish(BaseModel):
     section_id: str
     professor: Optional[str] = None
     cells: Dict[str, Literal["PREFER", "BLOCK"]] = {}   # "월-09:00": "PREFER". 안 칠한 칸 = 가능
-    must: bool = False
+    must: bool = False                           # 사용 안 함 ('꼭'은 11/24에 뺌). 옛 화면 호환으로 받기만 하고 배정에 쓰지 않는다
     lab: LabNeed = "NONE"                        # MUST = 실습실 필요, NONE = 필요 없음
-    single_day: SingleDay = "NONE"               # 주 1회 연강. NONE = 주 2회(기본)
+    single_day: SingleDay = "NONE"               # 주 1회 연강. NONE = 주 2회(기본). 옛 값 PREFER는 NONE으로 받는다
     building: Optional[str] = None
     room: Optional[str] = None
     note: str = ""
+
+    @field_validator("single_day", mode="before")
+    @classmethod
+    def _old_prefer(cls, v):
+        return "NONE" if v == "PREFER" else v      # 11/24: '선호'를 뺌 → 필요 없음
 
     @validator("cells")
     def _cells_keys(cls, v):
