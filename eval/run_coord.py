@@ -224,6 +224,9 @@ def cmd_reply(a):
         "받아들임 여부 정확도(수용·조건부 vs 거절·확인 필요)": round(rate("accept_ok"), 3),
         "고른 안 일치(순서 포함)": round(rate("picks_ok"), 3),
         "조건 정밀도": round(p, 3), "조건 재현율": round(rc, 3), "조건 F1": round(f1, 3),
+        # 문장 단위: 조건(요일별 교시·종료 시각)을 통째로 맞힌 답장 비율. 조건 F1은 칸 단위라 요일 하나만 틀려도
+        # 크게 흔들려서 11/25 결과를 본 뒤 보조 지표로 더함 (모든 방식·세트에 같게 계산)
+        "조건 일치(문장 단위)": round(rate("cond_ok"), 3),
         "전부 일치": round(rate("all_ok"), 3),
         "처리안 일치(match_conditions)": round(rate("action_ok"), 3),
         "위험 오류(거절·확인 필요 → 수용·조건부)": sum(r["danger"] for r in rows),
