@@ -18,11 +18,12 @@ SSU:room의 SQLite 스키마, 변경 SQL, 연결·단계 관리 함수입니다.
 | `migrations/007_20261125_reply_choice.sql` | 006까지 적용한 DB → 답장 선택 `reply_choice`, 안건 상태 `OFFLINE`, 분반 고정 `timetable_section.locked`, 답장 기타 요청(`other_request.message_id`) |
 | `migrations/008_20261125_timetable_reason.sql` | 007까지 적용한 DB → 시간표 버전 사유 `timetable.reason` |
 | `migrations/009_20261125_section_response.sql` | 008까지 적용한 DB → 희망 입력을 분반마다(`course_response.section_no`), 분반 연강·교차 요청 `pair_request`·`pair_request_section`(`section_pair` 칸 삭제), 안건 상태 `HOLD`·`NO_OPTION`과 조율 대상 종류 `proposal.target_kind` |
+| `migrations/010_20261125_lab_must_keep.sql` | 009까지 적용한 DB → 실습실 값 `course_response.lab_requirement` 1/0 → `MUST`/`NONE`, 답장 선택에 `KEEP`(지금 자리 그대로) |
 | `migrations/005_20261124_reply.sql` | 004까지 적용한 DB → `message.reply_to_id`, `proposal.prev_proposal_id`, `timetable_section.status` 추가, `proposal.status` 값 6개로 고정(`WAITING`→`OPEN`) |
 | `docs/c1.png` `c2.png` `c3.png` | ER 다이어그램 (원본 `c1.mmd` `c2.mmd` `c3.mmd`) |
 | `tests/test_migration.py` | 변경 SQL 검사 |
 | `tests/test_reply.py` | 조율 회신 함수 검사 (메모리 DB, 가상 데이터) |
-| `archive/schema_v1~v11.sql` | 지난 버전 (참고용). v4 = 001까지, v5 = 002까지, v6 = 003까지, v7 = 004까지, v8 = 005까지, v9 = 006까지, v10 = 007까지, v11 = 008까지 적용한 모양 |
+| `archive/schema_v1~v12.sql` | 지난 버전 (참고용). v4 = 001까지, v5 = 002까지, v6 = 003까지, v7 = 004까지, v8 = 005까지, v9 = 006까지, v10 = 007까지, v11 = 008까지, v12 = 009까지 적용한 모양 |
 
 ER 다이어그램: `c1.png` 기초 정보(학과·교수·강의실·과목·분반 교수·시간 칸·학기 단계), `c2.png` 1차 응답 수집·기타 요청, `c3.png` 시간표·대안·메시지.
 
@@ -50,7 +51,7 @@ python db/tests/test_reply.py        # 조율 회신 함수 검사 (pytest 로�
 | **분반 연강** | 한 교수가 한 과목의 분반 둘 이상을 맡을 때 **앞 분반이 끝나자마자 다음 분반**. 교수가 붙일 분반을 순서대로 고른다(두 분반만 붙이고 나머지는 떨어뜨려도 됨). 솔버는 **앞 두 분반만** 붙이고 셋째부터는 조교가 수동 배치·고정 | 과목 단위로 한 번 `pair_request.mode` = `BACK_TO_BACK`, 붙일 분반 `pair_request_section`(순서 `seq`) |
 | **교차** | 분반 연강을 엇갈려서 (가반 월1·목2 / 나반 월2·목1) | `pair_request.mode` = `CROSS`. 상관없음 = 행 없음 |
 | **채플 칸** | 학년별 채플 시간. 그 학년 전공필수는 이 칸에 놓지 않는다 | `chapel_slot` (조교 입력) |
-| **실습실** | 1 쓴다(실습실만 배정) / 0 안 쓴다 | 분반 응답 `course_response.lab_requirement` |
+| **실습실** | `MUST` 필요(실습실만 배정) / `NONE` 필요 없음 (010에서 1/0을 이름으로 바꿈. 주 1회 연강과 같은 값 이름) | 분반 응답 `course_response.lab_requirement` |
 | **칠한 칸** | 희망 `PREFER` / 불가 `BLOCK`. 칠하지 않은 칸은 상관없음 | 분반 응답의 `response_slot.kind` |
 | **희망 입력(분반 응답)** | 시간(칠한 칸)·주 1회 연강·실습실·인원은 **분반마다** 받는다(11/25). 인원은 `course_section.enrollment`. 분반 연강·교차만 과목 단위로 한 번(`pair_request`) | `course_response` 한 행 = (차수, 과목, **분반**, 교수). 솔버는 그 분반 담당 교수의 응답만 읽는다 |
 | **분반** | 오프라인 회의에서 정해진 분반. 분반 하나당 한 행: 번호(1부터 빈틈없이)·담당 교수·수강 인원. 행이 없는 과목은 `course.professor_id`의 1분반 | `course_section` (조교 입력, 인원은 교수가 정함) |
@@ -84,7 +85,7 @@ db.confirm_other_request(con, other_request_id, user_id, memo=None)
 
 ```python
 db.professor_owns(con, professor_id, course_id, section_no=None)   # 본인 담당인지. None이면 그 과목의 어느 분반이든
-mid = db.add_reply(con, proposal_id, professor_id, body, choices=['A', 'ETC'], reply_to_id=None, channel='APP')   # 하나 이상 필수
+mid = db.add_reply(con, proposal_id, professor_id, body, choices=['A', 'ETC'], reply_to_id=None, channel='APP')   # 하나 이상 필수. 'KEEP' = 지금 자리 그대로
 db.reply_choices(con, mid)                                          # -> [{'choice': 'A', 'option_id': 1}, ...]
 db.save_interpretation(con, mid, 'CONDITIONAL', {...}, model_name=None, chosen_option_id=None)
 db.decide_reply(con, mid, ta_user_id, 'CONFIRM' | 'EDIT' | 'KEEP' | 'OFFLINE', reason=None, conditions=None,
@@ -97,7 +98,8 @@ new_tt = db.apply_option(con, proposal_id, ta_user_id, rows, reason=None,   # [�
                          course_id=None, base_timetable_id=None, check=None) # 규칙 검사는 엔진 solver_core.apply_option 이 붙여 부름
 db.confirmed_conditions(con, proposal_id)                           # -> dict | None
 new_id = db.open_next_proposal(con, prev_proposal_id, round_id, timetable_id=None)
-db.carried_conditions(con, new_id)                                  # -> dict | None (이전 차수에서 확인한 조건)
+db.carried_conditions(con, new_id)                                  # -> dict | None (이전 차수들에서 확인한 조건을 쌓은 것)
+db.merge_conditions(older, newer)                                    # 두 조건 쌓기 (요일·교시는 둘 다 되는 것, 종료 시각은 더 이른 것)
 db.set_pair_request(con, round_id, course_id, professor_id, 'BACK_TO_BACK', [3, 1])   # 분반 연강·교차 (과목 단위), NONE 이면 지움
 db.pair_request(con, round_id, course_id, professor_id)              # -> ('BACK_TO_BACK', [3, 1]) 또는 ('NONE', [])
 db.release_hold(con, proposal_id, ta_user_id, send=True)             # 일부 어긋남(HOLD): 보냄 → OPEN / send=False → KEPT
@@ -107,17 +109,18 @@ db.coord_board(con, round_id)                                        # 조교 �
 
 | 함수 | 하는 일 | 막는 경우 (`ValueError`) |
 |---|---|---|
-| `add_reply` | 고른 값 `choices`(A·B·C·기타, 하나 이상, 여러 개 가능)를 `reply_choice`에 남긴다. 기타를 고르면 본문 필수, A·B·C는 그 안건의 대안 1·2·3번이 있어야 함. `message`에 `kind='REPLY'`, 보낸 사람=교수, 받는 사람=답하는 조율 메시지를 보낸 사람(없으면 첫 조교), `sent_at`, `delivery_status='RECEIVED'`. `reply_to_id`가 없으면 이 안건의 가장 최근 조율 메시지로 채움. `round_invite`가 있으면 `status='RESPONDED'`, `responded_at` | 없는 안건, 담당 교수 아님, 안건 상태가 `SENT`·`PROPOSED`가 아님(`OPEN`·`RESOLVED`·`KEPT`), 다른 안건의 메시지·답장(`REPLY`)을 가리킴, 받을 조교 없음 |
+| `add_reply` | 고른 값 `choices`(A·B·C·기타·지금 자리 그대로 `KEEP`, 하나 이상, 여러 개 가능. `KEEP`은 혼자 또는 기타와만, 자리가 있는 분반만)를 `reply_choice`에 남긴다. 기타를 고르면 본문 필수, A·B·C는 그 안건의 대안 1·2·3번이 있어야 함. `message`에 `kind='REPLY'`, 보낸 사람=교수, 받는 사람=답하는 조율 메시지를 보낸 사람(없으면 첫 조교), `sent_at`, `delivery_status='RECEIVED'`. `reply_to_id`가 없으면 이 안건의 가장 최근 조율 메시지로 채움. `round_invite`가 있으면 `status='RESPONDED'`, `responded_at` | 없는 안건, 담당 교수 아님, 안건 상태가 `SENT`·`PROPOSED`가 아님(`OPEN`·`RESOLVED`·`KEPT`), 다른 안건의 메시지·답장(`REPLY`)을 가리킴, 받을 조교 없음 |
 | `save_interpretation` | `reply_interpretation`을 만들거나 갱신하고 안건을 `PROPOSED`로 | 답장이 아님, 가장 최근 답장이 아님, 이미 결정한 답장·안건, 잘못된 `label`, 다른 안건의 대안, `extracted_json`이 JSON 객체가 아님 |
 | `decide_reply` | `ta_action`·`ta_user_id`·`ta_at`·`ta_reason` 기록. `conditions`가 있으면 `extracted_json["confirmed_conditions"]`에 그대로 저장. 안건 상태는 아래 표 | 조교(`role='TA'`)가 아님, 해석이 없음, 이미 결정함, 안건이 `PROPOSED`가 아님, 가장 최근 답장이 아님, `CONFIRM`에 `proposal_action` 없음·잘못된 값, `'next'`에 조건이 비어 있음, `EDIT`에 사유 없음, `KEEP`에 조건을 넣음 |
 | `confirmed_conditions` | 이 안건의 가장 최근 답장 중 `CONFIRM`·`EDIT`된 것의 `"confirmed_conditions"` | — (없으면 `None`) |
-| `reply_choices` | 답장에서 고른 값(A·B·C·기타)과 가리키는 대안 | — |
+| `reply_choices` | 답장에서 고른 값(A·B·C·기타·지금 자리 그대로)과 가리키는 대안 | — |
 | `add_reply_request` | 답장 기타 중 시간표 밖 요청을 `other_request`(`message_id`, `PENDING`)로. 조교는 `pending_other_requests`·`confirm_other_request`로 희망 입력의 기타 요청과 같이 처리 | 답장이 아님, 기타를 안 고른 답장, 빈 내용, 이미 있음 |
 | `manual_place` | [따로 연락]한 안건의 분반을 조교가 정한 칸에 놓는다. 그 학기 최신 시간표를 복사한 `TA_EDIT` 시간표, 대상 분반 `MANUAL`·고정, 안건 `RESOLVED`. 하드 규칙 위반은 막지 않고 엔진 `check_timetable`로 경고 | 조교 아님, 안건이 `OFFLINE`이 아님, 대상 분반이 아님·빠진 분반, 없는 칸·강의실, 같은 칸 같은 강의실(DB가 막음, 되돌림) |
 | `set_lock` | 분반 고정 걸기·풀기 | 없는 분반 배정 |
 | `apply_option` | 조교 [확인]·[수정]·도우미 [적용]한 안을 **새 시간표 버전**으로 저장: 기준 버전(없으면 그 학기 최신)을 복사해 `TA_EDIT`·`parent_id`=기준 버전, rows에 나온 분반만 바꿈(나머지 그대로), 바꾼 분반 `DONE`, 안건 → `RESOLVED`, 사유 → `timetable.reason`. `check`를 주면 기준 버전에 없던 위반이 새로 생길 때 거부. 한 트랜잭션 | 조교 아님(`user_id`가 있을 때), 안건이 `KEPT`·`NEXT`, 안건 없이 `course_id`·`base_timetable_id` 없음, 안건의 분반이 아님, 빈 rows·없는 칸·강의실, 고정된 분반, 같은 칸 같은 강의실, 새 하드 규칙 위반(되돌림) |
 | `open_next_proposal` | 다음 차수에 새 안건: 같은 과목·분반·이유·조율 대상 종류, `status='OPEN'`(대안은 엔진 `fill_options`로 채움, 없으면 `NO_OPTION`), `prev_proposal_id`=이전 안건. `timetable_id`가 없으면 이전 안건의 시간표(`NEXT`는 시간표를 바꾸지 않음). 이전 안건은 `NEXT` 그대로 둔다 | 없는 안건, 이전 안건이 `NEXT`가 아님, 이전 안건이 3차, 같은 학기의 바로 다음 차수가 아님, 다른 학기 시간표, 이미 다음 차수 안건이 있음(DB `UNIQUE`도 막음) |
-| `carried_conditions` | `prev_proposal_id`가 가리키는 이전 안건의 `confirmed_conditions`. **한 단계만** (3차 안건은 2차에서 확인한 조건만) | 없는 안건 (이전 안건·조건이 없으면 `None`) |
+| `carried_conditions` | `prev_proposal_id`를 따라 1차까지 거슬러 올라가, 차수마다 확인된 조건(`confirmed_conditions`)을 오래된 것부터 **쌓는다**(`merge_conditions`). 3차 안건은 1차·2차 조건을 모두 지킨다 | 없는 안건 (이전 안건·조건이 없으면 `None`) |
+| `merge_conditions` | 조건 둘을 쌓는다: `day_slots`는 두 조건에 모두 있는 요일의 둘 다 되는 교시만(빈 목록 = 아무 교시), 합쳐서 남는 요일이 없으면 최신 조건의 `day_slots`. `end_before`는 요일마다 더 이른 시각. 그 밖의 키는 최신 값 | — |
 | `set_pair_request` | 교수 입력의 분반 연강·교차를 과목 단위로 한 번 저장(바꾸면 덮어씀). 붙일 분반은 교수가 적은 순서대로, 없으면 맡은 분반 전부를 번호 순서로. `NONE`이면 지움 | 그 교수가 그 과목 분반을 둘 이상 맡지 않음, 붙일 분반이 둘 미만·중복, 그 교수가 맡지 않은 분반, 잘못된 모드 |
 | `release_hold` | 일부 어긋남(`HOLD`) 안건: 조교가 보내기로 하면 `OPEN`(서버가 보냄), 안 보내면 `KEPT` | 조교 아님, `HOLD`가 아님 |
 | `ack_no_option` | 대안 없음(`NO_OPTION`) 안건을 조교가 확인 → `OFFLINE`(따로 연락), 이후 `manual_place` | 조교 아님, `NO_OPTION`이 아님 |
@@ -140,7 +143,7 @@ db.coord_board(con, round_id)                                        # 조교 �
 ```text
 1차 안건 SENT → (답장) → PROPOSED → [확인] next + 조건 → NEXT          시간표는 그대로
    └ open_next_proposal(1차 안건, 2차 round_id) → 2차 안건 OPEN (prev_proposal_id = 1차 안건)
-        cond = carried_conditions(2차 안건) → solver_core.alternatives(..., condition=cond)
+        cond = carried_conditions(2차 안건) → solver_core.fill_options(2차 안건, condition=cond)   (3차 안건이면 1차·2차 조건을 쌓은 것)
         2차 안건 SENT → … → RESOLVED / KEPT / NEXT(→ 3차 안건) ; 3차 다음은 없음(조교가 직접 정함)
 ```
 
@@ -164,6 +167,7 @@ db.coord_board(con, round_id)                                        # 조교 �
 - 기타만 고르고 시간 조건이 있으면 조건에 맞는 새 안을 바로 만들고, 없으면 지금처럼 조건을 들고 다음 차수(`NEXT`)로 넘깁니다.
 - 고른 안을 지금은 놓을 수 없으면(그사이 다른 수업이 그 칸을 씀) 처리안은 '조교가 정함'입니다: [수정]·[현재대로 유지]·[따로 연락].
 - **기타만 고르고 시간 얘기 없이 요청만 쓴 경우**("실습 조교 부탁드려요")는 A·B·C가 다 안 된다는 뜻인지 애매합니다. 그래서 **'조교가 정함'(따로 연락)** 처리안으로 보내고, 요청 메모(`note`)를 같이 보여 줍니다. 요청 자체는 `add_reply_request`로 기타 요청 표에도 남깁니다. 조교가 교수와 확인해 A·B·C 중 하나로 [수정]하거나 [따로 연락]합니다.
+- **지금 자리 그대로**(`KEEP`, 010): 이미 자리가 있는 분반(희망에서 어긋남·일부 어긋남)의 답장에서만 고를 수 있습니다. A·B·C와 같이 고를 수 없고 혼자 또는 기타와만 고릅니다(기타에는 실습 조교 같은 요청). 처리안은 [현재대로 유지] → `decide_reply(..., 'KEEP')` → `KEPT`. 못 놓은 분반이나 안건 시간표에 그 분반 배정이 없으면 `add_reply`가 거부합니다.
 - 기타만 고르고 조율할 내용이 없으면("위의 대안에선 어렵다") 조교가 **[따로 연락](`OFFLINE`)**을 고르고 시스템 밖에서 교수와 정합니다. 정한 결과는 `manual_place`로 넣고, 그 분반은 **고정**(`timetable_section.locked=1`)되어 이후 모든 풀이에서 움직이지 않습니다. [따로 연락]은 답장 해석 뒤(`PROPOSED`) 언제든 고를 수 있습니다.
 
 ```text
@@ -265,6 +269,9 @@ db.coord_board(con, round_id)                                        # 조교 �
 | 11/24 | 강의 언어 삭제 | 반영 | `course_response.language` 삭제 (006) |
 | 11/24 | 두 분반 연강·교차를 교수 입력 칸으로 | 반영 | `course_response.section_pair` (006, 기존 `SECTION_PAIR` 요청을 옮김). 11/25에 `pair_request`로 옮김 (009) |
 | 11/24 | 전공필수와 채플이 겹치지 않게 | 반영 | `chapel_slot` (006). 솔버 하드 규칙 |
+| 11/25 | 실습실 값 이름을 주 1회 연강처럼 `MUST`/`NONE`으로 | 반영 | `course_response.lab_requirement` 1/0 → `MUST`/`NONE` (010) |
+| 11/25 | 차수마다 확인한 조건이 쌓이지 않음(3차는 2차 조건만) | 반영 | `carried_conditions`가 1차까지 거슬러 쌓음, `merge_conditions` |
+| 11/25 | 이미 자리가 있는 분반의 답장에 "지금 자리 그대로" | 반영 | 답장 선택 `KEEP`(혼자 또는 기타와만, 자리가 있는 분반만) → [현재대로 유지] (010) |
 | 11/25 | 못 놓은 분반에만 조율 메시지를 보내 희망 시간·건물에서 어긋난 분반은 조율할 수 없음 | 반영 | 조율 대상 종류 `proposal.target_kind`(못 놓음·어긋남 → 자동 보냄, 일부 어긋남 → `HOLD` 조교 선택), 대안 없음 `NO_OPTION`(조교 확인 → 따로 연락), 같은 대안 두 번 보내지 않기 (009, 엔진 `coord_targets`·`open_coord_proposals`·`fill_options`) |
 | 11/25 | 희망 입력이 (과목, 교수) 단위라 분반마다 받을 수 없고, "가반 바로 뒤 나반"처럼 두 분반 사이의 관계를 분반 한 칸에 넣을 수 없음 | 반영 | `course_response.section_no`(시간·주 1회 연강·실습실은 분반마다, 인원은 `course_section`), 분반 연강·교차는 과목 단위 `pair_request`·`pair_request_section`(교수가 붙일 분반을 순서대로). 솔버는 앞 두 분반만, 셋째부터는 조교가 수동 배치·고정 (009) |
 | 11/25 | 조교 [확인]·[수정]이 시간표 새 버전으로 저장되지 않아 다음 차수가 옛 시간표 기준 | 반영 | `apply_option`(TA_EDIT 새 버전, 새 위반 거부), 시간표 버전 사유 `timetable.reason` (008). 어댑터 연결은 서버 몫 |
@@ -294,6 +301,7 @@ sqlite3 -bail ssuroom.db < db/migrations/006_20261124_section.sql      # 005까�
 sqlite3 -bail ssuroom.db < db/migrations/007_20261125_reply_choice.sql # 006까지 된 DB
 sqlite3 -bail ssuroom.db < db/migrations/008_20261125_timetable_reason.sql # 007까지 된 DB
 sqlite3 -bail ssuroom.db < db/migrations/009_20261125_section_response.sql # 008까지 된 DB
+sqlite3 -bail ssuroom.db < db/migrations/010_20261125_lab_must_keep.sql      # 009까지 된 DB
 ```
 
 - **001**: 기존 응답의 `professor_id`는 그 과목의 담당 교수로, `single_day_pref`는 `NONE`으로 채웁니다(그때는 묻지 않았던 질문). `REQUIRE`는 `MUST`로, 한글 label은 영어 코드로 바꿉니다.
@@ -302,12 +310,13 @@ sqlite3 -bail ssuroom.db < db/migrations/009_20261125_section_response.sql # 008
 - **004**: `term` 테이블을 다시 만들어 `phase`에 `ROUND3`를 추가합니다. 학기 행과 지금 단계는 그대로 옮깁니다.
 - **005**: `message`에 `reply_to_id`(기존 행은 NULL), `timetable_section`에 `status`(기존 행은 `DONE`)를 더하고, `proposal`을 다시 만들어 `status`를 6개 값으로 고정하고 `prev_proposal_id`(기존 행은 NULL, `UNIQUE`)를 더합니다. `WAITING`(옛 기본값)과 NULL은 `OPEN`으로 옮기고, 그 밖의 값이 있으면 **멈춥니다**(조용히 바꾸지 않음). 실행 전에 확인하는 SELECT가 파일 위 주석에 있습니다. `-bail` 없이 실행하면 sqlite3가 오류 뒤에도 다음 줄을 실행해 옛 `proposal`을 지울 수 있으니 꼭 붙입니다.
 - **006**: `course_section`에 `enrollment`를 더하고 `course.expected_enrollment`의 값을 옮깁니다(분반 행이 있으면 인원 ÷ 분반 수 올림, 없으면 1분반 행을 만들어 그대로. 인원이 없으면 행을 만들지 않음). `course.expected_enrollment`, `course_response.prefer_only`·`language`는 지웁니다(`DROP COLUMN`이라 SQLite 3.35 이상). `professor_building_pref`는 교수당 한 행으로 다시 만들고 가장 높은 순위 건물 하나만 남깁니다. `course_response`는 다시 만들어 `section_pair`를 더하고(기존 `SECTION_PAIR` 요청의 가장 최근 값), 주 1회 연강 `PREFER`를 `NONE`으로 옮기며, 빈 `chapel_slot`을 만듭니다. **예전에 교수 요청(`SECTION_COUNT`)으로 분반이 여러 개였던 과목은 실행 뒤 조교가 `course_section`에 분반을 직접 넣어야 합니다** (확인 SELECT는 파일 주석).
+- **010**: `course_response`를 다시 만들어 `lab_requirement`를 글자로(1 → `MUST`, 0 → `NONE`), `reply_choice`를 다시 만들어 `KEEP`을 허용합니다. 행·id는 그대로.
 - **009**: `course_response`를 분반 단위로 다시 만듭니다. 응답 하나 → 그 교수가 그 과목에서 맡은 분반마다 한 행(첫 분반은 id 그대로, 나머지는 새 id로 칠한 칸을 복사). 분반 행이 없는 과목이나 맡은 분반이 없으면 1분반. 기타 요청·`request_item`은 첫 분반 응답에 남습니다. `section_pair`가 `NONE`이 아닌 응답은 `pair_request`(붙일 분반 = 그 교수의 분반 번호 순서)로 옮기고 칸은 없앱니다. `proposal`을 다시 만들어 상태에 `HOLD`·`NO_OPTION`을, `target_kind`(기존 안건은 NULL)를 더합니다.
 - **008**: `timetable`에 `reason`(이 버전을 만든 이유)을 더합니다. 기존 버전은 NULL.
 - **007**: `reply_choice` 테이블을 만들고(기존 답장은 기록 없음), `proposal`을 다시 만들어 상태에 `OFFLINE`을 더하고, `timetable_section`에 `locked`(기존 행은 0)를 더하고, `other_request`를 다시 만들어 `message_id`를 더합니다(`response_id`·`message_id` 중 정확히 하나).
 - 마지막 `PRAGMA foreign_key_check`가 아무것도 출력하지 않아야 정상입니다. 두 번 실행하면 오류가 납니다.
 - **주의**: `term` 칸이 늘어서 `INSERT INTO term VALUES (...)`처럼 칸 이름 없이 넣던 코드는 칸 이름을 적어야 합니다. `message`·`timetable_section`도 005로 칸이 하나씩 늘었습니다(`solver_core.py`, `solver/tests/run_n3.py`의 `timetable_section` INSERT는 칸 이름을 적도록 고쳤습니다). 006으로 `course_section`은 칸이 늘고 `course`·`course_response`·`professor_building_pref`는 칸이 줄었습니다. 009로 `course_response`는 `section_no`가 늘고 `section_pair`가 없어졌습니다(칸 이름을 적어 넣으면 `section_no`는 기본 1).
-- `tests/test_migration.py`가 v3→001→…→009, v4→002→…→009, v7→005→009, v8→006, v9→007, v10→008, v11→009 경로가 (005 뒤에는 `archive/schema_v8.sql`, 006 뒤에는 `schema_v9.sql`, 007 뒤에는) 최종 `schema.sql`과 같은 모양을 만들고, 데이터를 보존하며, 새 규칙(잘못된 단계·`NLP`·`AVOID`·`WAITING`·없는 `reply_to_id`·중복·없는 `prev_proposal_id`·잘못된 분반 `status` 거부, `NEXT` 허용)이 작동하는지, 목록 밖 `status`가 있으면 005가 멈추고 되돌릴 수 있는지 검사합니다.
+- `tests/test_migration.py`가 v3→001→…→010, v4→002→…→010, v7→005→010, v8→006, v9→007, v10→008, v11→009, v12→010 경로가 (005 뒤에는 `archive/schema_v8.sql`, 006 뒤에는 `schema_v9.sql`, 007 뒤에는) 최종 `schema.sql`과 같은 모양을 만들고, 데이터를 보존하며, 새 규칙(잘못된 단계·`NLP`·`AVOID`·`WAITING`·없는 `reply_to_id`·중복·없는 `prev_proposal_id`·잘못된 분반 `status` 거부, `NEXT` 허용)이 작동하는지, 목록 밖 `status`가 있으면 005가 멈추고 되돌릴 수 있는지 검사합니다.
 
 ## 알려진 한계
 
@@ -317,7 +326,7 @@ sqlite3 -bail ssuroom.db < db/migrations/009_20261125_section_response.sql # 008
 - 조율 회신 함수는 서버가 아직 부르지 않습니다(서버 상태는 메모리). 서버가 부르기 전까지 DB의 조율 기록은 비어 있습니다.
 - `NEXT`와 다음 차수 안건은 DB 함수로만 있습니다. 서버가 [확인] 때 `proposal_action`·`conditions`를, 다음 차수를 열 때(`/rounds/next`) `open_next_proposal`을 불러야 기록됩니다. 안건을 차수마다 자동으로 여는 일은 DB가 하지 않습니다.
 - `timetable_section.status`는 서버가 쓰기 전까지 모든 행이 `DONE`입니다(005가 기존 행을 `DONE`으로 채움). 그동안은 점검 쿼리가 `NEXT` 안건을 모두 어긋남으로 보여 줄 수 있습니다.
-- `carried_conditions`는 한 단계만 봅니다. 1차 조건을 3차까지 들고 가려면 2차 [확인] 때 서버가 조건을 다시 넘겨야 합니다.
+- 차수 조건은 쌓입니다(11/25): 1차에 "수요일 17시 전", 2차에 "화 오전"을 확인했으면 3차 대안은 둘 다 지킵니다. 교수가 앞 차수와 맞지 않는 요일만 새로 말하면(겹치는 요일이 없음) 최신 요일 조건을 따르고, 종료 시각 조건은 그대로 쌓입니다.
 - `professor_owns(..., section_no=None)`은 `course.professor_id`가 그 교수면, `course_section`이 모든 분반을 다른 교수로 지정했어도 `True`입니다(`course_section`이 모든 분반을 담지 않을 수 있어서).
 - `message.kind`·`channel`에는 CHECK가 없습니다. 답장은 `REPLY`, 그 밖의 것은 모두 조율 메시지로 봅니다.
 - 답장 선택·[따로 연락]·수동 배치는 DB·엔진 함수로만 있습니다. 서버가 답장 화면(선택 없이 보내기 막기), [확인] 때 `pick_best`, [따로 연락] 버튼, 수동 배치 화면을 붙여야 합니다.

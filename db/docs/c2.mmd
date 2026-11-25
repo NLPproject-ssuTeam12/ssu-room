@@ -42,7 +42,7 @@ erDiagram
         int course_id FK
         int section_no "분반마다 응답 (11/25)"
         int professor_id FK "그 분반 담당 교수"
-        int lab_requirement "1 쓴다 0 안 쓴다 필수 입력"
+        text lab_requirement "MUST 필요 NONE 필요 없음 필수 입력"
         text single_day_pref "MUST NONE 주1회 연강(분반 내)"
     }
     pair_request {
