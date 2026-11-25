@@ -109,7 +109,30 @@ class KeywordReply(unittest.TestCase):
     def test_screen_choice(self):
         self.assertEqual(parse_reply("", choice="B").picks, ["B"])
         r = parse_reply("", choice="none")
-        self.assertEqual((r.kind, match_conditions(r, ALTS, round=1).action), ("거절", "next"))
+        # 조건 없이 거절 → 다음 차수에 넘길 조건이 없어 조교가 교수와 따로 정한다 (11/25 #17)
+        p = match_conditions(r, ALTS, round=1)
+        self.assertEqual((r.kind, p.action), ("거절", "decide"))
+        self.assertIn("[따로 연락]", p.text)
+
+    def test_choices_buttons(self):
+        # 새 화면 (#17): A·B·C·기타 중 하나 이상, 여러 개 가능
+        self.assertEqual(parse_reply("", choices=["B", "C"]).picks, ["B", "C"])
+        r = parse_reply("수요일은 5시 전에 끝나야 해요", choices=["B", "ETC"])
+        self.assertEqual((r.kind, r.picks, [e.time for e in r.conditions.end_before]), ("조건부", ["B"], ["17:00"]))
+        only_etc = parse_reply("화요일 오전이면 됩니다", choices=["ETC"])   # 기타만 = A·B·C는 안 고름
+        self.assertEqual((only_etc.kind, only_etc.picks, list(only_etc.conditions.day_slots)), ("거절", [], [1]))
+        self.assertEqual(match_conditions(only_etc, ALTS, round=1).action, "next")
+        self.assertEqual(parse_reply("", choice="A", choices=["C"]).picks, ["C"])   # choices가 있으면 choices를 쓴다
+        with self.assertRaises(ValueError):
+            parse_reply("", choices=["D"])
+
+    def test_order_stated_in_text(self):
+        # 글로 순서를 밝히면 ordered (엔진 pick_best respect_order). 버튼 여러 개면 글 순서를 따른다
+        r = parse_reply("C가 좋고 안 되면 B로 해 주세요", choices=["B", "C"])
+        self.assertEqual((r.picks, r.ordered), (["C", "B"], True))
+        r = parse_reply("A나 B 괜찮아요", choices=["A", "B"])
+        self.assertEqual((r.picks, r.ordered), (["A", "B"], False))
+        self.assertFalse(parse_reply("B가 제일 좋아요", choice="B").ordered)   # 하나만 고르면 순서 없음
 
     def test_late_afternoon_and_ordinal(self):
         r = parse_reply("세 번째 안은 어렵고 늦은 오후면 좋겠습니다")
@@ -183,7 +206,9 @@ class KeywordReply(unittest.TestCase):
     def test_unavailable_pick(self):
         r = parse_reply("A로 할게요.")
         p = match_conditions(r, ALTS, round=1, unavailable=["A"])
-        self.assertEqual(p.action, "next")
+        # 조건 없이 고른 안을 못 쓰게 됨 → 다음 차수에 넘길 조건이 없으니 조교가 정한다 (빈 조건 next는 DB가 막음)
+        self.assertEqual(p.action, "decide")
+        self.assertIn("[따로 연락]", p.text)
         self.assertEqual(p.checks[0].why, "그사이 다른 강의가 들어감")
 
 
@@ -231,6 +256,28 @@ class LLMPath(unittest.TestCase):
         reject = coord._ReplyLLM(kind="거절", picks=[], end_before=[])
         with mock.patch.object(coord, "generate_json", return_value=reject):
             self.assertEqual(parse_reply("사실 다 안 돼요", choice="A", alternatives=ALTS, method="llm").kind, "확인 필요")
+
+    def test_llm_choices_and_order(self):
+        # 버튼 여러 개 + 글로 순서: 모델의 ordered를 받아 글 순서로. 순서 없으면 버튼 순서
+        fake = coord._ReplyLLM(kind="수용", picks=["C", "B"], ordered=True)
+        with mock.patch.object(coord, "generate_json", return_value=fake) as g:
+            r = parse_reply("C가 좋고 안 되면 B요", choices=["B", "C"], alternatives=ALTS, method="llm")
+        self.assertEqual((r.picks, r.ordered), (["C", "B"], True))
+        self.assertIn("B안, C안 (여러 개 누름", g.call_args[0][0])   # 프롬프트에 누른 값이 들어감
+        fake = coord._ReplyLLM(kind="수용", picks=["B", "C"], ordered=False)
+        with mock.patch.object(coord, "generate_json", return_value=fake):
+            r = parse_reply("둘 다 괜찮아요", choices=["C", "B"], alternatives=ALTS, method="llm")
+        self.assertEqual((r.picks, r.ordered), (["C", "B"], False))
+
+    def test_llm_etc_request_only_goes_to_ta(self):
+        # 기타만 고르고 시간 얘기 없이 요청만 → 조교가 정함(따로 연락), 요청은 처리안 문구에 같이 보여 준다
+        fake = coord._ReplyLLM(kind="확인 필요", picks=[], note="실습 조교 배치")
+        with mock.patch.object(coord, "generate_json", return_value=fake):
+            r = parse_reply("실습 조교 한 명 부탁드려요", choices=["ETC"], alternatives=ALTS, method="llm")
+        p = match_conditions(r, ALTS, round=1)
+        self.assertEqual((r.kind, r.note, p.action), ("거절", "실습 조교 배치", "decide"))
+        self.assertIn("[따로 연락]", p.text)
+        self.assertIn("실습 조교 배치", p.text)
 
     def test_llm_days_kept_when_days_written_together(self):
         # '화목'처럼 붙여 쓴 요일은 지킨다. 요일이 없는 답장에서 만든 요일만 버린다

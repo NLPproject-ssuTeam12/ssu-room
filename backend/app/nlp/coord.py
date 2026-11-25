@@ -2,7 +2,7 @@
 
     write_message(inp, method)          → Message      교수에게 보낼 조율 글
     check_message(text, inp)            → list[str]    글에서 걸린 문제 (빈 목록 = 보내도 됨)
-    parse_reply(text, choice, ..., method) → ReplyParse 답장 → 판정·고른 안·조건
+    parse_reply(text, choice, choices=..., method) → ReplyParse 답장 → 판정·고른 안(선호 순서·순서 밝힘)·조건
     match_conditions(parse, alts, round)   → Proposal   조교에게 보여 줄 처리안
 
 method="keyword"는 비교 기준(규칙)이고, method="llm"은 언어 모델을 쓴다.
@@ -35,7 +35,10 @@ SLOT_WORDS = {
 MAX_ROUND = 3
 EARLY_END_MIN = 15   # 고른 안이 종료 조건보다 이만큼 이내로만 늦게 끝나면 교수 재량(몇 분 일찍 마침)으로 보고 조건에서 뺀다 (11/22)
 FORBIDDEN = re.compile(r"연차|임용|우선순위|경력|꼭 표시")
-CLOSING = "가능한 안을 골라 주시거나, 모두 어려우시면 가능한 시간을 적어 주세요. 회신 기한은 1주이며, 기한 전에 한 번 더 알려 드립니다."
+# 교수 화면: A·B·C·기타 중 하나 이상 골라야 보낼 수 있고 여러 개 골라도 된다. 기타는 글을 쓴다 (11/25 #17)
+CLOSING = ("가능한 안을 모두 골라 주시고, 모두 어려우시면 기타를 골라 가능한 시간을 적어 주세요. "
+           "회신 기한은 1주이며, 기한 전에 한 번 더 알려 드립니다.")
+CHOICES = ("A", "B", "C", "ETC")
 
 
 # ---------------- 표시 ----------------
@@ -232,13 +235,39 @@ def _hour(h: int) -> int:
     return h + 12 if h < 8 else h      # "5시" = 17시
 
 
-def _keyword_reply(text: str, choice: str | None) -> ReplyParse:
+# 글로 선호 순서를 밝히는 말 ("C가 좋고 안 되면 B", "A가 제일", "B 먼저")
+_ORDER_WORD = re.compile(r"안\s*되면|어려우면|힘들면|제일|가장|먼저|우선|1순위|차선|그다음|그 다음|다음으로")
+
+
+def _buttons(choice: str | None, choices: list[str] | None) -> tuple[list[str], bool]:
+    """화면에서 누른 값 → (누른 안 A·B·C 목록, A·B·C를 하나도 안 고름).
+    choices = 새 화면(#17): A·B·C·ETC(기타) 중 하나 이상, 여러 개 가능. 기타만 누르면 A·B·C는 안 고른 것.
+    choice = 예전 화면: 'A'/'B'/'C' 하나, 'none' = 모두 어려움, None = 안 누름. choices가 있으면 choices를 쓴다."""
+    if choices:
+        bad = [c for c in choices if c not in CHOICES]
+        if bad:
+            raise ValueError(f"누를 수 있는 값은 {CHOICES}: {bad}")
+        btn = [c for c in dict.fromkeys(choices) if c != "ETC"]
+        return btn, not btn
+    if choice in ("A", "B", "C"):
+        return [choice], False
+    return [], choice == "none"
+
+
+def _order_picks(btn: list[str], text_picks: list[str], ordered: bool) -> list[str]:
+    """버튼과 글에서 고른 안을 합친다. 버튼이 여럿이고 글로 순서를 밝혔으면 글 순서, 아니면 버튼이 앞 (예전 규칙)."""
+    if ordered and len(btn) != 1:
+        return list(dict.fromkeys([p for p in text_picks] + btn))
+    return list(dict.fromkeys(btn + text_picks))
+
+
+def _keyword_reply(text: str, btn: list[str], none: bool) -> ReplyParse:
     t = text or ""
-    picks = _PICK.findall(t) + [{"첫": "A", "두": "B", "세": "C"}[m] for m in _ORD.findall(t)]
-    if choice and choice != "none":
-        picks.insert(0, choice)
-    all_no = choice == "none" or bool(_ALL_NO.search(t))
-    picks = [] if all_no else list(dict.fromkeys(picks))
+    text_picks = list(dict.fromkeys(_PICK.findall(t) + [{"첫": "A", "두": "B", "세": "C"}[m] for m in _ORD.findall(t)]))
+    all_no = none or bool(_ALL_NO.search(t))
+    ordered = len(set(text_picks) | set(btn)) >= 2 and bool(_ORDER_WORD.search(t))
+    picks = [] if all_no else _order_picks(btn, text_picks, ordered)
+    ordered = ordered and len(picks) >= 2
     k = Conditions()
     for d, h in _END.findall(t):
         k.end_before.append(EndBefore(day=DAYN.index(d), time=f"{_hour(int(h)):02d}:00"))
@@ -253,7 +282,7 @@ def _keyword_reply(text: str, choice: str | None) -> ReplyParse:
         kind = "조건부" if not k.is_empty() else "수용"
     else:
         kind = "거절" if all_no or _NO.search(t) else "확인 필요"
-    return ReplyParse(kind=kind, picks=picks, conditions=k, method="keyword")
+    return ReplyParse(kind=kind, picks=picks, ordered=ordered, conditions=k, method="keyword")
 
 
 class _EndBeforeLLM(BaseModel):
@@ -269,6 +298,7 @@ class _DaySlotsLLM(BaseModel):
 class _ReplyLLM(BaseModel):
     kind: Literal["수용", "조건부", "거절", "확인 필요"]
     picks: list[Literal["A", "B", "C"]]
+    ordered: bool = False  # 둘 이상 고르면서 어느 안을 더 원하는지 순서를 밝혔는가
     day_slots: list[_DaySlotsLLM] = []
     end_before: list[_EndBeforeLLM] = []
     rooms: list[str] = []  # 고른 안을 이 강의실에서 해 달라는 요청 (번호). 이미 그 방인지는 코드가 대안과 대조한다
@@ -293,14 +323,13 @@ def _room_note(rooms: list[str], alt: Alternative | None, note: str) -> str:
     return (note + " / " if note else "") + f"강의실 {'·'.join(sorted(want))} 요청"
 
 
-def _from_llm(r: _ReplyLLM, choice: str | None, alts: list[Alternative], text: str = "") -> ReplyParse:
-    """언어 모델 답을 검사하고 ReplyParse로 바꾼다. 모양이 이상하면 ValueError."""
+def _from_llm(r: _ReplyLLM, btn: list[str], none: bool, alts: list[Alternative], text: str = "") -> ReplyParse:
+    """언어 모델 답을 검사하고 ReplyParse로 바꾼다. 모양이 이상하면 ValueError.
+    btn = 화면에서 누른 A·B·C, none = A·B·C를 하나도 안 고름 (기타만 또는 예전 '모두 어려움')."""
     keys = [a.key for a in alts]
-    picks = [p for p in dict.fromkeys(r.picks) if not keys or p in keys]
-    if choice and choice != "none":
-        picks = [choice] + [p for p in picks if p != choice]
-    if choice == "none":
-        picks = []
+    text_picks = [p for p in dict.fromkeys(r.picks) if not keys or p in keys]
+    picks = [] if none else _order_picks(btn, text_picks, r.ordered)
+    ordered = r.ordered and len(picks) >= 2
     day_slots: dict[int, list[str]] = {}
     for e in r.day_slots:
         if not 0 <= e.day <= 4 or any(x not in SLOTS for x in e.slots):
@@ -325,39 +354,55 @@ def _from_llm(r: _ReplyLLM, choice: str | None, alts: list[Alternative], text: s
     k = Conditions(day_slots=day_slots, end_before=ebs)
     note = _room_note(r.rooms, first, r.note.strip())[:100]
     kind = r.kind
-    if choice in ("A", "B", "C") and kind == "확인 필요":
+    if btn and kind == "확인 필요":
         # 화면 버튼으로 안을 골랐으면 그 안을 받아들인 것 (가이드 ①). 글이 짧거나 애매해도 버튼을 따른다
         kind = "조건부" if not k.is_empty() or note else "수용"
     elif kind in ("수용", "조건부"):
         kind = "확인 필요" if not picks else ("조건부" if not k.is_empty() or note else "수용")
     elif picks:           # 거절인데 안을 골랐다고 하면 모순 (버튼 A + "사실 다 안 돼요" 등)
         kind = "확인 필요"
-    if choice == "none" and kind in ("수용", "조건부", "확인 필요"):
+    if none and kind in ("수용", "조건부", "확인 필요"):
         kind = "거절"
-    return ReplyParse(kind=kind, picks=picks, conditions=k, note=note, method="llm")
+    return ReplyParse(kind=kind, picks=picks, ordered=ordered, conditions=k, note=note, method="llm")
 
 
-def parse_reply(text: str, choice: str | None = None, *, alternatives: list[Alternative] | None = None,
-                message: str = "", method: Method = "keyword") -> ReplyParse:
-    """choice = 교수가 화면에서 누른 선택 ('A'/'B'/'C', 'none' = 모두 어려움, None = 안 누름)."""
+def _choice_text(btn: list[str], none: bool, choices: list[str] | None) -> str:
+    if choices:
+        etc = "기타(글로 적음)" if "ETC" in choices else ""
+        abc = ", ".join(f"{c}안" for c in btn)
+        if not btn:
+            return f"{etc} — A·B·C는 고르지 않음"
+        return ", ".join(x for x in (abc, etc) if x) + (" (여러 개 누름, 누른 순서는 선호 순서가 아님)" if len(btn) > 1 else "")
+    if none:
+        return "모두 어려움"
+    return f"{btn[0]}안" if btn else "누르지 않음"
+
+
+def parse_reply(text: str, choice: str | None = None, *, choices: list[str] | None = None,
+                alternatives: list[Alternative] | None = None, message: str = "",
+                method: Method = "keyword") -> ReplyParse:
+    """교수 답장 → 판정·고른 안·조건.
+    choices = 새 화면(#17)에서 누른 값: 'A'·'B'·'C'·'ETC'(기타) 중 하나 이상, 여러 개 가능. 기타만 누르면 A·B·C는 안 고른 것.
+    choice = 예전 화면 값 ('A'/'B'/'C', 'none' = 모두 어려움, None = 안 누름). choices가 있으면 choices를 쓴다."""
+    btn, none = _buttons(choice, choices)
     if method == "keyword":
-        return _keyword_reply(text, choice)
+        return _keyword_reply(text, btn, none)
     alts = alternatives or []
     prompt = (load_prompt("parse_reply")
               .replace("<<MESSAGE>>", message or "(없음)")
               .replace("<<ALTERNATIVES>>", "\n".join(f"{a.key}  {alt_label(a)}" for a in alts) or "(없음)")
-              .replace("<<CHOICE>>", {None: "누르지 않음", "none": "모두 어려움"}.get(choice, f"{choice}안"))
+              .replace("<<CHOICE>>", _choice_text(btn, none, choices))
               .replace("<<REPLY>>", text or "(빈 답장)"))
     try:
-        return _from_llm(generate_json(prompt, _ReplyLLM), choice, alts, text)
+        return _from_llm(generate_json(prompt, _ReplyLLM), btn, none, alts, text)
     except (LLMUnavailable, ValueError) as e:
         reason = _fallback_reason(e)
-        r = _keyword_reply(text, choice)
+        r = _keyword_reply(text, btn, none)
         r.fallback, r.fallback_reason = True, reason
         # 키워드 규칙은 거절·보류를 수용으로 잘못 읽을 때가 있다 (평가의 위험 오류). 모델이 막혀 넘어왔는데
         # 글만 보고 수용·조건부가 나오면 확인 필요로 낮추고 추정은 note에 남긴다. 화면 버튼(A/B/C)을 눌렀으면 그대로 둔다 (11/22)
-        if r.kind in ("수용", "조건부") and not (choice and choice != "none"):
-            r = r.model_copy(update={"kind": "확인 필요", "picks": [], "conditions": Conditions(),
+        if r.kind in ("수용", "조건부") and not btn:
+            r = r.model_copy(update={"kind": "확인 필요", "picks": [], "ordered": False, "conditions": Conditions(),
                                      "note": f"AI 해석 실패({reason}). 키워드 추정: {''.join(r.picks)} {r.kind}"})
         return r
 
@@ -403,11 +448,18 @@ def _fits(a: Alternative, k: Conditions) -> tuple[bool, str]:
 
 def match_conditions(parse: ReplyParse, alternatives: list[Alternative], round: int,
                      unavailable: list[str] = ()) -> Proposal:
-    """unavailable = 그사이 다른 강의가 들어가서 못 쓰는 안 (배정 엔진이 알려 준다)."""
+    """unavailable = 그사이 다른 강의가 들어가서 못 쓰는 안 (배정 엔진이 알려 준다).
+    여러 안을 골랐으면 조건에 맞는 첫 안을 처리안으로 낸다. 서버가 배정 엔진 pick_best를 쓰면
+    picks 순서와 parse.ordered(respect_order)를 넘겨 엔진이 최종으로 고른다 (11/25 #18)."""
     k = parse.conditions
+    req = f" 교수님 요청: {parse.note}" if parse.note and not parse.fallback else ""
     if parse.kind == "확인 필요":
-        return Proposal(action="decide", text="답장을 확실히 읽지 못했습니다. [수정]으로 직접 정해 주세요."
-                                              + (f" ({parse.note})" if parse.fallback and parse.note else ""))
+        return Proposal(action="decide", text="답장을 확실히 읽지 못했습니다. [수정]으로 정하거나 [따로 연락]해 주세요."
+                                              + (f" ({parse.note})" if parse.note else ""))
+    if not parse.picks and k.is_empty():
+        # 조건 없이 거절했거나 기타에 시간 얘기 없이 요청만 적음 → 다음 차수에 넘길 조건이 없다.
+        # 시스템이 조건을 지어내지 않고 조교가 교수와 직접 정한다 (11/25 #17 [따로 연락])
+        return Proposal(action="decide", text="되는 시간을 말하지 않고 거절했습니다. 교수님과 [따로 연락]해 정해 주세요." + req)
     if parse.picks:
         checks = []
         for key in parse.picks:
@@ -427,14 +479,16 @@ def match_conditions(parse: ReplyParse, alternatives: list[Alternative], round: 
                 # [수정]은 A·B·C 중에서만 고르므로 "같은 시간, 다른 방"은 AI 도우미로 바꾼다 (11/24 하윤 점검 문서)
                 text += " (강의실만 바꾸려면 [확인] 뒤 AI 도우미에게 \"과목 건물 호수로\"처럼 말하면 됩니다)"
             return Proposal(action="move", key=g.key, conditions=k, checks=checks, text=text)
-        if round < MAX_ROUND:
+        if round < MAX_ROUND and not k.is_empty():
             return Proposal(action="next", conditions=k, checks=checks,
-                            text="고른 안이 모두 조건과 어긋납니다. 조건을 넣어 다음 차수 대안을 만들까요?")
+                            text="고른 안이 모두 조건과 어긋납니다. 조건을 넣어 다음 차수 대안을 만들까요?" + req)
+        if round < MAX_ROUND:   # 조건 없이 고른 안이 모두 못 쓰게 됨 (그사이 다른 강의가 들어감 등)
+            return Proposal(action="decide", checks=checks,
+                            text="고른 안을 지금은 쓸 수 없습니다. [수정]으로 정하거나 교수님과 [따로 연락]해 주세요." + req)
         return Proposal(action="decide", conditions=k, checks=checks,
-                        text=f"{MAX_ROUND}차라 더 묻지 않습니다. [수정]이나 [현재대로 유지]로 정해 주세요.")
+                        text=f"{MAX_ROUND}차라 더 묻지 않습니다. [수정]·[현재대로 유지]·[따로 연락] 중에서 정해 주세요." + req)
     if round >= MAX_ROUND:
         return Proposal(action="decide", conditions=k,
-                        text=f"{MAX_ROUND}차라 더 묻지 않습니다. [수정]이나 [현재대로 유지]로 정해 주세요.")
+                        text=f"{MAX_ROUND}차라 더 묻지 않습니다. [수정]·[현재대로 유지]·[따로 연락] 중에서 정해 주세요." + req)
     return Proposal(action="next", conditions=k,
-                    text=(f"새 조건({cond_label(k)})으로 다음 차수 대안을 만들까요?" if not k.is_empty()
-                          else "다른 조건 없이 거절했습니다. 다음 차수 대안을 만들까요?"))
+                    text=f"새 조건({cond_label(k)})으로 다음 차수 대안을 만들까요?" + req)

@@ -94,6 +94,8 @@ class ReplyParse(BaseModel):
     """parse_reply 결과."""
     kind: Kind
     picks: list[Key] = []          # 고른 안, 선호 순서
+    ordered: bool = False          # 교수가 글로 선호 순서를 밝혔는가 ("C가 좋고 안 되면 B"). picks가 둘 이상일 때만 True.
+                                   # 서버는 배정 엔진 pick_best(respect_order=ordered)에 넘긴다. False면 엔진이 점수 순으로 고른다 (11/25)
     conditions: Conditions = Conditions()
     note: str = ""                 # 조교가 확인하거나 바꿔야 할 요청 (강의실 변경·장비·정원·교시 조정 희망). 배정 엔진은 읽지 않고 조교가 본다
     method: Literal["keyword", "llm"] = "keyword"
