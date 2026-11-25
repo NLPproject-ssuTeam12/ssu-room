@@ -27,6 +27,8 @@ V10 = P("archive", "schema_v10.sql")    # 007까지 적용한 모양 (008 전)
 M8 = P("migrations", "008_20261125_timetable_reason.sql")
 V11 = P("archive", "schema_v11.sql")    # 008까지 적용한 모양 (009 전)
 M9 = P("migrations", "009_20261125_section_response.sql")
+V12 = P("archive", "schema_v12.sql")    # 009까지 적용한 모양 (010 전)
+M10 = P("migrations", "010_20261125_lab_must_keep.sql")
 
 def compare(label, con, target=None):
     """con 이 target(기본: 최종 schema.sql)과 같은 모양인지"""
@@ -100,7 +102,9 @@ ok1 = compare("001~007 적용 후 = schema_v10", old, V10) and ok1
 run(M8, old)
 ok1 = compare("001~008 적용 후 = schema_v11", old, V11) and ok1
 run(M9, old)
-ok1 = compare("001~009 적용 후", old) and ok1
+ok1 = compare("001~009 적용 후 = schema_v12", old, V12) and ok1
+run(M10, old)
+ok1 = compare("001~010 적용 후", old) and ok1
 
 print("\n=== 경로 2: schema_v4(001까지 적용된 모양)에서 002 → 003 → 004 → 005 → 006")
 v4 = sqlite3.connect(":memory:"); v4.executescript(open(P("archive","schema_v4.sql"), encoding="utf-8").read()); seed(v4)
@@ -119,7 +123,9 @@ ok2 = compare("v4 + 002~007 = schema_v10", v4, V10) and ok2
 run(M8, v4)
 ok2 = compare("v4 + 002~008 = schema_v11", v4, V11) and ok2
 run(M9, v4)
-ok2 = compare("v4 + 002~009", v4) and ok2
+ok2 = compare("v4 + 002~009 = schema_v12", v4, V12) and ok2
+run(M10, v4)
+ok2 = compare("v4 + 002~010", v4) and ok2
 print("\n=== 경로 3: schema_v7(004까지 적용된 모양)에서 005 → 006")
 def build_v7():
     v7 = sqlite3.connect(":memory:"); v7.executescript(open(P("archive","schema_v7.sql"), encoding="utf-8").read()); seed(v7); q = v7.execute
@@ -173,7 +179,9 @@ ok3 = compare("v7 + 005 + 006 + 007 = schema_v10", v7, V10) and ok3
 run(M8, v7)
 ok3 = compare("v7 + 005~008 = schema_v11", v7, V11) and ok3
 run(M9, v7)
-ok3 = compare("v7 + 005~009", v7) and ok3
+ok3 = compare("v7 + 005~009 = schema_v12", v7, V12) and ok3
+run(M10, v7)
+ok3 = compare("v7 + 005~010", v7) and ok3
 
 print("\n=== 경로 4: 목록 밖 status 가 있으면 005 가 멈추고 데이터는 그대로")
 v7b = build_v7(); v7b.execute("UPDATE proposal SET status='DONE' WHERE id=3"); v7b.commit()
@@ -308,7 +316,7 @@ q("INSERT INTO timetable(id,term_id,round_id,kind,solver_run_id) VALUES (1,1,1,'
 q("INSERT INTO proposal(id,round_id,timetable_id,course_id,section_no,reason,status) VALUES (1,1,1,10,1,'겹침','SENT')")
 v11.commit()
 run(M9, v11)
-ok8 = compare("v11 + 009", v11)
+ok8 = compare("v11 + 009 = schema_v12", v11, V12)
 resp = v11.execute("SELECT id, course_id, section_no, professor_id, lab_requirement, single_day_pref FROM course_response ORDER BY course_id, section_no, id").fetchall()
 print("  응답 → 분반마다:", resp)
 ok8 = ok8 and [(r[1], r[2], r[3]) for r in resp] == [(10, 1, 2), (10, 2, 2), (10, 3, 3), (11, 1, 3)]
@@ -334,4 +342,21 @@ try:
 except sqlite3.IntegrityError:
     print("  같은 분반·같은 교수 응답 두 번 거부")
 
-print("\n결과:", "모두 통과" if ok1 and ok2 and ok3 and ok4 and ok5 and ok6 and ok7 and ok8 else "실패")
+print("\n=== 경로 9: schema_v12(009까지 적용된 모양)에서 010 — 실습실 MUST/NONE, 답장 '지금 자리 그대로'")
+q("INSERT INTO message(id,round_id,proposal_id,sender_id,receiver_id,kind,channel,body) VALUES (1,1,1,1,2,'ALTERNATIVE','APP','안내'),(2,1,1,2,1,'REPLY','APP','A')")
+q("INSERT INTO proposal_option(id,proposal_id,option_no) VALUES (1,1,1)"); q("INSERT INTO reply_choice VALUES (2,'A',1)"); v11.commit()
+before = v11.execute("SELECT id, lab_requirement FROM course_response ORDER BY id").fetchall()
+run(M10, v11)
+ok9 = compare("v12 + 010", v11)
+after = v11.execute("SELECT id, lab_requirement FROM course_response ORDER BY id").fetchall()
+print("  실습실 1/0 → MUST/NONE:", before, "→", after)
+ok9 = ok9 and [a for a, _ in before] == [a for a, _ in after] and all({1: "MUST", 0: "NONE"}[x] == y for (_, x), (_, y) in zip(before, after))
+ok9 = ok9 and v11.execute("SELECT * FROM reply_choice").fetchall() == [(2, "A", 1)]
+v11.execute("INSERT INTO reply_choice VALUES (2,'KEEP',NULL)"); print("  답장 선택 KEEP 허용")
+for bad in ("UPDATE course_response SET lab_requirement=1 WHERE id=100", "INSERT INTO reply_choice VALUES (2,'STAY',NULL)"):
+    try:
+        v11.execute(bad); ok9 = False; print("  막아야 함:", bad)
+    except sqlite3.IntegrityError:
+        print("  거부 OK:", bad)
+
+print("\n결과:", "모두 통과" if ok1 and ok2 and ok3 and ok4 and ok5 and ok6 and ok7 and ok8 and ok9 else "실패")

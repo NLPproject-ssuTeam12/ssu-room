@@ -93,7 +93,7 @@ CREATE TABLE course_response (            -- 교수가 분반마다 낸 희망 �
   course_id INTEGER NOT NULL REFERENCES course(id),
   section_no INTEGER NOT NULL DEFAULT 1,               -- 어느 분반의 응답인지
   professor_id INTEGER NOT NULL REFERENCES user(id),   -- 응답한 교수 (솔버는 그 분반 담당 교수의 응답만 읽는다)
-  lab_requirement INTEGER NOT NULL CHECK (lab_requirement IN (0,1)),      -- 실습실: 1=쓴다(실습실만 배정) / 0=안 쓴다 (사이트에서 필수 입력)
+  lab_requirement TEXT NOT NULL CHECK (lab_requirement IN ('MUST','NONE')),   -- 실습실: 필요(실습실만 배정) / 필요 없음 (사이트에서 필수 입력)
   single_day_pref TEXT NOT NULL CHECK (single_day_pref IN ('MUST','NONE')),    -- 주 1회 연강(한 분반이 하루에 2칸 이어서): 무조건 / 필요 없음(주 2회)
   submitted_at TEXT,
   UNIQUE (round_id, course_id, section_no, professor_id)
@@ -232,8 +232,8 @@ CREATE TABLE message (
 );
 CREATE TABLE reply_choice (                  -- 교수 답장에서 고른 값 (하나 이상, 여러 개 가능)
   message_id INTEGER NOT NULL REFERENCES message(id),
-  choice TEXT NOT NULL CHECK (choice IN ('A','B','C','ETC')),   -- 대안 A / B / C / 기타(답장 본문)
-  option_id INTEGER REFERENCES proposal_option(id),    -- A·B·C 가 가리키는 대안 (기타는 NULL)
+  choice TEXT NOT NULL CHECK (choice IN ('A','B','C','ETC','KEEP')),   -- 대안 A / B / C / 기타(답장 본문) / 지금 자리 그대로
+  option_id INTEGER REFERENCES proposal_option(id),    -- A·B·C 가 가리키는 대안 (기타·지금 자리 그대로는 NULL)
   PRIMARY KEY (message_id, choice)
 );
 CREATE TABLE reply_interpretation (

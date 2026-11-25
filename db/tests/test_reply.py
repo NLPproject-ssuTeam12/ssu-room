@@ -264,7 +264,7 @@ def test_open_next_proposal():
     assert not con.in_transaction
 
 
-def test_open_next_with_timetable_and_one_step_only():
+def test_open_next_with_timetable_and_stacked_conditions():
     con = make(); add_rounds(con)
     m = proposed(con)
     hdb.decide_reply(con, m, 1, "CONFIRM", conditions=COND, proposal_action="next")
@@ -272,13 +272,52 @@ def test_open_next_with_timetable_and_one_step_only():
     assert con.execute("SELECT timetable_id FROM proposal WHERE id=?", (p2,)).fetchone()[0] == 2
     cond2 = {"day_slots": {"4": ["13:30"]}, "end_before": []}
     p3 = next_round(con, p2, 3, cond2)                                               # 2차에서도 next → 3차
-    assert hdb.carried_conditions(con, p3) == cond2                                  # 한 단계만: 2차에서 확인한 조건
+    assert hdb.carried_conditions(con, p3) == {"day_slots": {"4": ["13:30"]},          # 1차·2차 요일이 안 맞음 → 최신(2차) 요일
+                                               "end_before": [{"day": 2, "time": "17:00"}]}   # 1차 '수 17시 전'은 쌓임
     assert hdb.carried_conditions(con, p2) == COND
     p3b = con.execute("SELECT id FROM proposal WHERE round_id=3").fetchone()[0]
     assert p3b == p3
     raises(next_round, con, p3, 4, cond2, has="3차 다음 차수는 없습니다")               # 3차 다음
     assert status(con, p3) == "NEXT"                                                 # [확인]은 남고, 새 안건만 안 열림
     assert con.execute("SELECT count(*) FROM proposal WHERE round_id=4").fetchone()[0] == 0
+
+
+def test_merge_conditions():
+    """차수 조건 쌓기: 요일·교시는 둘 다 되는 것만, 종료 시각은 더 이른 것, 안 맞으면 최신."""
+    m = hdb.merge_conditions
+    new = {"day_slots": {"1": ["10:30", "13:30"], "3": ["15:00"], "4": []}, "end_before": [{"day": 2, "time": "16:00"}]}
+    assert m(COND, new) == {"day_slots": {"1": ["10:30"], "3": ["15:00"]},           # 화 10:30만 겹침, 목은 아무 교시(1차) ∩ 15:00, 금은 1차에 없음
+                            "end_before": [{"day": 2, "time": "16:00"}]}            # 수 17시 전 + 수 16시 전 → 16시 전
+    assert m(None, COND) == COND and m(COND, None) == COND and m(None, None) is None
+    assert m({"day_slots": {"0": ["09:00"]}}, {"day_slots": {"0": ["12:00"]}}) == {"day_slots": {"0": ["12:00"]}}   # 안 맞음 → 최신
+    assert m({"end_before": [{"day": 0, "time": "17:00"}]}, {"day_slots": {"2": []}}) ==         {"end_before": [{"day": 0, "time": "17:00"}], "day_slots": {"2": []}}          # 한쪽만 있는 조건은 그대로 쌓임
+
+
+def test_carried_conditions_stack_three_rounds():
+    con = make(); add_rounds(con)
+    m = proposed(con)
+    hdb.decide_reply(con, m, 1, "CONFIRM", conditions=COND, proposal_action="next")
+    p2 = hdb.open_next_proposal(con, 1, 2)
+    p3 = next_round(con, p2, 3, {"day_slots": {"1": ["10:30"], "3": ["13:30"]}, "end_before": []})
+    assert hdb.carried_conditions(con, p3) == {"day_slots": {"1": ["10:30"], "3": ["13:30"]},
+                                               "end_before": [{"day": 2, "time": "17:00"}]}   # 1차 조건이 3차까지 이어짐
+
+
+def test_keep_choice():
+    """'지금 자리 그대로'(KEEP): 자리가 있는 분반만, 혼자 또는 기타와만."""
+    con = make()
+    raises(hdb.add_reply, con, 1, 3, "", choices=["KEEP"], has="이미 자리가 있는 분반")          # 안건 시간표에 배정 없음
+    con.execute("INSERT INTO timetable_section(timetable_id,course_id,section_no) VALUES (1,10,2)")
+    con.execute("INSERT INTO assignment VALUES (1,10,2,1,1,1)"); con.commit()
+    con.execute("UPDATE proposal SET target_kind='UNPLACED' WHERE id=1"); con.commit()
+    raises(hdb.add_reply, con, 1, 3, "", choices=["KEEP"], has="이미 자리가 있는 분반")          # 못 놓음 안건
+    con.execute("UPDATE proposal SET target_kind='PARTIAL' WHERE id=1"); con.commit()
+    raises(hdb.add_reply, con, 1, 3, "", choices=["KEEP", "A"], has="A·B·C 와 같이 고를 수 없습니다")
+    m = hdb.add_reply(con, 1, 3, "지금 자리 괜찮고 실습 조교 부탁드려요", choices=["KEEP", "ETC"])
+    assert hdb.reply_choices(con, m) == [{"choice": "ETC", "option_id": None}, {"choice": "KEEP", "option_id": None}]
+    hdb.save_interpretation(con, m, "ACCEPT", {"keep": True})
+    hdb.decide_reply(con, m, 1, "KEEP")
+    assert status(con) == "KEPT"
 
 
 def test_prev_unique_and_section_status():
@@ -373,7 +412,7 @@ def test_confirm_records_option():
 def test_confirm_pair_updates_response():
     con = make()
     con.execute("INSERT INTO course_section VALUES (10,3,3,40)")                       # 교수나가 2·3분반
-    con.execute("INSERT INTO course_response(id,round_id,course_id,section_no,professor_id,lab_requirement,single_day_pref) VALUES (50,1,10,2,3,0,'NONE')")
+    con.execute("INSERT INTO course_response(id,round_id,course_id,section_no,professor_id,lab_requirement,single_day_pref) VALUES (50,1,10,2,3,'NONE','NONE')")
     con.commit()
     m = hdb.add_reply(con, 1, 3, "두 분반을 이어서 해 주세요", choices=["ETC"])
     hdb.save_interpretation(con, m, "CONDITIONAL", {"section_pair": "BACK_TO_BACK"})
@@ -417,9 +456,9 @@ def test_section_response_unique():
     """희망 입력은 분반마다: 같은 차수·과목·분반·교수 응답은 하나."""
     con = make()
     q = "INSERT INTO course_response(round_id,course_id,section_no,professor_id,lab_requirement,single_day_pref) VALUES (1,10,?,?,?,?)"
-    con.execute(q, (1, 2, 1, "MUST")); con.execute(q, (2, 3, 0, "NONE"))
+    con.execute(q, (1, 2, "MUST", "MUST")); con.execute(q, (2, 3, "NONE", "NONE"))
     try:
-        con.execute(q, (2, 3, 1, "MUST")); raise AssertionError("같은 분반 응답이 두 번 들어감")
+        con.execute(q, (2, 3, "MUST", "MUST")); raise AssertionError("같은 분반 응답이 두 번 들어감")
     except sqlite3.IntegrityError:
         pass
 

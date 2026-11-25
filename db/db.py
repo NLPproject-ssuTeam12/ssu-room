@@ -75,7 +75,8 @@ TARGET_KINDS = {"UNPLACED": "못 놓음", "MISMATCH": "희망에서 어긋남", 
 REPLY_LABELS = ["ACCEPT", "CONDITIONAL", "REJECT", "UNCLEAR"]          # 수용 / 조건부 / 거절 / 확인 필요
 TA_ACTIONS = ["CONFIRM", "EDIT", "KEEP", "OFFLINE"]                    # [확인] / [수정] / [현재대로 유지] / [따로 연락]
 PROPOSAL_ACTIONS = {"move": "RESOLVED", "next": "NEXT", "pair": "RESOLVED"}   # [확인]한 처리안: 옮김 / 다음 차수 / 분반 연강·교차 반영
-REPLY_CHOICES = ["A", "B", "C", "ETC"]                                 # 답장에서 고르는 값: 대안 A·B·C / 기타(본문)
+REPLY_CHOICES = ["A", "B", "C", "ETC", "KEEP"]                         # 답장에서 고르는 값: 대안 A·B·C / 기타(본문) / 지금 자리 그대로
+LAB_VALUES = ["MUST", "NONE"]                                          # course_response.lab_requirement: 실습실 필요 / 필요 없음 (010)
 PAIR_MODES = ["NONE", "BACK_TO_BACK", "CROSS"]                         # 분반 연강·교차 (pair_request.mode, NONE = 행 없음)
 MAX_ROUND = 3                                                          # 조율은 3차까지
 
@@ -140,9 +141,11 @@ def _json_object(value, what):
 
 def add_reply(con, proposal_id, professor_id, body, choices=None, reply_to_id=None, channel="APP"):
     """교수가 자기 화면에서 쓴 답장을 기록한다. -> 새 message id
-    - choices: 고른 값 'A'·'B'·'C'·'ETC'(기타) 중 하나 이상 (여러 개 가능, 중복은 하나로). 하나도 없으면 ValueError.
-      A·B·C 는 이 안건의 대안 1·2·3번(proposal_option)이 있어야 한다. 'ETC' 를 고르면 body(기타 글)가 비어 있으면 안 된다.
-      고른 값은 reply_choice 에 남는다.
+    - choices: 고른 값 'A'·'B'·'C'·'ETC'(기타)·'KEEP'(지금 자리 그대로) 중 하나 이상 (여러 개 가능, 중복은 하나로).
+      하나도 없으면 ValueError. A·B·C 는 이 안건의 대안 1·2·3번(proposal_option)이 있어야 한다.
+      'ETC' 를 고르면 body(기타 글)가 비어 있으면 안 된다. 고른 값은 reply_choice 에 남는다.
+    - 'KEEP'(지금 자리 그대로, 11/25): 이미 자리가 있는 분반의 안건(조율 대상 종류가 못 놓음이 아니고, 안건 시간표에 그 분반
+      배정이 있음)에서만 고를 수 있다. A·B·C 와 같이 고를 수 없고 혼자 또는 기타와만. 처리안은 [현재대로 유지](decide_reply KEEP).
     - 안건이 없거나, 담당 교수가 아니거나, 안건 상태가 SENT(답 기다림)·PROPOSED(조교 확인 대기)가 아니면 ValueError.
     - reply_to_id 가 없으면 이 안건의 가장 최근 조율 메시지(REPLY 가 아닌 것)로 채운다. 주면 같은 안건의 조율 메시지인지 검사.
     - 받는 사람: 그 조율 메시지를 보낸 사람. 없으면 첫 조교(role='TA'). 조교도 없으면 ValueError.
@@ -152,13 +155,21 @@ def add_reply(con, proposal_id, professor_id, body, choices=None, reply_to_id=No
     try:
         picked = list(dict.fromkeys(choices or []))
         if not picked:
-            raise ValueError("대안 A·B·C 와 기타 중 하나 이상을 골라야 답장을 낼 수 있습니다")
+            raise ValueError("대안 A·B·C·기타·지금 자리 그대로 중 하나 이상을 골라야 답장을 낼 수 있습니다")
         bad = [x for x in picked if x not in REPLY_CHOICES]
         if bad:
             raise ValueError(f"고를 수 있는 값은 {REPLY_CHOICES} 입니다: {bad}")
         if "ETC" in picked and not (body and body.strip()):
             raise ValueError("기타를 골랐으면 기타 내용을 적어야 합니다")
+        if "KEEP" in picked and set(picked) & {"A", "B", "C"}:
+            raise ValueError("'지금 자리 그대로'는 대안 A·B·C 와 같이 고를 수 없습니다 (혼자 또는 기타와만)")
         p = _proposal(con, proposal_id)
+        if "KEEP" in picked:
+            kind, tt = con.execute("SELECT target_kind, timetable_id FROM proposal WHERE id=?", (proposal_id,)).fetchone()
+            placed = con.execute("SELECT 1 FROM assignment WHERE timetable_id=? AND course_id=? AND section_no IS COALESCE(?, section_no)",
+                                 (tt, p["course_id"], p["section_no"])).fetchone()
+            if kind == "UNPLACED" or placed is None:
+                raise ValueError(f"'지금 자리 그대로'는 이미 자리가 있는 분반에서만 고를 수 있습니다: 안건 {proposal_id}")
         if not professor_owns(con, professor_id, p["course_id"], p["section_no"]):
             where = f"{p['section_no']}분반" if p["section_no"] is not None else "과목"
             raise ValueError(f"담당 교수가 아닙니다: 교수 {professor_id}는 과목 {p['course_id']} {where}의 담당이 아닙니다")
@@ -185,7 +196,7 @@ def add_reply(con, proposal_id, professor_id, body, choices=None, reply_to_id=No
             receiver = ta[0]
         opt_of = {}
         for x in picked:
-            if x == "ETC":
+            if x in ("ETC", "KEEP"):
                 continue
             row = con.execute("SELECT id FROM proposal_option WHERE proposal_id=? AND option_no=?",
                               (proposal_id, "ABC".index(x) + 1)).fetchone()
@@ -383,19 +394,63 @@ def open_next_proposal(con, prev_proposal_id, round_id, timetable_id=None):
         raise
 
 
+def merge_conditions(older, newer):
+    """두 차수의 확인된 조건을 쌓는다 (11/25). 둘 다 지켜야 하는 조건으로 합친다.
+    - day_slots: 둘 다 있으면 두 조건에 모두 있는 요일만, 그 요일의 교시도 둘 다 되는 것만(빈 목록 = 그 요일 아무 교시나).
+      합친 결과에 남는 요일이 없으면(서로 맞지 않음) 최신(newer) 조건의 day_slots 를 따른다. 한쪽만 있으면 그것.
+    - end_before: 요일마다 더 이른 시각.
+    - 그 밖의 키: 최신 값.
+    -> dict 또는 None (둘 다 None)"""
+    if not older:
+        return dict(newer) if newer else (dict(older) if older is not None else None)
+    if not newer:
+        return dict(older)
+    out = {**older, **newer}
+    a, b = older.get("day_slots"), newer.get("day_slots")
+    if a and b:
+        both = {}
+        for d in set(a) & set(b):
+            sa, sb = list(a[d] or []), list(b[d] or [])
+            if not sa or not sb:
+                both[d] = sorted(sa or sb)
+            else:
+                common = sorted(set(sa) & set(sb))
+                if common:
+                    both[d] = common
+        out["day_slots"] = both if both else dict(b)
+    elif a or b:
+        out["day_slots"] = dict(a or b)
+    eb = {}
+    for e in list(older.get("end_before") or []) + list(newer.get("end_before") or []):
+        k = e.get("day")
+        if k not in eb or e["time"] < eb[k]["time"]:
+            eb[k] = dict(e)
+    if eb or "end_before" in out:
+        out["end_before"] = [eb[k] for k in sorted(eb, key=lambda x: (x is None, x))]
+    return out
+
+
 def carried_conditions(con, proposal_id):
-    """다음 차수 안건이 이어받은 조건: prev_proposal_id 가 가리키는 이전 안건의 confirmed_conditions (한 단계만).
-    이전 안건이 없거나 확인된 조건이 없으면 None. solver alternatives(condition=...)에 바로 넘길 수 있다."""
+    """다음 차수 안건이 이어받은 조건: 이전 차수 안건들(prev_proposal_id 를 따라 1차까지)의 confirmed_conditions 를
+    오래된 것부터 merge_conditions 로 쌓은 것 (11/25: 3차 안건은 1차·2차 조건을 모두 지킴).
+    이전 안건이 없거나 확인된 조건이 하나도 없으면 None. solver alternatives(condition=...)에 바로 넘길 수 있다."""
     row = con.execute("SELECT prev_proposal_id FROM proposal WHERE id=?", (proposal_id,)).fetchone()
     if row is None:
         raise ValueError(f"없는 조율 안건: {proposal_id}")
-    if row[0] is None:
-        return None
-    return confirmed_conditions(con, row[0])
+    chain, prev = [], row[0]
+    while prev is not None:
+        chain.append(prev)
+        prev = con.execute("SELECT prev_proposal_id FROM proposal WHERE id=?", (prev,)).fetchone()[0]
+    out = None
+    for pid in reversed(chain):                          # 1차 → 바로 전 차수
+        c = confirmed_conditions(con, pid)
+        if c:
+            out = merge_conditions(out, c)
+    return out
 
 
 def reply_choices(con, message_id):
-    """답장에서 교수가 고른 값. -> [{"choice": 'A'|'B'|'C'|'ETC', "option_id": 대안 id 또는 None}] (A·B·C·기타 순)"""
+    """답장에서 교수가 고른 값. -> [{"choice": 'A'|'B'|'C'|'ETC'|'KEEP', "option_id": 대안 id 또는 None}] (A·B·C·기타·지금 자리 순)"""
     rows = con.execute("SELECT choice, option_id FROM reply_choice WHERE message_id=?", (message_id,)).fetchall()
     return [dict(choice=c, option_id=o) for c, o in sorted(rows, key=lambda r: REPLY_CHOICES.index(r[0]))]
 
