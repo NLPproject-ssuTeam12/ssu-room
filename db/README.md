@@ -16,11 +16,12 @@ SSU:room의 SQLite 스키마, 변경 SQL, 연결·단계 관리 함수입니다.
 | `migrations/004_20261122_phase_round3.sql` | 003까지 적용한 DB → 단계에 `ROUND3`(3차 조율) 추가 |
 | `migrations/006_20261124_section.sql` | 005까지 적용한 DB → `course_section.enrollment` 추가, `course.expected_enrollment`·`course_response.prefer_only`·`language` 삭제, 희망 건물 교수당 하나 |
 | `migrations/007_20261125_reply_choice.sql` | 006까지 적용한 DB → 답장 선택 `reply_choice`, 안건 상태 `OFFLINE`, 분반 고정 `timetable_section.locked`, 답장 기타 요청(`other_request.message_id`) |
+| `migrations/008_20261125_timetable_reason.sql` | 007까지 적용한 DB → 시간표 버전 사유 `timetable.reason` |
 | `migrations/005_20261124_reply.sql` | 004까지 적용한 DB → `message.reply_to_id`, `proposal.prev_proposal_id`, `timetable_section.status` 추가, `proposal.status` 값 6개로 고정(`WAITING`→`OPEN`) |
 | `docs/c1.png` `c2.png` `c3.png` | ER 다이어그램 (원본 `c1.mmd` `c2.mmd` `c3.mmd`) |
 | `tests/test_migration.py` | 변경 SQL 검사 |
 | `tests/test_reply.py` | 조율 회신 함수 검사 (메모리 DB, 가상 데이터) |
-| `archive/schema_v1~v9.sql` | 지난 버전 (참고용). v4 = 001까지, v5 = 002까지, v6 = 003까지, v7 = 004까지, v8 = 005까지, v9 = 006까지 적용한 모양 |
+| `archive/schema_v1~v10.sql` | 지난 버전 (참고용). v4 = 001까지, v5 = 002까지, v6 = 003까지, v7 = 004까지, v8 = 005까지, v9 = 006까지, v10 = 007까지 적용한 모양 |
 
 ER 다이어그램: `c1.png` 기초 정보(학과·교수·강의실·과목·분반 교수·시간 칸·학기 단계), `c2.png` 1차 응답 수집·기타 요청, `c3.png` 시간표·대안·메시지.
 
@@ -90,6 +91,8 @@ db.decide_reply(con, mid, ta_user_id, 'CONFIRM' | 'EDIT' | 'KEEP' | 'OFFLINE', r
 db.add_reply_request(con, mid, '실습 조교 배치')                     # 답장 기타의 시간표 밖 요청 → other_request
 tt = db.manual_place(con, proposal_id, ta_user_id, [(분반, 회차, 칸, 강의실), ...], lock=True)   # OFFLINE 안건만
 db.set_lock(con, tt, course_id, section_no, False)                   # 고정 풀기
+new_tt = db.apply_option(con, proposal_id, ta_user_id, rows, reason=None,   # [확인]·[수정]·도우미 [적용] → 새 시간표 버전
+                         course_id=None, base_timetable_id=None, check=None) # 규칙 검사는 엔진 solver_core.apply_option 이 붙여 부름
 db.confirmed_conditions(con, proposal_id)                           # -> dict | None
 new_id = db.open_next_proposal(con, prev_proposal_id, round_id, timetable_id=None)
 db.carried_conditions(con, new_id)                                  # -> dict | None (이전 차수에서 확인한 조건)
@@ -105,6 +108,7 @@ db.carried_conditions(con, new_id)                                  # -> dict | 
 | `add_reply_request` | 답장 기타 중 시간표 밖 요청을 `other_request`(`message_id`, `PENDING`)로. 조교는 `pending_other_requests`·`confirm_other_request`로 희망 입력의 기타 요청과 같이 처리 | 답장이 아님, 기타를 안 고른 답장, 빈 내용, 이미 있음 |
 | `manual_place` | [따로 연락]한 안건의 분반을 조교가 정한 칸에 놓는다. 그 학기 최신 시간표를 복사한 `TA_EDIT` 시간표, 대상 분반 `MANUAL`·고정, 안건 `RESOLVED`. 하드 규칙 위반은 막지 않고 엔진 `check_timetable`로 경고 | 조교 아님, 안건이 `OFFLINE`이 아님, 대상 분반이 아님·빠진 분반, 없는 칸·강의실, 같은 칸 같은 강의실(DB가 막음, 되돌림) |
 | `set_lock` | 분반 고정 걸기·풀기 | 없는 분반 배정 |
+| `apply_option` | 조교 [확인]·[수정]·도우미 [적용]한 안을 **새 시간표 버전**으로 저장: 기준 버전(없으면 그 학기 최신)을 복사해 `TA_EDIT`·`parent_id`=기준 버전, rows에 나온 분반만 바꿈(나머지 그대로), 바꾼 분반 `DONE`, 안건 → `RESOLVED`, 사유 → `timetable.reason`. `check`를 주면 기준 버전에 없던 위반이 새로 생길 때 거부. 한 트랜잭션 | 조교 아님(`user_id`가 있을 때), 안건이 `KEPT`·`NEXT`, 안건 없이 `course_id`·`base_timetable_id` 없음, 안건의 분반이 아님, 빈 rows·없는 칸·강의실, 고정된 분반, 같은 칸 같은 강의실, 새 하드 규칙 위반(되돌림) |
 | `open_next_proposal` | 다음 차수에 새 안건: 같은 과목·분반·이유, `status='OPEN'`, `prev_proposal_id`=이전 안건. `timetable_id`가 없으면 이전 안건의 시간표(`NEXT`는 시간표를 바꾸지 않음). 이전 안건은 `NEXT` 그대로 둔다 | 없는 안건, 이전 안건이 `NEXT`가 아님, 이전 안건이 3차, 같은 학기의 바로 다음 차수가 아님, 다른 학기 시간표, 이미 다음 차수 안건이 있음(DB `UNIQUE`도 막음) |
 | `carried_conditions` | `prev_proposal_id`가 가리키는 이전 안건의 `confirmed_conditions`. **한 단계만** (3차 안건은 2차에서 확인한 조건만) | 없는 안건 (이전 안건·조건이 없으면 `None`) |
 
@@ -163,6 +167,21 @@ db.carried_conditions(con, new_id)                                  # -> dict | 
   └ 기타만, 내용 없음 → [따로 연락] → OFFLINE → manual_place(고정) → RESOLVED
 ```
 
+### 처리안 반영을 새 시간표 버전으로 (11/25)
+
+조교가 [확인]·[수정]해도 서버 어댑터의 `reassign()`이 메모리에서만 배정을 바꿔, 다음 차수의 대안·재풀이가 옛 시간표를 기준으로 계산했습니다. 그래서 `apply_option`이 고른 안을 **새 시간표 버전**으로 저장합니다.
+
+```text
+버전 7 (DRAFT) ──[확인] B안──▶ 버전 8 (TA_EDIT, parent 7, 사유) ──[수정] 다른 칸──▶ 버전 9 (TA_EDIT, parent 8)
+                       옮긴 분반만 바뀌고 나머지는 7과 같음          다음 차수 alternatives·solve 는 최신 버전 기준
+```
+
+- 엔진에서 부를 때는 `solver_core.apply_option`(규칙 검사 `check_timetable`이 붙어 있음)을 씁니다. 대안 → rows는 `solver_core.option_rows(con, option_id=...)` 또는 `option_rows(con, option=대안, timetable_id=...)`.
+- 허용 안건 상태: `KEPT`(현재대로 유지)·`NEXT`(다음 차수로)만 거부, 나머지(`OPEN`·`SENT`·`PROPOSED`·`OFFLINE`·`RESOLVED`)는 허용. `decide_reply`가 먼저 `RESOLVED`로 바꿔도 됩니다.
+- 거부 기준: **새로 생긴 위반만**. 이미 있던 위반(예: 경고를 받고 고정된 수동 배치)은 막지 않습니다.
+- `manual_place`와의 차이: `manual_place`는 [따로 연락] 뒤 조교가 정한 칸을 위반이 있어도 저장하고 **고정**합니다. `apply_option`은 일반 [확인]·[수정]·도우미 [적용]용이고, 새 위반이 생기면 **거부**하며 고정하지 않습니다.
+- **서버(어댑터)가 맞출 것** (`backend/app/solver/adapter.py`, 대원 담당, 이 변경에서는 고치지 않음): `reassign()`의 시그니처는 그대로 두고, 안에서 ① 그 분반의 열린 안건(`RESOLVED`·`KEPT`·`NEXT`가 아닌 가장 최근 것, 없으면 `None` = 도우미 [적용])을 DB에서 찾고 ② `sc.option_rows`로 rows를 만들어 ③ `sc.apply_option(con, 안건 또는 None, 조교 id 또는 None, rows, 사유, course_id=..., base_timetable_id=self.timetable_id)`를 부른 뒤 ④ `self.timetable_id`를 새 id로 바꾸고 `self.last_saved`(새 id·안건 등)에 남깁니다. 반환 `Timetable`은 지금 모양 그대로. 조교 id·사유를 넘기려면 어댑터에 따로 넣는 함수를 둡니다.
+
 - **재제출**: 교수가 조교 결정 전에 다시 쓰면 새 `REPLY` 행이 생기고 이전 답장·해석은 이력으로 남습니다. 해석·결정은 **가장 최근 답장만** 받습니다. 안건 상태는 바꾸지 않으므로(`PROPOSED`면 그대로), 서버가 새 답장을 해석해 `save_interpretation`을 불러야 결정할 수 있습니다. 조교가 결정한 뒤(`RESOLVED`·`KEPT`·`NEXT`)에는 그 안건에 답장을 받지 않습니다. `NEXT`면 다음 차수 안건에 답합니다.
 - **조건 모양**: 서버 `conditions_json`(`backend/app/contracts.py`)·어댑터 `solver_condition`과 같은 모양을 **바꾸지 않고** 저장·반환합니다. 요일 키는 문자열입니다. 정수 키처럼 JSON으로 그대로 저장할 수 없는 모양은 거부합니다.
 
@@ -218,6 +237,7 @@ db.carried_conditions(con, new_id)                                  # -> dict | 
 | 11/24 | 강의 언어 삭제 | 반영 | `course_response.language` 삭제 (006) |
 | 11/24 | 두 분반 연강·교차를 교수 입력 칸으로 | 반영 | `course_response.section_pair` (006, 기존 `SECTION_PAIR` 요청을 옮김) |
 | 11/24 | 전공필수와 채플이 겹치지 않게 | 반영 | `chapel_slot` (006). 솔버 하드 규칙 |
+| 11/25 | 조교 [확인]·[수정]이 시간표 새 버전으로 저장되지 않아 다음 차수가 옛 시간표 기준 | 반영 | `apply_option`(TA_EDIT 새 버전, 새 위반 거부), 시간표 버전 사유 `timetable.reason` (008). 어댑터 연결은 서버 몫 |
 | 11/25 | 조건 없는 거절("셋 다 어렵습니다") 뒤 [확인] 저장 오류 | 반영 | 답장 선택 `reply_choice`(하나 이상 필수), [따로 연락] `OFFLINE`, 수동 배치 `manual_place`·고정 `locked`, 분반 연강·교차 반영 `pair`, 답장 기타 요청 (007) |
 | 11/24 | `message.kind`·`channel` 값 CHECK | 하지 않음 | ER 그림에 적힌 값(`NOTICE/REMINDER/ALTERNATIVE/REPLY`, `APP/EMAIL/SMS`)만 문서로 둠. 이번에는 건너뛰기로 결정 |
 
@@ -242,6 +262,7 @@ sqlite3 ssuroom.db < db/migrations/004_20261122_phase_round3.sql        # 003까
 sqlite3 -bail ssuroom.db < db/migrations/005_20261124_reply.sql        # 004까지 된 DB (-bail 필수)
 sqlite3 -bail ssuroom.db < db/migrations/006_20261124_section.sql      # 005까지 된 DB (SQLite 3.35 이상)
 sqlite3 -bail ssuroom.db < db/migrations/007_20261125_reply_choice.sql # 006까지 된 DB
+sqlite3 -bail ssuroom.db < db/migrations/008_20261125_timetable_reason.sql # 007까지 된 DB
 ```
 
 - **001**: 기존 응답의 `professor_id`는 그 과목의 담당 교수로, `single_day_pref`는 `NONE`으로 채웁니다(그때는 묻지 않았던 질문). `REQUIRE`는 `MUST`로, 한글 label은 영어 코드로 바꿉니다.
@@ -250,10 +271,11 @@ sqlite3 -bail ssuroom.db < db/migrations/007_20261125_reply_choice.sql # 006까�
 - **004**: `term` 테이블을 다시 만들어 `phase`에 `ROUND3`를 추가합니다. 학기 행과 지금 단계는 그대로 옮깁니다.
 - **005**: `message`에 `reply_to_id`(기존 행은 NULL), `timetable_section`에 `status`(기존 행은 `DONE`)를 더하고, `proposal`을 다시 만들어 `status`를 6개 값으로 고정하고 `prev_proposal_id`(기존 행은 NULL, `UNIQUE`)를 더합니다. `WAITING`(옛 기본값)과 NULL은 `OPEN`으로 옮기고, 그 밖의 값이 있으면 **멈춥니다**(조용히 바꾸지 않음). 실행 전에 확인하는 SELECT가 파일 위 주석에 있습니다. `-bail` 없이 실행하면 sqlite3가 오류 뒤에도 다음 줄을 실행해 옛 `proposal`을 지울 수 있으니 꼭 붙입니다.
 - **006**: `course_section`에 `enrollment`를 더하고 `course.expected_enrollment`의 값을 옮깁니다(분반 행이 있으면 인원 ÷ 분반 수 올림, 없으면 1분반 행을 만들어 그대로. 인원이 없으면 행을 만들지 않음). `course.expected_enrollment`, `course_response.prefer_only`·`language`는 지웁니다(`DROP COLUMN`이라 SQLite 3.35 이상). `professor_building_pref`는 교수당 한 행으로 다시 만들고 가장 높은 순위 건물 하나만 남깁니다. `course_response`는 다시 만들어 `section_pair`를 더하고(기존 `SECTION_PAIR` 요청의 가장 최근 값), 주 1회 연강 `PREFER`를 `NONE`으로 옮기며, 빈 `chapel_slot`을 만듭니다. **예전에 교수 요청(`SECTION_COUNT`)으로 분반이 여러 개였던 과목은 실행 뒤 조교가 `course_section`에 분반을 직접 넣어야 합니다** (확인 SELECT는 파일 주석).
+- **008**: `timetable`에 `reason`(이 버전을 만든 이유)을 더합니다. 기존 버전은 NULL.
 - **007**: `reply_choice` 테이블을 만들고(기존 답장은 기록 없음), `proposal`을 다시 만들어 상태에 `OFFLINE`을 더하고, `timetable_section`에 `locked`(기존 행은 0)를 더하고, `other_request`를 다시 만들어 `message_id`를 더합니다(`response_id`·`message_id` 중 정확히 하나).
 - 마지막 `PRAGMA foreign_key_check`가 아무것도 출력하지 않아야 정상입니다. 두 번 실행하면 오류가 납니다.
 - **주의**: `term` 칸이 늘어서 `INSERT INTO term VALUES (...)`처럼 칸 이름 없이 넣던 코드는 칸 이름을 적어야 합니다. `message`·`timetable_section`도 005로 칸이 하나씩 늘었습니다(`solver_core.py`, `solver/tests/run_n3.py`의 `timetable_section` INSERT는 칸 이름을 적도록 고쳤습니다). 006으로 `course_section`은 칸이 늘고 `course`·`course_response`·`professor_building_pref`는 칸이 줄었습니다.
-- `tests/test_migration.py`가 v3→001→…→007, v4→002→…→007, v7→005→007, v8→006, v9→007 경로가 (005 뒤에는 `archive/schema_v8.sql`, 006 뒤에는 `schema_v9.sql`, 007 뒤에는) 최종 `schema.sql`과 같은 모양을 만들고, 데이터를 보존하며, 새 규칙(잘못된 단계·`NLP`·`AVOID`·`WAITING`·없는 `reply_to_id`·중복·없는 `prev_proposal_id`·잘못된 분반 `status` 거부, `NEXT` 허용)이 작동하는지, 목록 밖 `status`가 있으면 005가 멈추고 되돌릴 수 있는지 검사합니다.
+- `tests/test_migration.py`가 v3→001→…→008, v4→002→…→008, v7→005→008, v8→006, v9→007, v10→008 경로가 (005 뒤에는 `archive/schema_v8.sql`, 006 뒤에는 `schema_v9.sql`, 007 뒤에는) 최종 `schema.sql`과 같은 모양을 만들고, 데이터를 보존하며, 새 규칙(잘못된 단계·`NLP`·`AVOID`·`WAITING`·없는 `reply_to_id`·중복·없는 `prev_proposal_id`·잘못된 분반 `status` 거부, `NEXT` 허용)이 작동하는지, 목록 밖 `status`가 있으면 005가 멈추고 되돌릴 수 있는지 검사합니다.
 
 ## 알려진 한계
 

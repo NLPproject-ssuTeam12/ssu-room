@@ -155,6 +155,18 @@ sc.check_timetable(con, timetable_id)                  # 하드 규칙 위반 �
 - 고정: 이전 시간표에서 `timetable_section.locked=1`인 분반은 `solve`(부분·전체)·`alternatives`·`pick_best`에서 움직이지 않는다. 고정 분반의 대안을 만들려 하면 `ValueError`(먼저 `db.set_lock`으로 푼다). 새 시간표에도 `MANUAL`·고정이 이어진다.
 - 수동 배치가 규칙을 어긴 채 고정돼 있어도 풀이가 막히지 않는다: 고정끼리의 위반은 그대로 두고, 나머지 수업이 피한다.
 
+## 5-2. 처리안을 새 시간표 버전으로 저장 (11/25)
+
+```python
+rows = sc.option_rows(con, option_id=B안_id)                       # 또는 option_rows(con, option=대안, timetable_id=기준)
+new_tt = sc.apply_option(con, proposal_id, ta_id, rows, "교수님과 통화로 확인",
+                         base_timetable_id=현재_시간표)              # 안건 없으면(도우미 [적용]) proposal_id=None, course_id=과목
+# 이후 alternatives(..., new_tt, ...)·solve(previous_timetable_id=new_tt) 로 다음 차수
+```
+
+- 기준 버전을 복사해 `TA_EDIT`(parent=기준 버전) 새 버전을 만들고 rows의 분반만 바꾼다. 기준 버전에 없던 하드 규칙 위반(`check_timetable`)이 새로 생기면 저장하지 않고 `ValueError`. 안건은 `RESOLVED`, 사유는 `timetable.reason`.
+- 저장 뒤에는 **새 id를 현재 시간표로** 써야 한다. 다음 차수 `alternatives`는 그 버전의 배정을 '현재 배정'으로 보고 같은 안을 빼고, `solve(previous_timetable_id=새 id)`는 그 배정을 유지 보너스로 지킨다(`tests/run_apply.py`).
+
 ## 6. 서버 단계와 기타 요청 (`db.py`)
 
 ```python
