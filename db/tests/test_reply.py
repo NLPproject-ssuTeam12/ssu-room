@@ -438,6 +438,79 @@ def test_manual_place_and_lock():
     raises(hdb.set_lock, con, tt, 10, 9, True, has="없는 분반 배정")
 
 
+def snapshot(con, tt, skip=None):
+    """시간표의 배정 (skip=(과목, 분반)은 빼고)"""
+    return sorted(r for r in con.execute("SELECT course_id, section_no, session_no, slot_id, room_id FROM assignment WHERE timetable_id=?", (tt,))
+                  if skip is None or (r[0], r[1]) != skip)
+
+
+def test_apply_option_saves_new_version():
+    con = make(); S = with_timetable(con)
+    rows = [(2, 1, S[("화", "15:00")], 1), (2, 2, S[("목", "15:00")], 1)]
+    n0 = con.execute("SELECT count(*) FROM timetable").fetchone()[0]
+    tt = hdb.apply_option(con, 1, 1, rows, reason="교수님과 통화로 화·목 15:00 확인")
+    assert con.execute("SELECT count(*) FROM timetable").fetchone()[0] == n0 + 1
+    assert con.execute("SELECT kind, parent_id, created_by, reason FROM timetable WHERE id=?", (tt,)).fetchone() == \
+        ("TA_EDIT", 1, 1, "교수님과 통화로 화·목 15:00 확인")
+    assert snapshot(con, tt, skip=(10, 2)) == snapshot(con, 1, skip=(10, 2))           # 옮기지 않은 분반은 그대로
+    assert snapshot(con, tt) != snapshot(con, 1)
+    assert [r[2:4] for r in snapshot(con, tt) if r[:2] == (10, 2)] == [(1, S[("화", "15:00")]), (2, S[("목", "15:00")])]
+    secs = con.execute("SELECT course_id, section_no, status, locked FROM timetable_section WHERE timetable_id=? ORDER BY 1,2", (tt,)).fetchall()
+    assert secs == [(10, 1, "DONE", 0), (10, 2, "DONE", 0), (11, 1, "DONE", 0)], secs   # 옮긴 분반은 COORD → DONE
+    assert status(con) == "RESOLVED"
+    tt2 = hdb.apply_option(con, 1, None, [(2, 1, S[("화", "16:30")], 1), (2, 2, S[("목", "16:30")], 1)])   # 다시 [수정]: 기준은 최신(tt)
+    assert con.execute("SELECT parent_id, created_by FROM timetable WHERE id=?", (tt2,)).fetchone() == (tt, None)
+
+
+def test_apply_option_rejects():
+    con = make(); S = with_timetable(con)
+    ok = [(2, 1, S[("화", "15:00")], 1), (2, 2, S[("목", "15:00")], 1)]
+    n0 = con.execute("SELECT count(*) FROM timetable").fetchone()[0]
+    for st in ("KEPT", "NEXT"):
+        con.execute("UPDATE proposal SET status=? WHERE id=1", (st,)); con.commit()
+        raises(hdb.apply_option, con, 1, 1, ok, has=st)
+    con.execute("UPDATE proposal SET status='SENT' WHERE id=1"); con.commit()
+    raises(hdb.apply_option, con, 1, 3, ok, has="조교만")
+    raises(hdb.apply_option, con, 1, 1, [(1, 1, S[("화", "15:00")], 1)], has="이 안건의 분반이 아닙니다")
+    raises(hdb.apply_option, con, 1, 1, [], has="놓을 칸이 없습니다")
+    raises(hdb.apply_option, con, 1, 1, [(2, 1, 9999, 1)], has="없는 칸")
+    raises(hdb.apply_option, con, 1, 1, [(2, 1, S[("월", "10:30")], 1)], has="이미 쓰는 강의실")   # 과목 11과 같은 칸·같은 방
+    raises(hdb.apply_option, con, None, 1, ok, has="course_id 와 base_timetable_id")
+    con.execute("UPDATE timetable_section SET locked=1 WHERE timetable_id=1 AND course_id=10 AND section_no=2"); con.commit()
+    raises(hdb.apply_option, con, 1, 1, ok, has="고정된 분반")
+    assert con.execute("SELECT count(*) FROM timetable").fetchone()[0] == n0 and status(con) == "SENT"   # 모두 되돌려짐
+    for st in ("OPEN", "PROPOSED", "OFFLINE", "RESOLVED"):                           # KEPT·NEXT 말고는 모두 허용
+        c2 = make(); S2 = with_timetable(c2)
+        c2.execute("UPDATE proposal SET status=? WHERE id=1", (st,)); c2.commit()
+        hdb.apply_option(c2, 1, 1, [(2, 1, S2[("화", "15:00")], 1), (2, 2, S2[("목", "15:00")], 1)])
+        assert status(c2) == "RESOLVED", st
+
+
+def test_apply_option_checks_new_violations():
+    con = make(); S = with_timetable(con)
+    bad_slot = S[("화", "15:00")]
+    def check(c, tt):                                  # 가상 규칙: 과목 10이 화 15:00 에 있으면 위반, 과목 11은 원래부터 위반
+        out = [dict(rule="원래 위반", course_id=11, section_no=1, detail="예전부터")]
+        if c.execute("SELECT 1 FROM assignment WHERE timetable_id=? AND course_id=10 AND slot_id=?", (tt, bad_slot)).fetchone():
+            out.append(dict(rule="가상 규칙", course_id=10, section_no=2, detail="화 15:00"))
+        return out
+    n0 = con.execute("SELECT count(*) FROM timetable").fetchone()[0]
+    e = raises(hdb.apply_option, con, 1, 1, [(2, 1, bad_slot, 1), (2, 2, S[("목", "15:00")], 1)], check=check, has="새로 생깁니다")
+    assert "가상 규칙" in e and "원래 위반" not in e
+    assert con.execute("SELECT count(*) FROM timetable").fetchone()[0] == n0 and status(con) == "SENT"
+    tt = hdb.apply_option(con, 1, 1, [(2, 1, S[("화", "16:30")], 1), (2, 2, S[("목", "16:30")], 1)], check=check)   # 원래 있던 위반만 → 허용
+    assert status(con) == "RESOLVED" and tt > 1
+
+
+def test_apply_option_without_proposal():
+    """AI 도우미 [적용]: 안건 없이 과목·기준 버전을 받아 저장. 안건 상태는 바꾸지 않는다."""
+    con = make(); S = with_timetable(con)
+    tt = hdb.apply_option(con, None, 1, [(1, 1, S[("화", "13:30")], 1), (1, 2, S[("목", "13:30")], 1)],
+                          reason="도우미 [적용]: 1분반을 화·목 13:30으로", course_id=10, base_timetable_id=1)
+    assert con.execute("SELECT kind, parent_id, reason FROM timetable WHERE id=?", (tt,)).fetchone() == ("TA_EDIT", 1, "도우미 [적용]: 1분반을 화·목 13:30으로")
+    assert snapshot(con, tt, skip=(10, 1)) == snapshot(con, 1, skip=(10, 1)) and status(con) == "SENT"
+
+
 def test_rollback_on_failure():
     con = make()
     m = hdb.add_reply(con, 1, 3, "A안", choices=["A"])

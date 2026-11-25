@@ -23,6 +23,8 @@ V8 = P("archive", "schema_v8.sql")      # 005까지 적용한 모양 (006 전)
 M6 = P("migrations", "006_20261124_section.sql")
 V9 = P("archive", "schema_v9.sql")      # 006까지 적용한 모양 (007 전)
 M7 = P("migrations", "007_20261125_reply_choice.sql")
+V10 = P("archive", "schema_v10.sql")    # 007까지 적용한 모양 (008 전)
+M8 = P("migrations", "008_20261125_timetable_reason.sql")
 
 def compare(label, con, target=None):
     """con 이 target(기본: 최종 schema.sql)과 같은 모양인지"""
@@ -92,7 +94,9 @@ for bad in ["INSERT INTO term(id,year,semester,grid_id,phase) VALUES (9,2027,'1'
 run(M6, old)
 ok1 = compare("001~006 적용 후 = schema_v9", old, V9) and ok1
 run(M7, old)
-ok1 = compare("001~007 적용 후", old) and ok1
+ok1 = compare("001~007 적용 후 = schema_v10", old, V10) and ok1
+run(M8, old)
+ok1 = compare("001~008 적용 후", old) and ok1
 
 print("\n=== 경로 2: schema_v4(001까지 적용된 모양)에서 002 → 003 → 004 → 005 → 006")
 v4 = sqlite3.connect(":memory:"); v4.executescript(open(P("archive","schema_v4.sql"), encoding="utf-8").read()); seed(v4)
@@ -107,7 +111,9 @@ print("  응답:", v4.execute("select id, professor_id, lab_requirement, single_
 run(M6, v4)
 ok2 = compare("v4 + 002~006 = schema_v9", v4, V9) and ok2
 run(M7, v4)
-ok2 = compare("v4 + 002~007", v4) and ok2
+ok2 = compare("v4 + 002~007 = schema_v10", v4, V10) and ok2
+run(M8, v4)
+ok2 = compare("v4 + 002~008", v4) and ok2
 print("\n=== 경로 3: schema_v7(004까지 적용된 모양)에서 005 → 006")
 def build_v7():
     v7 = sqlite3.connect(":memory:"); v7.executescript(open(P("archive","schema_v7.sql"), encoding="utf-8").read()); seed(v7); q = v7.execute
@@ -157,7 +163,9 @@ for bad in ["UPDATE proposal SET status='WAITING' WHERE id=1",
 run(M6, v7)
 ok3 = compare("v7 + 005 + 006 = schema_v9", v7, V9) and ok3
 run(M7, v7)
-ok3 = compare("v7 + 005 + 006 + 007", v7) and ok3
+ok3 = compare("v7 + 005 + 006 + 007 = schema_v10", v7, V10) and ok3
+run(M8, v7)
+ok3 = compare("v7 + 005~008", v7) and ok3
 
 print("\n=== 경로 4: 목록 밖 status 가 있으면 005 가 멈추고 데이터는 그대로")
 v7b = build_v7(); v7b.execute("UPDATE proposal SET status='DONE' WHERE id=3"); v7b.commit()
@@ -238,7 +246,7 @@ v9.execute("INSERT INTO other_request(id,response_id,body) VALUES (1,100,'실습
 v9.commit()
 before9 = counts(v9, ("proposal", "proposal_option", "message", "other_request", "timetable_section", "request_item"))
 run(M7, v9)
-ok6 = compare("v9 + 007", v9)
+ok6 = compare("v9 + 007 = schema_v10", v9, V10)
 same9 = before9 == counts(v9, ("proposal", "proposal_option", "message", "other_request", "timetable_section", "request_item"))
 print("  행 수 보존:", same9)
 pr9 = v9.execute("select id, status, prev_proposal_id from proposal order by id").fetchall()
@@ -263,4 +271,14 @@ for bad in ["INSERT INTO reply_choice VALUES (2,'D',NULL)",
     try: v9.execute(bad); print("  거부 안 됨!!", bad[:60]); ok6 = False
     except sqlite3.IntegrityError as e: print("  새 규칙 거부 OK:", str(e)[:60])
 
-print("\n결과:", "모두 통과" if ok1 and ok2 and ok3 and ok4 and ok5 and ok6 else "실패")
+print("\n=== 경로 7: schema_v10(007까지 적용된 모양)에서 008 — 시간표 버전 사유")
+n10 = v9.execute("select count(*) from timetable").fetchone()[0]
+run(M8, v9)
+ok7 = compare("v10 + 008", v9)
+r10 = v9.execute("select id, kind, reason from timetable order by id").fetchall()
+print("  시간표 행 보존·사유 NULL:", r10)
+ok7 = ok7 and len(r10) == n10 and all(r[2] is None for r in r10)
+v9.execute("INSERT INTO timetable(id,term_id,round_id,kind,parent_id,reason) VALUES (2,1,1,'TA_EDIT',1,'교수님과 통화로 확인')"); v9.commit()
+print("  새 버전에 사유 저장:", v9.execute("select kind, parent_id, reason from timetable where id=2").fetchone())
+
+print("\n결과:", "모두 통과" if ok1 and ok2 and ok3 and ok4 and ok5 and ok6 and ok7 else "실패")
