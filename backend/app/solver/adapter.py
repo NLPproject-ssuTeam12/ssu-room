@@ -286,7 +286,8 @@ def from_files(db_path: Optional[Path] = None, map_path: Optional[Path] = None) 
         if not f.exists():
             raise RuntimeError(f"{how} 파일이 없습니다: {f}. 먼저 python backend/tools/seed_db.py 를 실행하세요.")
     mp = json.loads(map_path.read_text(encoding="utf-8"))
-    pairs = {(v["course_id"], v["section_no"]): sid for sid, v in mp["sections"].items() if v != "MANUAL"}
+    pairs = {(v["course_id"], v["section_no"]): sid for sid, v in mp["sections"].items()
+             if isinstance(v, dict) and not v.get("manual")}
     # 서버(FastAPI)는 요청을 다른 스레드에서 처리하므로 check_same_thread=False로 연다.
     # (하윤 db.connect와 같이 외래키 검사를 켠다. db.connect에 이 인자가 생기면 그걸 쓴다)
     con = sqlite3.connect(db_path, check_same_thread=False)
