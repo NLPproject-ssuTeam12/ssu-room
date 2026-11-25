@@ -152,7 +152,8 @@ CREATE TABLE timetable (
   solver_run_id INTEGER REFERENCES solver_run(id),
   parent_id INTEGER REFERENCES timetable(id),
   created_by INTEGER REFERENCES user(id),
-  created_at TEXT DEFAULT CURRENT_TIMESTAMP
+  created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+  reason TEXT                                          -- 이 버전을 만든 이유 (조교 [수정] 사유, 도우미 [적용] 사유 등)
 );
 CREATE TABLE timetable_section (              -- 이 버전에서 열리는 분반
   timetable_id INTEGER REFERENCES timetable(id),

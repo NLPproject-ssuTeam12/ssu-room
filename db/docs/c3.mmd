@@ -38,6 +38,7 @@ erDiagram
         int parent_id FK "고친 원본"
         int created_by FK "NULL이면 시스템"
         text kind "DRAFT TA_EDIT FINAL"
+        text reason "이 버전을 만든 이유 (조교 수정 사유 등)"
     }
     timetable_section {
         int timetable_id PK

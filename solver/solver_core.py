@@ -39,6 +39,7 @@ DB(schema.sql)에서 입력을 읽어 초안 시간표를 만들고 같은 DB에
   pick_best(...)      교수가 고른 대안(여러 개 가능)과 기타 조건으로 만든 안 중 점수가 가장 좋은 안
   check_timetable(...) 시간표의 하드 규칙 위반 목록 (조교 수동 배치 경고용)
   save_proposal(...)  대안을 proposal 테이블에 저장 / add_option(...) 안건에 대안 하나 더
+  apply_option(...)   조교 [확인]·[수정]·도우미 [적용]한 안을 새 시간표 버전(TA_EDIT)으로 저장, 새 위반이 생기면 거부
   finalize(...)       시간표를 FINAL로 확정 (다음 해의 건물·강의실 기본값이 됨)
 """
 import json
@@ -869,6 +870,31 @@ def check_timetable(con, timetable_id):
                                  GROUP BY 1,2,3 HAVING COUNT(*) >= 2 AND MIN(ts.start_time) > '16:30'"""):
         out.append(dict(rule="18:00 이후 연강", course_id=cid, section_no=sec, detail=f"{ss}회차 {st} 시작"))
     return out
+
+
+def option_rows(con, option_id=None, option=None, timetable_id=None):
+    """대안 → db.apply_option 의 rows [(분반, 회차, 칸, 강의실), ...].
+    option_id(저장된 대안) 또는 option(alternatives·pick_best 결과 하나, 이때 timetable_id 로 학기의 칸 순서를 찾음)."""
+    if option_id is not None:
+        return [tuple(r) for r in con.execute("""SELECT section_no, session_no, slot_id, room_id FROM proposal_option_slot
+                                                 WHERE option_id=? ORDER BY 1,2,3""", (option_id,))]
+    by_day = defaultdict(list)
+    for sid, day, per in con.execute("""SELECT ts.id, ts.day, ts.period_no FROM time_slot ts
+             JOIN term t ON t.grid_id=ts.grid_id JOIN timetable tt ON tt.term_id=t.id
+             WHERE tt.id=? ORDER BY ts.day, ts.period_no""", (timetable_id,)):
+        by_day[day].append((per, sid))
+    sorted_days = {d: sorted(p_) for d, p_ in by_day.items()}
+    return sorted((sec, ss, sid, room) for (sec, ss), (start, room) in option["placements"].items()
+                  for sid in _covered(start, option["ks"][(sec, ss)], sorted_days))
+
+
+def apply_option(con, proposal_id, user_id, rows, reason=None, *, course_id=None, base_timetable_id=None):
+    """db.apply_option 에 규칙 검사(check_timetable)를 붙여 부른다: 고른 안을 새 시간표 버전(TA_EDIT)으로 저장하고,
+    기준 버전에 없던 하드 규칙 위반이 새로 생기면 저장하지 않고 ValueError. -> 새 시간표 id
+    서버(어댑터)는 이 함수를 부른 뒤 새 id 를 '현재 시간표'로 써야 다음 차수 alternatives·solve 가 이 버전을 기준으로 한다."""
+    import db as _db                                     # db/db.py (db 와 solver 가 둘 다 sys.path 에 있어야 한다)
+    return _db.apply_option(con, proposal_id, user_id, rows, reason, course_id=course_id,
+                            base_timetable_id=base_timetable_id, check=check_timetable)
 
 
 def _signature(mapping):

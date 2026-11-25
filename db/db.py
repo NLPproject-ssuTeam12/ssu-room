@@ -486,3 +486,99 @@ def set_lock(con, timetable_id, course_id, section_no, locked):
     except Exception:
         con.rollback()
         raise
+
+
+def apply_option(con, proposal_id, user_id, rows, reason=None, *, course_id=None, base_timetable_id=None, check=None):
+    """조교가 처리안을 [확인]·[수정]하거나 AI 도우미 [적용]으로 고른 안을 새 시간표 버전으로 저장한다. -> 새 시간표 id
+    rows: [(분반, 회차, 칸 id, 강의실 id), ...]  고른 안이 차지하는 칸마다 한 행 (assignment 와 같은 모양).
+    - 기준 버전(base_timetable_id, 없으면 그 학기 최신 시간표)을 복사해 kind='TA_EDIT', parent_id=기준 버전으로 만들고,
+      rows 에 나온 분반의 배정만 바꾼다(최소 변경). 나머지 분반은 배정·상태·고정 그대로. 바꾼 분반은 상태 DONE.
+    - proposal_id 가 있으면: 그 안건의 과목, 안건에 분반이 있으면 그 분반만. 안건 → RESOLVED.
+      현재대로 유지(KEPT)·다음 차수(NEXT) 안건은 거부. 없으면(도우미 [적용]): course_id 와 base_timetable_id 필수.
+    - user_id: 있으면 조교(role='TA')여야 하고 created_by 에 남는다. None 이면 시스템(created_by NULL).
+    - reason: 이 버전을 만든 이유 → timetable.reason ([수정]의 사유 등).
+    - 고정된 분반은 바꾸지 않는다(ValueError). 같은 칸·같은 강의실은 DB 가 막는다(ValueError).
+    - check(con, timetable_id) -> 위반 목록 을 주면(엔진 solver_core.check_timetable) 기준 버전에 없던 위반이
+      새로 생기면 저장하지 않고 ValueError. 엔진의 solver_core.apply_option 이 이 검사를 붙여 부른다.
+    - 한 트랜잭션: 실패하면 아무것도 바뀌지 않는다."""
+    try:
+        if user_id is not None:
+            u = con.execute("SELECT role FROM user WHERE id=?", (user_id,)).fetchone()
+            if u is None or u[0] != "TA":
+                raise ValueError(f"조교만 처리안을 반영할 수 있습니다: 사용자 {user_id}")
+        if proposal_id is not None:
+            p = _proposal(con, proposal_id)
+            if p["status"] in ("KEPT", "NEXT"):
+                raise ValueError(f"옮기지 않기로 한 안건입니다: 안건 {proposal_id} 상태 "
+                                 f"'{PROPOSAL_LABELS[p['status']]}'({p['status']})")
+            if course_id is not None and course_id != p["course_id"]:
+                raise ValueError(f"안건의 과목이 아닙니다: 안건 {proposal_id}는 과목 {p['course_id']}")
+            course_id = p["course_id"]
+            term = con.execute("SELECT t.term_id FROM proposal p JOIN timetable t ON t.id = p.timetable_id WHERE p.id=?",
+                               (proposal_id,)).fetchone()[0]
+        else:
+            if course_id is None or base_timetable_id is None:
+                raise ValueError("안건 없이 반영하려면(도우미 [적용]) course_id 와 base_timetable_id 가 필요합니다")
+            p = None
+        if base_timetable_id is None:
+            base_timetable_id = con.execute("SELECT MAX(id) FROM timetable WHERE term_id=?", (term,)).fetchone()[0]
+        brow = con.execute("SELECT term_id, round_id FROM timetable WHERE id=?", (base_timetable_id,)).fetchone()
+        if brow is None:
+            raise ValueError(f"없는 시간표: {base_timetable_id}")
+        if p is not None and brow[0] != term:
+            raise ValueError(f"안건과 다른 학기의 시간표입니다: 시간표 {base_timetable_id}")
+        rows = [tuple(r) for r in rows]
+        if not rows:
+            raise ValueError("놓을 칸이 없습니다")
+        secs = sorted({r[0] for r in rows})
+        if p is not None and p["section_no"] is not None and secs != [p["section_no"]]:
+            raise ValueError(f"이 안건의 분반이 아닙니다: {secs} (안건은 {p['section_no']}분반)")
+        for sec, ss, sid, room in rows:
+            if con.execute("SELECT 1 FROM time_slot WHERE id=?", (sid,)).fetchone() is None:
+                raise ValueError(f"없는 칸: {sid}")
+            if con.execute("SELECT 1 FROM room WHERE id=?", (room,)).fetchone() is None:
+                raise ValueError(f"없는 강의실: {room}")
+        locked = [s_ for s_ in secs if con.execute(
+            "SELECT locked FROM timetable_section WHERE timetable_id=? AND course_id=? AND section_no=?",
+            (base_timetable_id, course_id, s_)).fetchone() in ((1,),)]
+        if locked:
+            raise ValueError(f"고정된 분반은 바꾸지 않습니다: 과목 {course_id} {locked}분반. 고정을 먼저 푸세요(set_lock)")
+        marks = ",".join("?" * len(secs))
+        tt = con.execute("""INSERT INTO timetable(term_id, round_id, kind, parent_id, created_by, reason)
+                            VALUES (?,?,'TA_EDIT',?,?,?)""",
+                         (brow[0], p["round_id"] if p else brow[1], base_timetable_id, user_id, reason)).lastrowid
+        con.execute(f"""INSERT INTO timetable_section(timetable_id, course_id, section_no, planned_enrollment, status, locked)
+                        SELECT ?, course_id, section_no, planned_enrollment, status, locked FROM timetable_section
+                        WHERE timetable_id=? AND NOT (course_id=? AND section_no IN ({marks}))""",
+                    (tt, base_timetable_id, course_id, *secs))
+        for s_ in secs:
+            enr = con.execute("""SELECT COALESCE((SELECT planned_enrollment FROM timetable_section
+                                                 WHERE timetable_id=? AND course_id=? AND section_no=?),
+                                                (SELECT enrollment FROM course_section WHERE course_id=? AND section_no=?))""",
+                              (base_timetable_id, course_id, s_, course_id, s_)).fetchone()[0]
+            con.execute("""INSERT INTO timetable_section(timetable_id, course_id, section_no, planned_enrollment, status, locked)
+                           VALUES (?,?,?,?,'DONE',0)""", (tt, course_id, s_, enr))
+        con.execute(f"""INSERT INTO assignment SELECT ?, course_id, section_no, session_no, slot_id, room_id FROM assignment
+                        WHERE timetable_id=? AND NOT (course_id=? AND section_no IN ({marks}))""",
+                    (tt, base_timetable_id, course_id, *secs))
+        for sec, ss, sid, room in rows:
+            try:
+                con.execute("INSERT INTO assignment VALUES (?,?,?,?,?,?)", (tt, course_id, sec, ss, sid, room))
+            except sqlite3.IntegrityError as e:
+                raise ValueError(f"같은 시간에 이미 쓰는 강의실이거나 같은 칸이 두 번 들어갔습니다: 칸 {sid}, 강의실 {room} ({e})") from None
+        if check is not None:
+            key = lambda v: (v["rule"], v["course_id"], v["section_no"], v["detail"])
+            before = [key(v) for v in check(con, base_timetable_id)]
+            new = [key(v) for v in check(con, tt)]
+            for k in before:
+                if k in new:
+                    new.remove(k)
+            if new:
+                raise ValueError(f"이 안으로 옮기면 하드 규칙 위반이 새로 생깁니다: {new}")
+        if p is not None:
+            con.execute("UPDATE proposal SET status='RESOLVED' WHERE id=?", (proposal_id,))
+        con.commit()
+        return tt
+    except Exception:
+        con.rollback()
+        raise
