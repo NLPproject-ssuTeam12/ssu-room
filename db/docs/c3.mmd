@@ -62,8 +62,9 @@ erDiagram
         int course_id FK
         int section_no "어느 분반인지"
         text reason
-        text status "OPEN SENT PROPOSED RESOLVED KEPT NEXT OFFLINE"
+        text status "OPEN SENT PROPOSED RESOLVED KEPT NEXT OFFLINE HOLD NO_OPTION"
         int prev_proposal_id FK "이전 차수 안건"
+        text target_kind "UNPLACED MISMATCH PARTIAL 조율 대상 종류"
     }
     proposal_option {
         int id PK

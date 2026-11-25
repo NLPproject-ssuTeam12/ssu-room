@@ -9,6 +9,10 @@ erDiagram
     time_slot ||--o{ response_slot : "칸"
     course_response ||--o| other_request : "기타 요청(자연어)"
     course_response ||--o{ request_item : "솔버 요청"
+    round ||--o{ pair_request : "분반 연강·교차"
+    course ||--o{ pair_request : "과목 단위로 한 번"
+    user ||--o{ pair_request : "그 분반들의 교수"
+    pair_request ||--|{ pair_request_section : "붙일 분반(순서)"
     other_request ||--o{ request_item : "보고 만든 항목"
     user ||--o| professor_building_pref : "희망 건물 하나"
     building ||--o{ professor_building_pref : "건물"
@@ -36,10 +40,22 @@ erDiagram
         int id PK
         int round_id FK
         int course_id FK
-        int professor_id FK "분반 담당 교수별 응답"
+        int section_no "분반마다 응답 (11/25)"
+        int professor_id FK "그 분반 담당 교수"
         int lab_requirement "1 쓴다 0 안 쓴다 필수 입력"
         text single_day_pref "MUST NONE 주1회 연강(분반 내)"
-        text section_pair "NONE BACK_TO_BACK CROSS 두 분반 연강·교차"
+    }
+    pair_request {
+        int id PK
+        int round_id FK
+        int course_id FK
+        int professor_id FK
+        text mode "BACK_TO_BACK CROSS (상관없음 = 행 없음)"
+    }
+    pair_request_section {
+        int request_id PK
+        int seq PK "교수가 적은 순서, 솔버는 앞 두 분반만"
+        int section_no
     }
     response_slot {
         int response_id PK
