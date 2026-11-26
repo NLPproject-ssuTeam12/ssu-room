@@ -108,6 +108,10 @@ def load_history(con, term_id):
     return hist_bld, dict(hist_room)
 
 
+def _has_column(con, table, column):
+    return any(row[1] == column for row in con.execute(f"PRAGMA table_info({table})"))
+
+
 def load_input(con, term_id, round_id):
     """-> by_day, courses, secs, rooms, pref, slot_info
     secs[(과목, 분반)] = 그 분반의 담당 교수, 수강 인원과 그 교수의 응답(불가·희망 칸, 실습실, 연강)
@@ -166,7 +170,9 @@ def load_input(con, term_id, round_id):
             else:
                 mine = sorted(sec for sec, p in c["section_prof"].items() if p == prof)
             c["pairs"].append((mine, mode))
-    hire = {u: y for u, y in q("SELECT id, hire_year FROM user WHERE hire_year IS NOT NULL")}      # 교수 -> 임용 연도
+    # migration 011 전 DB(user.hire_year 없음)는 그 사람의 연차기준을 무시한다(동점 처리가 다음 순서로 넘어감)
+    hire = ({u: y for u, y in q("SELECT id, hire_year FROM user WHERE hire_year IS NOT NULL")}
+            if _has_column(con, "user", "hire_year") else {})      # 교수 -> 임용 연도
     secs = {}
     for c in courses.values():
         for sec in range(1, c["sections"] + 1):
