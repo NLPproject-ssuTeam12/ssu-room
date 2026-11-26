@@ -348,6 +348,26 @@ API는 [docs/planning/API명세.md](docs/planning/API명세.md)를 본다.
   6. AI 도우미 질문: 이유 설명("…은 왜 밀렸어?"), 가정 실행("정보과학관 21303 공사하면?"), 이동("…를 월수 12시로 옮겨줘" → [적용])
 - 무료 티어 언어 모델이 막힐 때를 대비해 시연 응답을 미리 저장해 둔다(`LLM_CACHE_DIR`)
 
+### 컴퓨터 2대 시연
+
+컴퓨터 A(조교)가 서버와 화면을 켜고, 컴퓨터 B(교수)는 브라우저로 A에 들어와 같은 서버·DB를 씁니다. 아래는 Windows 기준입니다.
+
+1. **같은 네트워크:** 두 대 모두 핸드폰 핫스팟에 연결한다 (학교 와이파이는 기기끼리 접속을 막을 수 있음)
+2. **컴퓨터 A 서버:** `ipconfig`로 IPv4 주소(A의IP)를 확인하고
+   ```bat
+   set SSUROOM_ENGINE=solver
+   set SSUROOM_NLP=llm
+   set SSUROOM_LAN=1
+   uvicorn backend.app.main:app --host 0.0.0.0 --port 8000
+   ```
+   macOS는 `set` 대신 `export SSUROOM_ENGINE=solver SSUROOM_NLP=llm SSUROOM_LAN=1`, IP는 `ipconfig getifaddr en0`
+3. **컴퓨터 A 화면:** `frontend`에서 `npm run dev -- --host`. 화면이 접속한 주소를 따라가는 버전이면 다른 설정은 필요 없고, 안 따라가는 버전이면 먼저 `set VITE_API_BASE=http://A의IP:8000`
+4. **컴퓨터 B:** 브라우저로 `http://A의IP:5173` → 교수로 들어간다
+5. **방화벽:** 처음 켤 때 Windows 방화벽 창이 뜨면 "개인 네트워크"를 허용한다
+6. **확인:** B 브라우저에서 `http://A의IP:8000/health`가 열리고 `lan`이 `true`
+- 화면이 몇 초마다 다시 불러오지 않는 버전이면, 상대가 바꾼 내용은 새로고침(F5)해야 보인다
+- `SSUROOM_LAN`은 사설망(192.168.x.x·10.x.x.x·172.16~31.x.x)의 5173 포트만 허용한다. 사설망 주소가 아니면 `set SSUROOM_CORS=http://주소:5173`(쉼표로 여러 개)
+
 ## 저장소 사용 규칙
 
 ### 1. 기본 흐름
