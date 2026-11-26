@@ -8,6 +8,7 @@ DB 스키마와 연결·단계 관리 함수는 `../db/`에 있습니다.
 | 파일 | 내용 |
 |---|---|
 | `solver_core.py` | 배정 엔진. 공개 함수 `solve` `alternatives`(= `make_alternatives`) `save_proposal` `finalize` |
+| `greedy.py` | 그리디 기준선 (비교 실험용, 서비스에서는 안 씀): 정한 우선순위로 분반을 하나씩, 엔진과 같은 규칙·점수로 그때 가장 좋은 곳에 놓고 다시 고치지 않음. 실험은 `../experiments/greedy_vs_solver.py` |
 | `SOLVER_API.md` | 사용법, 조율 쪽이 넘기는 조건 형식, 값의 뜻 |
 | `tests/test_data.py` | 가상 데이터 생성 (70과목, 교수 30명). 응답·희망, 분반(`course_section`, 분반 인원), 교수당 희망 건물 하나 |
 | `tests/test_solver2.py` | 규칙 위반 검사(`verify`), 쌍 제약 검사, 가상 데이터 보조 함수 |
