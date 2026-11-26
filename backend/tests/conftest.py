@@ -6,6 +6,14 @@
 import sys
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
+
+
+@pytest.fixture(autouse=True)
+def _keyword_by_default(monkeypatch):
+    """테스트는 늘 키워드 방식이 기본: 서버 기본 해석 방식(SSUROOM_NLP)을 지운다 (.env 나 셸 값에 흔들리지 않게)."""
+    monkeypatch.delenv("SSUROOM_NLP", raising=False)

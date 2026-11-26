@@ -159,6 +159,25 @@ SSU:room은 **AI가 교수 글을 읽고, 솔버가 시간표를 짜면, 조교�
 - 2차에서도 틀 문장이 모든 칸에서 같거나 나았습니다
 - 채점 기준·결과: [docs/planning/메시지_사람평가.md](docs/planning/메시지_사람평가.md) · 실행: `python eval/run_coord.py message --method llm`
 
+## AI 도우미 평가
+
+조교 질문 20개(김대원 작성, 최재성 라벨)로 의도와 정보(과목·분반·교수·요일·시각·강의실·건물)를 맞게 뽑는지, 정보가 모자랄 때 되묻는지를 잽니다.
+키워드 규칙(기준선)과 언어 모델(Gemini Flash Lite)을 같은 정답으로 비교합니다. 결과 파일: `eval/results/assistant_*`.
+
+| | 키워드 11/24 (개선 전) | 언어 모델 11/25 (개선 전) | 키워드 11/25 (개선 후) | 언어 모델 11/26 (개선 후) |
+|---|---|---|---|---|
+| 의도 정확도 | 0.85 | 0.95 | 1.00 | 1.00 |
+| 정보 F1 | 0.915 | 0.949 / 0.931 | 0.951 | **0.984** |
+| 되묻기 정확도 | 0.65 | 0.75 | 0.90 | 0.90 |
+| 키워드로 대신 처리 | — | 20개 중 4개 (두 번 잼) | — | 0개 |
+
+- **지표:** 의도 정확도 = 맞힌 의도 비율. 정보 F1 = 뽑은 정보 항목의 정밀도·재현율 조화평균. 되묻기 정확도 = 물어야 할 때 묻고, 안 물어야 할 때 안 묻는 비율
+- **키워드로 대신 처리:** 무료 티어 언어 모델이 막히면(429·503) 키워드 결과로 답한다. 그 수를 따로 적는다. 개선 전 언어 모델 칸은 그 4개가 섞인 값이다
+- **개선 내용(11/25):** 과목 줄임말 표를 한 곳(`backend/app/nlp/aliases.py`)에 모으고 두 방식이 같이 쓰게 함, 같은 이름 과목은 과목 코드·학과·학년으로 되묻기, 키워드에 "A 말고 B", 옮기기 동사(당겨·미뤄·빼 줘), 가정 표현(겹쳐·문제 없어·자리 있어), 현황(답장·회신·몇 차), 시간표 밖 일(수강신청·메일 등) 우선
+- **한계:** 문장이 20개뿐이라 한두 문장에 수치가 크게 움직인다. 라벨러가 1명이라 두 사람 일치도가 없다. 평가 문장은 AI가 쓴 초안을 팀이 합의해 썼다. 개선은 일반 규칙으로만 했고 평가 문장에 맞춰 특정 문장을 고치지 않았지만, 같은 20문장으로 다시 잰 값이라 새 문장에서는 더 낮을 수 있다.
+- 개선 후 언어 모델은 정보 F1에서 키워드보다 높고(0.984 vs 0.951), 되묻기는 둘 다 8개 중 6개만 물었다
+- 실행: `python eval/run_assistant.py --method keyword` / `--method llm --sleep 4` (질문 사이 4초 쉼, 429·503이면 한 번 더 기다렸다 다시)
+
 ## 기대효과
 
 | 항목 | 지금 | SSU:room | 근거 |
@@ -256,6 +275,53 @@ cp .env.example .env   # Windows: copy .env.example .env
 `.env`에는 각자 발급받은 API 키를 넣습니다. `.env`는 절대 커밋하지 않습니다.
 
 테스트: 저장소 맨 위에서 `python -m pytest backend/tests -q` (backend/ 안에서는 `python -m pytest tests -q`).
+
+## 실행 방법
+
+1. **설치:** 위 "개발 환경 준비"처럼 `.venv`를 만들고 `pip install -r backend/requirements.txt`
+2. **언어 모델 키:** `.env`에 `GEMINI_API_KEY=…`. 없으면 조율 메시지·회신 해석·AI 도우미가 모두 키워드 방식으로 돈다
+   - **기본 해석 방식:** `SSUROOM_NLP=llm`이면 화면이 `method`를 안 보내도 언어 모델로 돈다(없으면 `keyword`). Windows `set SSUROOM_NLP=llm` / macOS·Linux `export SSUROOM_NLP=llm` (또는 `.env`에 한 줄). 요청에 `method`를 주면 그게 우선이고, 언어 모델이 막히면(429·503·키 없음) 키워드로 대신 처리한다
+3. **데이터 넣기(시드):** 강의정보 엑셀 → DB(`ssuroom.db`)와 분반 대응표. 시연은 `--demo`
+   ```bash
+   python backend/tools/seed_db.py          # 실제 강의 목록 + 교수 가명 + 가상 희망(실제 강의 칸)
+   python backend/tools/seed_db.py --demo   # 시연용: 일부 분반의 가상 희망을 서로 겹치게 (조율 대상이 생김)
+   ```
+4. **서버 켜기 (DB 모드):** 배정은 하윤 엔진, 상태는 DB에 저장
+   ```bash
+   SSUROOM_ENGINE=solver uvicorn backend.app.main:app --port 8000        # macOS·Linux
+   $env:SSUROOM_ENGINE="solver"; uvicorn backend.app.main:app --port 8000  # Windows PowerShell
+   ```
+   `SSUROOM_ENGINE` 없이 켜면 **메모리 모드**다: 배정 엔진이 가짜 함수(stubs.py)라 테스트·화면 연결용이고, 시연에는 쓰지 않는다
+5. **화면:** React 화면(`frontend/`, 강민우)은 따로 켠다 (Vite 기본 http://localhost:5173). 서버는 이 주소만 CORS 허용
+6. **테스트:** `python -m pytest backend/tests -q` (키 없이 돈다. 실제 언어 모델 테스트 2개는 건너뜀)
+
+API는 [docs/planning/API명세.md](docs/planning/API명세.md)를 본다.
+
+## 비공개 데이터
+
+`data/private/`는 저장소에 없습니다(`.gitignore`). 팀 공유 드라이브에서 따로 받아 같은 자리에 둡니다.
+
+| 파일 | 내용 |
+|---|---|
+| `data/private/timetable/2026-2_강의정보.xlsx` | AI소프트웨어학부 2026-2학기 실제 개설 강좌 (시드 원본) |
+| `data/private/alias_map.json` | 교수 실명 → 가명 대응 (시드가 만든다. 절대 올리지 않는다) |
+| `data/private/real/*.json` | 메모리 모드·평가용 가명 데이터, 시드가 만든 분반 대응표 `section_map.json` |
+
+시연 데이터는 **실제 강의 목록 + 교수 가명 + 가상 희망**입니다. 희망은 실제 강의 칸을 희망으로 넣은 가상 값이고, `--demo`는 그중 일부를 시연용으로 겹치게 바꾼 값입니다(바꾼 분반은 출력과 `section_map.json`의 `demo_changed`에 남음). 화면·발표에서 가상 데이터임을 표시합니다.
+
+## 시연 준비
+
+- **노트북 2대:** 조교 화면(서버를 켠 노트북)과 교수 화면(같은 서버 주소로 접속). 교수 답장은 시스템 안에서만 받는다
+- **준비:** `python backend/tools/seed_db.py --demo` → 서버를 DB 모드로 켬. 2026-2 엑셀 기준 초안이 약 10초, 조율 대상 OPEN 5·HOLD 2·NO_OPTION 1 (11/25 측정)
+- **언어 모델 켜기:** `.env`에 `GEMINI_API_KEY=…`, 서버 켜기 전에 Windows `set SSUROOM_NLP=llm` / macOS·Linux `export SSUROOM_NLP=llm`. `GET /health`의 `nlp`가 `llm`, `gemini_key`가 `true`인지 확인
+- **순서:**
+  1. 초안 만들기 → 시간표와 조율 대상(못 놓음·어긋남·일부 어긋남·대안 없음) 확인
+  2. 1차 조율 시작 → 조율 메시지 자동 발송 (일부 어긋남은 조교가 [보내기], 대안 없음은 [확인] → 따로 연락)
+  3. 교수 화면에서 답장 (A·B·C·기타·지금 자리 그대로)
+  4. 조교 화면에서 회신 해석·처리안 확인 → [확인]·[수정]·[현재대로 유지]·[따로 연락]
+  5. 2차 조율 (확인한 조건을 쌓은 새 대안) → 확정 → 엑셀 내보내기
+  6. AI 도우미 질문: 이유 설명("…은 왜 밀렸어?"), 가정 실행("정보과학관 21303 공사하면?"), 이동("…를 월수 12시로 옮겨줘" → [적용])
+- 무료 티어 언어 모델이 막힐 때를 대비해 시연 응답을 미리 저장해 둔다(`LLM_CACHE_DIR`)
 
 ## 저장소 사용 규칙
 

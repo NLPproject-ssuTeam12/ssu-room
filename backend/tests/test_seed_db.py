@@ -130,3 +130,51 @@ def test_real_excel_seed(tmp_path):
             by_course.setdefault(v["course_id"], []).append(v["section_no"])
     assert all(sorted(v) == list(range(1, len(v) + 1)) for v in by_course.values())
     assert dict(out["counts"])["분반(DB)"] == len(sd.section_pairs(mp))
+
+
+# ---------- 시연용 겹침 --demo ----------
+
+def _demo(tmp_path, demo):
+    x = fake_xlsx(tmp_path / "fake.xlsx")
+    (tmp_path / "rooms.json").write_text(json.dumps(ROOMS, ensure_ascii=False), encoding="utf-8")
+    (tmp_path / "fixed.json").write_text(json.dumps(FIXED, ensure_ascii=False), encoding="utf-8")
+    out = sd.seed(x, tmp_path / "t.db", tmp_path / "map.json", tmp_path / "alias.json", tmp_path / "rooms.json",
+                  tmp_path / "fixed.json", demo=demo)
+    con = sqlite3.connect(tmp_path / "t.db")
+    mp = json.loads((tmp_path / "map.json").read_text(encoding="utf-8"))
+    cells = {}
+    for c, n, kind, cnt in con.execute("""SELECT r.course_id, r.section_no, s.kind, COUNT(*) FROM course_response r
+                                          JOIN response_slot s ON s.response_id = r.id GROUP BY 1, 2, 3"""):
+        cells[(c, n, kind)] = cnt
+    prefer = {(c, n): sorted(x for (x,) in con.execute(
+        """SELECT t.day || '-' || t.start_time FROM course_response r JOIN response_slot s ON s.response_id = r.id
+           JOIN time_slot t ON t.id = s.slot_id WHERE r.course_id=? AND r.section_no=? AND s.kind='PREFER'""", (c, n)))
+        for c, n in con.execute("SELECT course_id, section_no FROM course_section")}
+    con.close()
+    return out, mp, cells, prefer
+
+
+def test_demo_default_is_unchanged(tmp_path):
+    out, mp, cells, _ = _demo(tmp_path, False)
+    assert out["demo_changed"] == {} and not any(k[2] == "BLOCK" for k in cells)
+    assert not any("demo_changed" in v for v in mp["sections"].values())
+
+
+def test_demo_makes_overlaps(tmp_path):
+    out, mp, cells, prefer = _demo(tmp_path, True)
+    ch = out["demo_changed"]
+    # 같은 교수의 두 분반(자료구조 02·05): 하나는 막고(지금 칸 말고 모두 불가), 하나는 그 칸만 희망
+    block_sid = next(s for s, w in ch.items() if w.startswith("막는"))
+    over_sid = next(s for s, w in ch.items() if w.startswith("겹침"))
+    b, o = mp["sections"][block_sid], mp["sections"][over_sid]
+    assert prefer[(o["course_id"], o["section_no"])] == prefer[(b["course_id"], b["section_no"])]
+    assert cells[(b["course_id"], b["section_no"], "BLOCK")] == 40 - 2
+    no_opt = next(s for s, w in ch.items() if w.startswith("대안 없음"))
+    n = mp["sections"][no_opt]
+    assert cells[(n["course_id"], n["section_no"], "BLOCK")] == 40
+    assert all(mp["sections"][s]["demo_changed"] == w for s, w in ch.items())
+    # 과목·분반·인원은 그대로
+    base = _demo(tmp_path / "b", False) if (tmp_path / "b").mkdir() is None else None
+    assert {k: (v.get("course_id"), v.get("section_no"), v["enrollment"]) for k, v in mp["sections"].items()} == \
+        {k: (v.get("course_id"), v.get("section_no"), v["enrollment"]) for k, v in base[1]["sections"].items()}
+    assert out["real_name_hits"] == 0

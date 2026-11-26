@@ -12,6 +12,7 @@
 
 import json
 import os
+import re
 import sqlite3
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -118,13 +119,15 @@ class DBMode:
     def sections(self) -> List[Section]:
         lab = {(c, s): l for c, s, l in self.q("SELECT course_id, section_no, lab_requirement FROM course_response "
                                                   "WHERE round_id=?", (self.wish_round,))}
+        enr = {(c, s): e for c, s, e in self.q("SELECT course_id, section_no, enrollment FROM course_section")}
         out = []
         for sid, v in self.map["sections"].items():
             weekly = sum(b["slots"] for b in v["blocks"]) if v.get("manual") else 2
             shape = v["shape"]
             out.append(Section(
                 id=sid, code=v["code"], name=v["name"], division=v.get("division"), year=v.get("year"),
-                category=v.get("category_orig") or v.get("category") or "", enrollment=v.get("enrollment"),
+                category=v.get("category_orig") or v.get("category") or "",
+                enrollment=enr.get((v.get("course_id"), v.get("section_no")), v.get("enrollment")),   # DB 값이 기준
                 weekly_blocks=max(weekly, 1), professor=v.get("professor"),
                 lab_need="MUST" if lab.get((v.get("course_id"), v.get("section_no"))) == "MUST" else "NONE",
                 shape=shape if shape in ("TWICE", "ONCE_LONG", "MANUAL") else "MANUAL"))
@@ -144,6 +147,7 @@ class DBMode:
         bld = dict(self.q("""SELECT p.professor_id, b.name FROM professor_building_pref p
                              JOIN building b ON b.id = p.building_id"""))
         notes = dict(self.q("SELECT response_id, body FROM other_request WHERE response_id IS NOT NULL"))
+        enr = {(c, s): e for c, s, e in self.q("SELECT course_id, section_no, enrollment FROM course_section")}
         name_of = {i: n for n, i in self.prof_id.items()}
         out = []
         for rid, cid, sec, pid, lab, single in self.q(
@@ -160,7 +164,7 @@ class DBMode:
                 if d in DAYS and st in STARTS:
                     cells[f"{d}-{st}"] = kind
             out.append(Wish(section_id=sid, professor=name_of.get(pid), cells=cells, lab=lab, single_day=single,
-                            building=bld.get(pid), note=notes.get(rid, "")))
+                            building=bld.get(pid), note=notes.get(rid, ""), enrollment=enr.get((cid, sec))))
         return out
 
     def manual_assignments(self) -> Dict[str, Assignment]:
@@ -270,6 +274,9 @@ class DBMode:
                        (rid, self.slots.id_of[(d, st)], kind))
             if wish.note.strip():
                 self.q("INSERT INTO other_request(response_id, body) VALUES (?,?)", (rid, wish.note.strip()))
+            if wish.enrollment is not None:   # 분반 수강 인원 (하윤 db.py 에 함수가 없어 서버가 직접 바꾼다)
+                self.q("UPDATE course_section SET enrollment=? WHERE course_id=? AND section_no=?",
+                       (wish.enrollment, cid, sec))
             self.q("DELETE FROM professor_building_pref WHERE professor_id=?", (pid,))
             if wish.building:
                 b = self.q("SELECT id FROM building WHERE name=?", (wish.building,)).fetchone()
@@ -292,6 +299,19 @@ class DBMode:
         secs = [self.section_key(x)[1] for x in order] if order else None
         got = self.hdb.set_pair_request(self.con, self.wish_round, cid, prof, mode, secs)
         return [self.pairs.sid_of[(cid, s)] for s in got]
+
+    def pair_requests(self) -> List[dict]:
+        """분반 연강·교차 (pair_request + pair_request_section, 희망 수집 차수) → POST /wishes/pair 모양.
+        section_id = 붙일 분반 중 첫 분반(교수가 적은 순서), order = 붙일 분반 id 순서."""
+        out = []
+        for pid, cid, mode in self.q("SELECT id, course_id, mode FROM pair_request WHERE round_id=? ORDER BY id",
+                                     (self.wish_round,)).fetchall():
+            order = [self.pairs.sid_of.get((cid, sec)) for (sec,) in self.q(
+                "SELECT section_no FROM pair_request_section WHERE request_id=? ORDER BY seq", (pid,))]
+            order = [x for x in order if x]
+            if order:
+                out.append(dict(section_id=order[0], mode=mode, order=order))
+        return out
 
     # ---------- 초안 ----------
 
@@ -380,12 +400,16 @@ class DBMode:
             raise DBModeError("아직 처리안이 없습니다. 답장을 먼저 넣으세요.")
         return row[0], json.loads(row[1] or "{}")
 
-    def _apply(self, pid: int, mid: int, decide_args: dict, option_id: int, reason: Optional[str]) -> int:
+    def _apply(self, pid: int, mid: int, decide_args: dict, option_id: int, reason: Optional[str],
+               placed: Optional[dict] = None) -> int:
         """조교 결정 기록(decide_reply) + 새 시간표 버전(apply_option). 새 규칙 위반이면 결정을 되돌리고 거부한다.
         (하윤 apply_option 은 안건을 RESOLVED 로 바꾸고 decide_reply 는 PROPOSED 일 때만 받으므로 결정을 먼저 쓴다.
-         두 함수를 한 트랜잭션으로 묶는 함수가 없어, 거부되면 서버가 결정 기록을 되돌린다.)"""
+         두 함수를 한 트랜잭션으로 묶는 함수가 없어, 거부되면 서버가 결정 기록을 되돌린다.)
+        placed: pick_best 가 지금 시간표에 놓아 본 결과(placements·ks). 있으면 그 칸·강의실로 rows 를 만든다.
+        저장된 대안의 강의실은 그사이 다른 수업(예: 수동 배치)이 쓸 수 있어서다 (pick_best 는 같은 묶음의 다른 방을 고름)."""
         self.hdb.decide_reply(self.con, mid, self.ta_id, option_id=option_id, reason=reason, **decide_args)
-        rows = self.sc.option_rows(self.con, option_id=option_id)
+        rows = (self.sc.option_rows(self.con, option=placed, timetable_id=self.current_tt()) if placed
+                else self.sc.option_rows(self.con, option_id=option_id))
         try:
             new_tt = self.sc.apply_option(self.con, pid, self.ta_id, rows, reason, base_timetable_id=self.current_tt())
         except ValueError:
@@ -416,11 +440,11 @@ class DBMode:
             self.hdb.decide_reply(self.con, mid, self.ta_id, "OFFLINE", reason=reason)
             return dict(action="offline", applied=None)
         if action == "edit":
-            oid = self.option_id(pid, choice)
-            if oid is None:
+            if self.option_id(pid, choice) is None:
                 raise DBModeError(f"{choice}안이 없습니다.")
-            tt = self._apply(pid, mid, dict(action="EDIT", conditions=cond if has_cond else None), oid, reason)
-            return dict(action="edit", applied=self._alt_dict(pid, oid), timetable_id=tt)
+            oid, placed = self._pick(sid, pid, {"picks": [choice], "ordered": True}, None, edit=True)
+            tt = self._apply(pid, mid, dict(action="EDIT", conditions=cond if has_cond else None), oid, reason, placed)
+            return dict(action="edit", applied=self._alt_dict(pid, oid, placed), timetable_id=tt)
         # confirm
         if prop.get("action") == "next":
             self.hdb.decide_reply(self.con, mid, self.ta_id, "CONFIRM", reason=reason, conditions=cond,
@@ -429,14 +453,15 @@ class DBMode:
         if prop.get("action") != "move":
             raise DBModeError(f"조교가 직접 정해야 하는 처리안입니다 (action={prop.get('action')}). "
                               "[수정]·[현재대로 유지]·[따로 연락]을 고르세요.")
-        oid = self._pick(sid, pid, parsed, cond if has_cond else None)
+        oid, placed = self._pick(sid, pid, parsed, cond if has_cond else None)
         tt = self._apply(pid, mid, dict(action="CONFIRM", proposal_action="move", conditions=cond if has_cond else None),
-                         oid, reason)
-        return dict(action="confirm", applied=self._alt_dict(pid, oid), timetable_id=tt)
+                         oid, reason, placed)
+        return dict(action="confirm", applied=self._alt_dict(pid, oid, placed), timetable_id=tt)
 
-    def _pick(self, sid: str, pid: int, parsed: dict, cond: Optional[dict]) -> int:
+    def _pick(self, sid: str, pid: int, parsed: dict, cond: Optional[dict], edit: bool = False) -> Tuple[int, dict]:
         """교수가 고른 안 중 지금 놓을 수 있는 첫 안 (엔진 pick_best, 교수가 밝힌 순서 respect_order).
-        기타 조건으로 엔진이 새 안을 만들었으면 그 안을 4번 대안으로 저장해 쓴다."""
+        기타 조건으로 엔진이 새 안을 만들었으면 그 안을 4번 대안으로 저장해 쓴다.
+        -> (대안 id, pick_best 가 지금 시간표에 놓아 본 결과: 그 칸·강의실로 반영한다)"""
         cid, sec = self.section_key(sid)
         picks = [k for k in parsed.get("picks", []) if self.option_id(pid, k)]
         oids = [self.option_id(pid, k) for k in picks]
@@ -445,14 +470,18 @@ class DBMode:
                                  time_limit=self.alt_time_limit, respect_order=bool(parsed.get("ordered")))
         ok = [b for b in best if b["feasible"]]
         if not ok:
-            raise DBModeError("고른 안을 지금은 놓을 수 없습니다. [수정]·[현재대로 유지]·[따로 연락] 중에서 정해 주세요.")
+            raise DBModeError("그 안은 지금 놓을 수 없습니다. 다른 안을 고르거나 [따로 연락]해 주세요." if edit else
+                              "고른 안을 지금은 놓을 수 없습니다. [수정]·[현재대로 유지]·[따로 연락] 중에서 정해 주세요.")
         b = ok[0]
-        return b["option_id"] if b.get("option_id") else self.sc.add_option(self.con, pid, b, source="ETC")
+        oid = b["option_id"] if b.get("option_id") else self.sc.add_option(self.con, pid, b, source="ETC")
+        return oid, b
 
-    def _alt_dict(self, pid: int, oid: int) -> dict:
+    def _alt_dict(self, pid: int, oid: int, placed: Optional[dict] = None) -> dict:
+        """반영한 안 (placed 가 있으면 실제로 놓은 칸·강의실)."""
         cid = self.q("SELECT course_id FROM proposal WHERE id=?", (pid,)).fetchone()[0]
         no = self.q("SELECT option_no FROM proposal_option WHERE id=?", (oid,)).fetchone()[0]
-        alt = option_to_alternative(KEYS[min(no, 3) - 1], self.sc.load_option(self.con, oid), cid, self.slots, self.rooms)
+        opt = placed if placed and placed.get("placements") else self.sc.load_option(self.con, oid)
+        alt = option_to_alternative(KEYS[min(no, 3) - 1], opt, cid, self.slots, self.rooms)
         return dump(alt)
 
     def manual_place(self, sid: str, meetings: List[dict], reason: Optional[str]) -> Tuple[int, list]:
@@ -493,14 +522,44 @@ class DBMode:
             (self.term_id, new_no)).lastrowid
         self.con.commit()
         self.hdb.set_phase(self.con, self.term_id, PHASE_OF_ROUND[new_no], self.ta_id)
-        prev_rid = self.round_id(no)
         opened, tt = [], self.current_tt()
-        for (prev,) in self.q("SELECT id FROM proposal WHERE round_id=? AND status='NEXT' ORDER BY id", (prev_rid,)).fetchall():
-            new = self.hdb.open_next_proposal(self.con, prev, rid, timetable_id=tt)
+        for prev, prev_no in self.pending_next(new_no):
+            new, how = self._open_next(prev, prev_no, rid, new_no, tt)
             cond = self.hdb.carried_conditions(self.con, new)
             n = self._fill(new, cond)
-            opened.append(dict(proposal_id=new, options=n, conditions=cond))
+            opened.append(dict(proposal_id=new, options=n, conditions=cond, from_round=prev_no, opened_by=how))
         return new_no, opened
+
+    def pending_next(self, new_no: int) -> List[Tuple[int, int]]:
+        """새 차수(new_no)가 이어받을 안건: 그 학기 이전 모든 차수에서 '다음 차수로'(NEXT)이면서 아직 다음 차수 안건으로
+        이어지지 않은 것 (proposal.prev_proposal_id 로 가리키는 안건이 없음). 답장 대기 중에 차수를 넘긴 뒤 늦게 NEXT 가
+        된 안건도 여기서 잡힌다. 같은 분반의 안건이 이미 새 차수에 있으면 뺀다. -> [(안건 id, 그 안건의 차수)]"""
+        return [(pid, rno) for pid, rno in self.q(
+            """SELECT p.id, r.round_no FROM proposal p JOIN round r ON r.id = p.round_id
+               WHERE r.term_id=? AND r.round_no < ? AND p.status='NEXT'
+                 AND NOT EXISTS (SELECT 1 FROM proposal n WHERE n.prev_proposal_id = p.id)
+                 AND NOT EXISTS (SELECT 1 FROM proposal x JOIN round xr ON xr.id = x.round_id
+                                 WHERE xr.term_id = r.term_id AND xr.round_no = ? AND x.course_id = p.course_id
+                                   AND x.section_no IS p.section_no)
+               ORDER BY p.id""", (self.term_id, new_no, new_no)).fetchall()]
+
+    def _open_next(self, prev: int, prev_no: int, rid: int, new_no: int, tt: Optional[int]) -> Tuple[int, str]:
+        """다음 차수 안건 열기. 바로 다음 차수면 하윤 db.open_next_proposal.
+        차수를 건너뛴 경우(1차 안건이 늦게 NEXT → 3차)는 하윤 함수가 '바로 다음 차수가 아닙니다'로 막으므로, 같은 칸
+        (과목·분반·이유·조율 대상 종류, OPEN, prev_proposal_id = 이전 안건)으로 서버가 직접 넣는다 (하윤에게 확인 요청)."""
+        if new_no == prev_no + 1:
+            return self.hdb.open_next_proposal(self.con, prev, rid, timetable_id=tt), "open_next_proposal"
+        try:
+            row = self.q("SELECT course_id, section_no, reason, target_kind, timetable_id FROM proposal WHERE id=?",
+                         (prev,)).fetchone()
+            new = self.q("""INSERT INTO proposal(round_id, timetable_id, course_id, section_no, reason, status, prev_proposal_id,
+                                                  target_kind) VALUES (?,?,?,?,?, 'OPEN', ?, ?)""",
+                         (rid, tt or row[4], row[0], row[1], row[2], prev, row[3])).lastrowid
+            self.con.commit()
+            return new, "server (차수 건너뜀)"
+        except Exception:
+            self.con.rollback()
+            raise
 
     def _fill(self, pid: int, cond: Optional[dict]) -> int:
         """다음 차수 안건에 대안을 채운다. 희망은 1차 round 응답이라 alternatives 를 1차 round id 로 부르고
@@ -527,12 +586,243 @@ class DBMode:
         tt = tt or self.current_tt()
         return self.sc.check_timetable(self.con, tt) if tt else []
 
+    def view(self, con, tt: int, v: dict) -> dict:
+        """하윤 check_timetable 위반 하나 → {rule, section_ids(서버 분반 id), detail(사람이 읽는 글)}.
+        교수 겹침·교필↔전필·전필↔전필은 하윤 결과에 분반이 없어서(course_id/section_no=None) 관련 분반을 찾아 붙이고,
+        detail 의 '교수 N'·'칸 N'·'강의실 N'·'과목 N' 번호를 가명·요일 시각·강의실·과목명으로 바꾼다."""
+        d = v["detail"] or ""
+        ids: List[str] = []
+        if v.get("course_id") is not None and v.get("section_no") is not None:
+            ids.append(self._sid(v["course_id"], v["section_no"]))
+        elif v["rule"] == "교수 겹침":
+            m = re.search(r"교수 (\d+) 칸 (\d+)", d)
+            if m:
+                prof, slot = int(m.group(1)), int(m.group(2))
+                for cid, sec in con.execute(
+                        """SELECT DISTINCT a.course_id, a.section_no FROM assignment a
+                           JOIN course c ON c.id = a.course_id
+                           LEFT JOIN course_section cs ON cs.course_id = a.course_id AND cs.section_no = a.section_no
+                           WHERE a.timetable_id=? AND a.slot_id=? AND COALESCE(cs.professor_id, c.professor_id)=?""",
+                        (tt, slot, prof)):
+                    ids.append(self._sid(cid, sec))
+        else:
+            courses = [v["course_id"]] if v.get("course_id") is not None else []
+            courses += [int(x) for x in re.findall(r"과목 (\d+)", d)]
+            for cid in courses:
+                ids += [self._sid(cid, sec) for (sec,) in con.execute(
+                    "SELECT DISTINCT section_no FROM assignment WHERE timetable_id=? AND course_id=? ORDER BY 1", (tt, cid))]
+        names = {i: n for n, i in self.prof_id.items()}
+        cname = dict(con.execute("SELECT id, name FROM course"))
+
+        def slot_text(m):
+            info = self.slots.info.get(int(m.group(1)))
+            return f"{info[0]} {info[2]}" if info else m.group(0)
+        d = re.sub(r"교수 (\d+)", lambda m: names.get(int(m.group(1)), "담당 교수"), d)
+        d = re.sub(r"(?:채플 )?칸 (\d+)", lambda m: ("채플 " if m.group(0).startswith("채플") else "") + slot_text(m), d)
+        d = re.sub(r"강의실 (\d+)", lambda m: "강의실 " + self.rooms.name_of.get(int(m.group(1)), m.group(1)), d)
+        d = re.sub(r"과목 (\d+)", lambda m: cname.get(int(m.group(1)), "다른 과목"), d)
+        return dict(rule=v["rule"], section_ids=list(dict.fromkeys(ids)), detail=d)
+
+    def violation_list(self, tt: Optional[int] = None) -> List[dict]:
+        """지금 시간표 버전의 하드 규칙 위반 (하윤 check_timetable) → view 모양."""
+        tt = tt or self.current_tt()
+        return [self.view(self.con, tt, v) for v in self.violations(tt)] if tt else []
+
+    def violations_after(self, sid: str, alt: Alternative) -> List[dict]:
+        """그 분반을 대안 자리로 옮긴 '뒤' 시간표의 하드 규칙 위반 (view 모양). 진짜 DB는 그대로:
+        메모리 복사본에 새 버전을 만들어 하윤 check_timetable 로 잰 뒤 버린다. 같은 칸·같은 강의실이면 '강의실 겹침' 하나."""
+        tt = self.current_tt()
+        if tt is None:
+            return []
+        cid, _ = self.section_key(sid)
+        mem = sqlite3.connect(":memory:")
+        try:
+            self.con.backup(mem)
+            mem.execute("PRAGMA foreign_keys = ON")
+            rows = self.sc.option_rows(mem, option=self.adapter.option_of(sid, alt), timetable_id=tt)
+            try:
+                new = self.hdb.apply_option(mem, None, None, rows, "규칙 검사", course_id=cid, base_timetable_id=tt)
+            except ValueError as e:
+                return [dict(rule="강의실 겹침", section_ids=[sid], detail=str(e))]
+            return [self.view(mem, new, v) for v in self.sc.check_timetable(mem, new)]
+        finally:
+            mem.close()
+
     def assistant_apply(self, sid: str, alt: Alternative, reason: str) -> int:
         """도우미 [적용]: 그 분반의 열린 안건이 있으면 그 안건으로, 없으면 안건 없이 새 시간표 버전."""
         self.adapter.actor_id, self.adapter.apply_reason = self.ta_id, reason
         self.adapter.timetable_id = self.current_tt()
         self.adapter.reassign(Timetable(assignments=[]), sid, alt)
         return self.current_tt()
+
+    # ---------- 가정 실행 (AI 도우미) ----------
+
+    def what_if(self, change: dict) -> dict:
+        """가정 실행. 지금 DB를 메모리 DB로 복사(sqlite3 backup)해 그 복사본에서만 하윤 함수로 계산하고 버린다.
+        진짜 DB에는 아무것도 쓰지 않는다. change 모양은 stubs.what_if 와 같다:
+          {"kind": "move", "section_id", "blocks": [{day, start, slots, room}]}   분반을 그 자리로
+          {"kind": "room_off", "room": "정보과학관 21303"}                       그 강의실을 못 쓰면
+          {"kind": "free", "day": "수", "start": "15:00"}                        그 칸을 비우면
+        -> {supported, changed, violations(새로 생긴 위반 수), rules, moved, unplaced, feasible, option, engine, note}
+           supported=False 면 note 에 이유 (지어내지 않는다)."""
+        tt = self.current_tt()
+        if tt is None:
+            return _unsupported("아직 초안이 없어 계산할 수 없어요.")
+        mem = sqlite3.connect(":memory:")
+        try:
+            self.con.backup(mem)
+            mem.execute("PRAGMA foreign_keys = ON")
+            kind = change.get("kind", "move")
+            if kind == "move":
+                return self._what_move(mem, tt, change)
+            if kind == "room_off":
+                return self._what_room_off(mem, tt, change.get("room"))
+            if kind == "free":
+                return self._what_free(mem, tt, change.get("day"), change.get("start"))
+            return _unsupported("이 가정은 아직 계산할 수 없어요.")
+        finally:
+            mem.close()
+
+    def _new_violations(self, mem, base: int, new: int) -> List[dict]:
+        key = lambda v: (v["rule"], v["course_id"], v["section_no"], v["detail"])   # noqa: E731
+        before = [key(v) for v in self.sc.check_timetable(mem, base)]
+        out = []
+        for v in self.sc.check_timetable(mem, new):
+            if key(v) in before:
+                before.remove(key(v))
+            else:
+                out.append(v)
+        return out
+
+    def _sid(self, cid: int, sec: int) -> str:
+        return self.pairs.sid_of.get((cid, sec), f"{cid}-{sec}")
+
+    def _rule_text(self, v: dict, con=None, tt: Optional[int] = None) -> dict:
+        x = self.view(con or self.con, tt or self.current_tt(), v)
+        return dict(rule=x["rule"], section_id=x["section_ids"][0] if x["section_ids"] else None,
+                    section_ids=x["section_ids"], detail=x["detail"])
+
+    def _moved(self, mem, base: int, new: int, keys) -> Tuple[List[dict], List[str]]:
+        """두 시간표 버전에서 그 분반들의 자리 비교 → (옮겨진 분반 [{section_id, before, after}], 못 놓인 분반 id)."""
+        b_start, b_ks = self.sc.load_assignment(mem, base)
+        n_start, n_ks = self.sc.load_assignment(mem, new)
+        b = assignments_from_db(b_start, b_ks, self.slots, self.rooms, self.pairs)
+        n = assignments_from_db(n_start, n_ks, self.slots, self.rooms, self.pairs)
+        moved, unplaced = [], []
+        for cid, sec in sorted(keys):
+            sid = self._sid(cid, sec)
+            nb = n.get(sid)
+            if nb is None or len(nb.blocks) < len(b[sid].blocks if sid in b else []):
+                unplaced.append(sid)
+                continue
+            if sid in b and dump(b[sid]) != dump(nb):
+                moved.append(dict(section_id=sid, before=_place(b[sid]), after=_place(nb)))
+        return moved, unplaced
+
+    def _what_move(self, mem, tt: int, change: dict) -> dict:
+        sid = change.get("section_id")
+        if sid not in self.pairs.key_of:
+            return _unsupported("조교 직접 배정 분반이거나 DB에 없는 분반이라 계산할 수 없어요.")
+        cid, sec = self.section_key(sid)
+        rows, day_slots = [], {}
+        blocks = sorted(change.get("blocks") or [], key=lambda b: (DAYS.index(b["day"]) if b["day"] in DAYS else 9, b["start"]))
+        for ss, b in enumerate(blocks, start=1):
+            start = self.slots.id_of.get((b["day"], b["start"]))
+            room = self.rooms.id_of.get(b.get("room") or "")
+            if start is None or room is None:
+                return _unsupported("교시 시작이 아니거나 DB에 없는 강의실이라 이 가정은 아직 계산할 수 없어요.")
+            cells = self.slots.covered(start, b["slots"])
+            if len(cells) < b["slots"]:
+                return _unsupported("그 시각에서는 연강 두 칸이 이어지지 않아 계산할 수 없어요.")
+            rows += [(sec, ss, c, room) for c in cells]
+            day_slots.setdefault(str(DAYS.index(b["day"])), []).extend(self.slots.info[c][2] for c in cells)
+        if not rows:
+            return _unsupported("옮길 자리가 없어 계산할 수 없어요.")
+        # (1) 그 칸·그 강의실에 그대로 놓아 본다 (규칙 검사 없이 복사본에 새 버전) → 새로 생기는 위반
+        rules, clash = [], None
+        try:
+            new = self.hdb.apply_option(mem, None, None, rows, "가정 실행", course_id=cid, base_timetable_id=tt)
+            rules = self._new_violations(mem, tt, new)
+        except ValueError as e:
+            clash = "같은 시간에 그 강의실을 다른 수업이 쓰고 있어요." if "강의실" in str(e) else str(e)
+            new = None
+        # (2) 규칙을 지키며 그 요일·교시에 놓는 안이 있는지 (엔진 alternatives, 강의실은 엔진이 고름, 필요하면 다른 수업도 조금 움직임)
+        cond = {"day_slots": {d: sorted(set(v)) for d, v in day_slots.items()}, "end_before": []}
+        opts = self.sc.alternatives(mem, self.term_id, self.wish_round, tt, cid, sec, condition=cond, n=1,
+                                    time_limit=self.alt_time_limit, exclude_sent=False)
+        option = None
+        if opts:
+            o = opts[0]
+            alt = option_to_alternative("A", o, cid, self.slots, self.rooms)
+            option = dict(alternative=dump(alt), stage=o["stage"],
+                          moves=[dict(section_id=self._sid(k[0], k[1]), before=self._cell(*b), after=self._cell(*a))
+                                 for k, b, a in o["moves"]])
+        texts = [self._rule_text(v, mem, new) for v in rules]
+        changed = [sid] + sorted({x for r in texts for x in r["section_ids"]} - {sid})
+        if option:
+            changed += [m["section_id"] for m in option["moves"] if m["section_id"] not in changed]
+        return dict(supported=True, kind="move", feasible=new is not None and not rules, clash=clash,
+                    changed=changed, violations=len(rules), rules=texts,
+                    moved=[], unplaced=[], option=option, engine="하윤 엔진(복사본에서 계산)", note="")
+
+    def _cell(self, slot: int, room: int) -> str:
+        d, _p, st, _e = self.slots.info[slot]
+        return f"{d} {st} {self.rooms.name_of.get(room, room)}"
+
+    def _resolve(self, mem, tt: int, keys) -> dict:
+        """복사본에서 그 분반들만 다시 푼다 (나머지는 그대로 고정, 엔진 solve 부분 재풀이)."""
+        r = self.sc.solve(mem, self.term_id, self.wish_round, time_limit=self.alt_time_limit,
+                          previous_timetable_id=tt, free_courses=set(keys))
+        new = r.get("timetable_id")
+        if new is None:
+            return _unsupported(f"다시 풀지 못했어요 (엔진 상태 {r.get('status')}).")
+        moved, unplaced = self._moved(mem, tt, new, keys)
+        rules = self._new_violations(mem, tt, new)
+        changed = [self._sid(c, s) for c, s in sorted(keys)]
+        return dict(supported=True, feasible=not unplaced and not rules, clash=None, changed=changed,
+                    violations=len(rules), rules=[self._rule_text(v, mem, new) for v in rules], moved=moved, unplaced=unplaced,
+                    option=None, engine="하윤 엔진(복사본에서 계산)", note="")
+
+    def _what_room_off(self, mem, tt: int, room: Optional[str]) -> dict:
+        rid = self.rooms.id_of.get(room or "")
+        if rid is None:
+            return _unsupported(f"DB에 없는 강의실이라 계산할 수 없어요: {room}")
+        keys = {(c, s) for c, s in mem.execute("SELECT DISTINCT course_id, section_no FROM assignment "
+                                                 "WHERE timetable_id=? AND room_id=?", (tt, rid))}
+        locked = {(c, s) for c, s in mem.execute("SELECT course_id, section_no FROM timetable_section "
+                                                   "WHERE timetable_id=? AND locked=1", (tt,))}
+        if keys & locked:
+            return _unsupported("그 강의실에 조교가 고정한 분반이 있어 계산할 수 없어요. 고정을 먼저 풀어 주세요.")
+        if not keys:
+            return dict(supported=True, kind="room_off", feasible=True, clash=None, changed=[], violations=0, rules=[],
+                        moved=[], unplaced=[], option=None, engine="하윤 엔진(복사본에서 계산)", note="그 강의실을 쓰는 분반이 없어요.")
+        # 그 강의실을 어느 학과도 못 쓰게: 없는 학과 전용으로 바꾼다 (엔진의 전용 강의실 규칙)
+        dept = mem.execute("INSERT INTO department(name) VALUES ('가정 실행: 사용 불가')").lastrowid
+        mem.execute("UPDATE room SET reserved_department_id=? WHERE id=?", (dept, rid))
+        mem.commit()
+        return dict(self._resolve(mem, tt, keys), kind="room_off")
+
+    def _what_free(self, mem, tt: int, day: Optional[str], start: Optional[str]) -> dict:
+        slot = self.slots.id_of.get((day, start))
+        if slot is None:
+            return _unsupported("교시 시작 칸이 아니라 계산할 수 없어요.")
+        keys = {(c, s) for c, s in mem.execute("SELECT DISTINCT course_id, section_no FROM assignment "
+                                                 "WHERE timetable_id=? AND slot_id=?", (tt, slot))}
+        if not keys:
+            return dict(supported=True, kind="free", feasible=True, clash=None, changed=[], violations=0, rules=[],
+                        moved=[], unplaced=[], option=None, engine="하윤 엔진(복사본에서 계산)", note="그 칸에는 수업이 없어요.")
+        # 그 칸을 그 분반 담당 교수 응답의 불가 칸으로 → 그 분반들만 다시 푼다
+        for cid, sec in keys:
+            row = mem.execute("""SELECT r.id FROM course_response r JOIN course_section cs ON cs.course_id = r.course_id
+                                 AND cs.section_no = r.section_no AND cs.professor_id = r.professor_id
+                                 WHERE r.round_id=? AND r.course_id=? AND r.section_no=?""",
+                              (self.wish_round, cid, sec)).fetchone()
+            if row is None:
+                return _unsupported("그 칸에 희망 입력이 없는 분반(미회신)이 있어 아직 계산할 수 없어요.")
+            mem.execute("INSERT OR REPLACE INTO response_slot(response_id, slot_id, kind) VALUES (?,?, 'BLOCK')",
+                        (row[0], slot))
+        mem.commit()
+        return dict(self._resolve(mem, tt, keys), kind="free")
 
     # ---------- 처음으로 ----------
 
@@ -589,3 +879,13 @@ def use(db: Optional[DBMode]) -> None:
     """테스트용: 이미 만든 DBMode 를 쓴다 (None 이면 다시 파일에서 연다)."""
     global _DB
     _DB = db
+
+
+def _unsupported(note: str) -> dict:
+    return dict(supported=False, feasible=False, clash=None, changed=[], violations=0, rules=[], moved=[], unplaced=[],
+                option=None, engine="하윤 엔진(복사본에서 계산)", note=note)
+
+
+def _place(a) -> str:
+    """배정 → '화 13:30 정보과학관 21303 / 목 13:30 …'."""
+    return " / ".join(f"{b.day} {b.start} {b.room or ''}".strip() for b in a.blocks) or "자리 없음"

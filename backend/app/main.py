@@ -19,7 +19,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from . import dbmode, engine, export
-from .contracts import Alternative, Key, Timetable, Wish, fix_conditions, dump, meetings_to_blocks, parse, set_place
+from .contracts import (
+    Alternative, Key, Timetable, Violation, Wish, fix_conditions, dump, meetings_to_blocks, parse, set_place,
+)
 from .nlp import assistant
 from .store import MAX_ROUND, store
 
@@ -65,7 +67,7 @@ def _log_sources() -> None:
 # ---------- 요청 모양 ----------
 
 class MessageIn(BaseModel):
-    method: Literal["keyword", "llm"] = "keyword"
+    method: Optional[Literal["keyword", "llm"]] = None   # None = 서버 기본(SSUROOM_NLP)
 
 
 Choice = Literal["A", "B", "C", "ETC", "KEEP"]
@@ -76,7 +78,7 @@ class ReplyIn(BaseModel):
     # 교수 답장 화면에서 누른 값 (하나 이상, 여러 개 가능). ETC = 기타(글 필수), KEEP = 지금 자리 그대로
     choices: Optional[List[Choice]] = None
     choice: Optional[Literal["A", "B", "C", "none"]] = None   # 예전 화면 값 (choices가 있으면 choices를 쓴다)
-    method: Literal["keyword", "llm"] = "keyword"
+    method: Optional[Literal["keyword", "llm"]] = None   # None = 서버 기본(SSUROOM_NLP)
 
 
 class DecideIn(BaseModel):
@@ -102,7 +104,7 @@ class ManualIn(BaseModel):
 class AssistantIn(BaseModel):
     text: str
     history: List[dict] = []         # [{"role": "user"|"assistant", "text": "...", "section_id": 선택}]
-    method: Literal["keyword", "llm"] = "keyword"
+    method: Optional[Literal["keyword", "llm"]] = None   # None = 서버 기본(SSUROOM_NLP)
 
 
 class SettingsIn(BaseModel):
@@ -126,10 +128,22 @@ class PairIn(BaseModel):
 
 
 class RoundIn(BaseModel):
-    method: Literal["keyword", "llm"] = "keyword"   # DB 모드에서 자동으로 보내는 조율 메시지 방식
+    method: Optional[Literal["keyword", "llm"]] = None   # DB 모드에서 자동으로 보내는 조율 메시지 방식. None = SSUROOM_NLP
 
 
 # ---------- 도우미 ----------
+
+def nlp_default() -> str:
+    """서버 기본 해석 방식: 환경 변수 SSUROOM_NLP (keyword | llm). 없거나 다른 값이면 keyword."""
+    v = (os.environ.get("SSUROOM_NLP") or "").strip().lower()
+    return v if v in ("keyword", "llm") else "keyword"
+
+
+def _nlp(method: Optional[str]) -> str:
+    """요청에 method 가 오면 그것, 없으면(None) 서버 기본(SSUROOM_NLP). 조율 메시지·답장 해석·자동 메시지·AI 도우미 공통.
+    llm 이 막히면(429·503·키 없음) 각 함수가 키워드로 대신 처리하고 응답에 method·fallback 을 남긴다."""
+    return method if method in ("keyword", "llm") else nlp_default()
+
 
 def _conflict(msg: str) -> HTTPException:
     return HTTPException(status_code=409, detail=msg)
@@ -191,6 +205,24 @@ def _with_alternative(tt: Timetable, sid: str, alt: Alternative) -> Timetable:
     return out
 
 
+def _violations(tt: Optional[Timetable] = None) -> list:
+    """하드 규칙 위반 목록 (Violation 모양: rule, section_ids, detail).
+    DB 모드: 하윤 solver_core.check_timetable (지금 시간표 버전). 메모리 모드: 가짜 check_rules."""
+    db = _db()
+    if db is not None:
+        return [Violation(**v) for v in db.violation_list()]
+    return engine.check_rules(tt if tt is not None else store.timetable)
+
+
+def _violations_after(sid: str, alt: Alternative) -> list:
+    """그 분반을 대안 자리로 옮긴 '뒤' 시간표의 위반. DB 모드는 메모리 복사본에서 하윤 check_timetable
+    (진짜 DB는 그대로), 메모리 모드는 가짜 check_rules."""
+    db = _db()
+    if db is not None:
+        return [Violation(**v) for v in db.violations_after(sid, alt)]
+    return engine.check_rules(_with_alternative(store.timetable, sid, alt))
+
+
 def _unavailable(sid: str, alternatives) -> list:
     """그사이 다른 강의가 들어가서 못 쓰게 된 대안 키 (match_conditions의 unavailable).
     현재 시간표에 그 안을 넣어 보고, 이 분반이 낀 규칙 위반이 생기면 못 쓰는 안으로 본다."""
@@ -198,7 +230,7 @@ def _unavailable(sid: str, alternatives) -> list:
         return []
     out = []
     for alt in alternatives:
-        vs = engine.check_rules(_with_alternative(store.timetable, sid, alt))
+        vs = _violations_after(sid, alt)
         if any(sid in v.section_ids for v in vs):
             out.append(alt.key)
     return out
@@ -246,6 +278,8 @@ def health():
         "round_no": store.round_no,
         "engine": engine.sources(),
         "load_warnings": engine.load_warnings() + store.load_warnings,
+        "nlp": nlp_default(),                                   # 서버 기본 해석 방식 (요청에 method 가 없을 때)
+        "gemini_key": bool(os.environ.get("GEMINI_API_KEY")),   # 키가 있는지만 (값은 내보내지 않는다)
     }
 
 
@@ -277,7 +311,16 @@ def get_rooms():
 
 @app.get("/wishes")
 def get_wishes():
-    return {"wishes": store.list_wishes(), "professors": store.professors}
+    """희망 + 분반 연강·교차(pairs). pairs 한 줄은 POST /wishes/pair 에 보내는 모양과 같다 (section_id, mode, order)."""
+    if _db():
+        pairs = _db().pair_requests()
+    else:
+        pairs = [{"section_id": sid, **v} for sid, v in getattr(store, "pairs", {}).items()]
+    # 희망마다 분반 수강 인원(enrollment)을 같이 보인다. 따로 안 넣은 분반은 분반 정보(/sections)의 인원
+    wishes = [w.model_copy(update={"enrollment": w.enrollment if w.enrollment is not None else
+                                   (store.get_section(w.section_id).enrollment if store.get_section(w.section_id) else None)})
+              for w in store.list_wishes()]
+    return {"wishes": wishes, "professors": store.professors, "pairs": pairs}
 
 
 @app.post("/wishes")
@@ -290,11 +333,13 @@ def post_wish(wish: Wish):
         wish.professor = sec.professor
     elif sec.professor is not None and wish.professor != sec.professor:
         raise HTTPException(status_code=422, detail="이 분반의 담당 교수가 아닙니다.")
+    if wish.enrollment is not None and wish.enrollment % 5:
+        raise HTTPException(status_code=422, detail="수강 인원은 5명 단위로 적어 주세요.")
     if _db():
         _db_call(_db().save_wish, wish)
         return {"saved": store.get_wish(wish.section_id) or wish}
     store.save_wish(wish)
-    return {"saved": wish}
+    return {"saved": store.get_wish(wish.section_id)}
 
 
 @app.post("/wishes/pair")
@@ -306,7 +351,12 @@ def post_pair(body: PairIn):
     if _db():
         order = _db_call(_db().set_pair, body.section_id, body.mode, body.order)
         return {"section_id": body.section_id, "mode": body.mode, "order": order}
-    store.pairs = {**getattr(store, "pairs", {}), body.section_id: {"mode": body.mode, "order": body.order or []}}
+    pairs = dict(getattr(store, "pairs", {}))
+    if body.mode == "NONE":            # 상관없음 = 지움 (DB set_pair_request 와 같게)
+        pairs.pop(body.section_id, None)
+    else:
+        pairs[body.section_id] = {"mode": body.mode, "order": body.order or []}
+    store.pairs = pairs
     return {"section_id": body.section_id, "mode": body.mode, "order": body.order or []}
 
 
@@ -327,7 +377,7 @@ def post_draft():
         return {"stage": store.stage, "assignments": len(store.timetable.assignments), "status_count": count,
                 "coord": [c["section_id"] for c in store.list_coord()], "coord_status": kinds,
                 "solver": {k: r[k] for k in ("status", "seconds", "unplaced", "unsupported")},
-                "violations": len(_db().violations())}
+                "violations": len(_violations())}
     tt, delayed = engine.make_draft(store.list_sections(), store.list_wishes(), store.list_rooms())
     tt = _normalize(tt)
     tt.status = "DRAFT"
@@ -350,7 +400,7 @@ def post_draft():
         "assignments": len(tt.assignments),
         "status_count": status_count,
         "coord": [c["section_id"] for c in store.list_coord()],
-        "violations": len(engine.check_rules(tt)),
+        "violations": len(_violations(tt)),
     }
 
 
@@ -373,7 +423,7 @@ def post_message(section_id: str, body: Optional[MessageIn] = None):
     item = _coord_target(section_id)
     if not item["alternatives"]:
         raise _conflict("대안이 없어 조율 메시지를 쓸 수 없습니다. [수정]이나 [현재대로 유지]로 정해 주세요.")
-    method = body.method if body else "keyword"
+    method = _nlp(body.method if body else None)
     inp = store.message_input(section_id)
     msg = engine.write_message(inp, method)
     issues = list(engine.check_message(msg.text, inp))
@@ -416,7 +466,7 @@ def post_reply(section_id: str, body: ReplyIn):
     _check_reply(body, can_keep)
     alts = item["alternatives"]
     parsed = engine.parse_reply(body.text, body.choice, choices=body.choices, alternatives=alts,
-                                message=item["message"] or "", method=body.method, can_keep=can_keep)
+                                message=item["message"] or "", method=_nlp(body.method), can_keep=can_keep)
     if _db():
         # DB는 누른 값이 하나 이상 있어야 받는다(add_reply). 예전 값은 바꿔 넣는다: 안 → 그 안, 모두 어려움·글만 → 기타
         choices = list(dict.fromkeys(body.choices or ([body.choice] if body.choice in ("A", "B", "C") else ["ETC"])))
@@ -428,10 +478,10 @@ def post_reply(section_id: str, body: ReplyIn):
         proposal = engine.match_conditions(parsed, alts, store.round_no, [])
         model = "keyword" if parsed.method == "keyword" else os.environ.get("GEMINI_MODEL", "gemini-3.5-flash-lite")
         _db_call(db.save_interpretation, pid, mid, parsed, proposal, model)
-        return store.add_reply(section_id, body.text, choices, body.method, parsed, proposal, [])
+        return store.add_reply(section_id, body.text, choices, parsed.method, parsed, proposal, [])
     unavailable = _unavailable(section_id, alts)
     proposal = engine.match_conditions(parsed, alts, store.round_no, unavailable)
-    rec = store.add_reply(section_id, body.text, body.choices or body.choice, body.method, parsed, proposal,
+    rec = store.add_reply(section_id, body.text, body.choices or body.choice, parsed.method, parsed, proposal,
                           unavailable)
     store.update_coord(section_id, state="PROPOSED", proposal=proposal, last_parse=parsed)
     return rec
@@ -450,7 +500,7 @@ def post_decide(section_id: str, body: DecideIn):
         rec =store.add_decision(section_id, r["action"], body.reason, r.get("applied"))
         out = {"decision": rec, "coord": _coord_out(store.get_coord(section_id))}
         if r.get("timetable_id"):
-            out["violations"] = len(_db().violations())
+            out["violations"] = len(_violations())
         return out
 
     if item["state"] == "OFFLINE":
@@ -500,7 +550,7 @@ def post_decide(section_id: str, body: DecideIn):
     rec = store.add_decision(section_id, body.action, body.reason, dump(alt))
     store.update_coord(section_id, state="RESOLVED")
     return {"decision": rec, "coord": _coord_out(store.get_coord(section_id)),
-            "violations": len(engine.check_rules(tt))}
+            "violations": len(_violations(tt))}
 
 
 @app.post("/coord/{section_id}/manual")
@@ -528,7 +578,7 @@ def post_manual(section_id: str, body: ManualIn):
     store.set_timetable(tt)
     rec = store.add_decision(section_id, "manual", body.reason, dump(alt))
     store.update_coord(section_id, state="RESOLVED")
-    vs = [v for v in engine.check_rules(tt) if section_id in v.section_ids]
+    vs = [v for v in _violations(tt) if section_id in v.section_ids]
     return {"decision": rec, "coord": _coord_out(store.get_coord(section_id)),
             "violations": len(vs), "warnings": [dump(v) for v in vs]}
 
@@ -544,7 +594,7 @@ def post_next_round(body: Optional[RoundIn] = None):
         sent = []
         for c in store.list_coord():
             if c["state"] == "OPEN" and c["round_no"] == no:
-                post_message(c["section_id"], MessageIn(method=body.method if body else "keyword"))
+                post_message(c["section_id"], MessageIn(method=_nlp(body.method if body else None)))
                 sent.append(c["section_id"])
         _db().sync(store)
         open_items = [c["section_id"] for c in store.list_coord() if c["state"] not in ("RESOLVED", "KEPT")]
@@ -580,11 +630,11 @@ def post_finalize():
         _db_call(_db().finalize)
         left = [a.section_id for a in store.timetable.assignments if a.status == "COORD"]
         return {"stage": store.stage, "round_no": store.round_no, "unresolved": left,
-                "violations": len(_db().violations())}
+                "violations": len(_violations())}
     store.set_stage("FINAL")
     left = [a.section_id for a in store.timetable.assignments if a.status == "COORD"]
     return {"stage": store.stage, "round_no": store.round_no, "unresolved": left,
-            "violations": len(engine.check_rules(store.timetable))}
+            "violations": len(_violations(store.timetable))}
 
 
 @app.post("/reset")
@@ -603,9 +653,17 @@ def post_reset():
 def post_assistant(body: AssistantIn):
     """조교 질문 → 의도·정보 → 배정 함수 호출 → 설명. move는 제안만 만들고 반영하지 않는다.
     method="llm"이 실패하면 키워드 방식으로 대신 처리하고 command.fallback=True (fallback_reason에 이유)."""
-    cmd = assistant.read_question(body.text, body.history, store, method=body.method)
+    cmd = assistant.read_question(body.text, body.history, store, method=_nlp(body.method))
     out = assistant.run_assistant(cmd, store)
-    return {"command": dump(cmd), "section_id": cmd.section_id, **out}
+    res = {"command": dump(cmd), "section_id": cmd.section_id, **out}
+    prop = assistant.get_proposal(out.get("proposal_id")) if out.get("proposal_id") else None
+    if prop is not None and store.timetable is not None:
+        # 옮기기 제안: '옮긴 뒤' 시간표 기준 위반 (DB 모드는 복사본에서 하윤 check_timetable, 메모리 모드는 가짜)
+        vs = _violations_after(prop["section_id"], prop["alternative"])
+        prop["violations"] = len(vs)
+        res["violations"] = len(vs)
+        res["violation_list"] = [dump(v) for v in vs]
+    return res
 
 
 @app.post("/assistant/apply")
@@ -629,7 +687,7 @@ def post_assistant_apply(body: ApplyIn):
         _db_call(_db().assistant_apply, sid, alt, body.reason.strip())
         rec = store.add_decision(sid, "assistant_move", body.reason.strip(), dump(alt))
         assistant.pop_proposal(body.proposal_id)
-        return {"decision": rec, "summary": prop["summary"], "violations": len(_db().violations())}
+        return {"decision": rec, "summary": prop["summary"], "violations": len(_violations())}
     tt = _normalize(engine.reassign(store.timetable, sid, alt))
     tt.status = store.timetable.status
     store.set_timetable(tt)
@@ -638,7 +696,7 @@ def post_assistant_apply(body: ApplyIn):
     if item is not None and item["state"] not in ("RESOLVED",):
         store.update_coord(sid, state="RESOLVED")   # 조교가 직접 옮겼으므로 이 분반 조율은 끝
     assistant.pop_proposal(body.proposal_id)
-    return {"decision": rec, "summary": prop["summary"], "violations": len(engine.check_rules(tt))}
+    return {"decision": rec, "summary": prop["summary"], "violations": len(_violations(tt))}
 
 
 # ---------- 엑셀 내보내기 ----------

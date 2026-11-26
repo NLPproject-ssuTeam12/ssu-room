@@ -225,13 +225,13 @@ def test_wish_ok(client):
     assert r.status_code == 200, r.text
     w = next(x for x in client.get("/wishes").json()["wishes"] if x["section_id"] == sid)
     assert w["cells"] == {"월-09:00": "PREFER", "금-19:30": "BLOCK"}
-    assert w["lab"] == "MUST" and w["single_day"] == "PREFER"
+    assert w["lab"] == "MUST" and w["single_day"] == "NONE"     # 옛 값 PREFER는 NONE으로 받는다 (11/24)
 
 
 @pytest.mark.parametrize("extra", [
     {"lab": "PREFER"},             # 실습실은 MUST(필요)·NONE(필요 없음) 두 가지만
     {"lab": "있으면 좋음"},
-    {"single_day": "YES"},         # 주 1회 연강은 MUST·PREFER·NONE
+    {"single_day": "YES"},         # 주 1회 연강은 MUST·NONE (옛 PREFER는 NONE으로 받음)
 ])
 def test_wish_lab_and_single_day_values_422(client, extra):
     sid = first_auto_section(client)
@@ -242,7 +242,7 @@ def test_wish_lab_and_single_day_values_422(client, extra):
 def test_wishes_shape_after_team_decisions(client):
     body = client.get("/wishes").json()
     assert all(w["lab"] in ("MUST", "NONE") for w in body["wishes"])
-    assert all(w["single_day"] in ("MUST", "PREFER", "NONE") for w in body["wishes"])
+    assert all(w["single_day"] in ("MUST", "NONE") for w in body["wishes"])
     assert all(s["lab_need"] in ("MUST", "NONE") for s in sections(client))
     # 예전 '연강'(consecutive) 칸은 없다. professors는 교수별 맡은 분반
     assert "consecutive" not in str(body)
@@ -815,3 +815,63 @@ def test_offline_then_manual_place(client):
     assert r.json()["coord"]["state"] == "RESOLVED" and "warnings" in r.json()
     a = next(x for x in client.get("/timetable").json()["assignments"] if x["section_id"] == sid)
     assert a["status"] == "MANUAL" and [(b["day"], b["start"]) for b in a["blocks"]] == [("월", "09:00"), ("수", "09:00")]
+
+
+def test_pairs_round_trip_memory(client):
+    secs = [s.id for s in store.list_sections() if s.shape != "MANUAL"][:2]
+    body = {"section_id": secs[0], "mode": "CROSS", "order": secs}
+    assert client.post("/wishes/pair", json=body).status_code == 200
+    assert client.get("/wishes").json()["pairs"] == [body]
+    assert client.post("/wishes/pair", json={"section_id": secs[0], "mode": "NONE"}).status_code == 200
+    assert client.get("/wishes").json()["pairs"] == []
+    client.post("/reset")
+    assert client.get("/wishes").json()["pairs"] == []
+
+
+# ---------- 분반 수강 인원 (11/24: 교수가 분반마다 5명 단위) ----------
+
+def test_enrollment_saved_and_read_memory(client):
+    sid = next(s.id for s in store.list_sections() if s.shape != "MANUAL")
+    url = "/wishes"
+    assert client.post(url, json={"section_id": sid, "enrollment": 43}).status_code == 422   # 5명 단위
+    assert client.post(url, json={"section_id": sid, "enrollment": 0}).status_code == 422
+    assert client.post(url, json={"section_id": sid, "enrollment": -5}).status_code == 422
+    r = client.post(url, json={"section_id": sid, "enrollment": 45})
+    assert r.status_code == 200 and r.json()["saved"]["enrollment"] == 45
+    w = next(x for x in client.get("/wishes").json()["wishes"] if x["section_id"] == sid)
+    assert w["enrollment"] == 45
+    assert next(s for s in client.get("/sections").json() if s["id"] == sid)["enrollment"] == 45
+    # 인원 없이 다시 저장하면 분반 인원은 그대로
+    client.post(url, json={"section_id": sid})
+    assert next(x for x in client.get("/wishes").json()["wishes"] if x["section_id"] == sid)["enrollment"] == 45
+
+
+# ---------- 서버 기본 해석 방식 SSUROOM_NLP (요청에 method 가 없을 때) ----------
+
+def test_nlp_default_llm_without_key_falls_back(client, monkeypatch):
+    monkeypatch.setenv("SSUROOM_NLP", "llm")
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    h = client.get("/health").json()
+    assert h["nlp"] == "llm" and h["gemini_key"] is False
+    assert "GEMINI_API_KEY" not in str(h.get("gemini_key"))           # 값이 아니라 있음/없음만
+    # AI 도우미: method 안 보냄 → llm 으로 시도 → 키 없음 → 키워드로 대신 처리 표시
+    j = client.post("/assistant", json={"text": "지금 현황 알려줘"}).json()
+    assert j["command"]["fallback"] is True and j["command"]["fallback_reason"]
+    # 조율 메시지·답장 해석도 같은 기본값
+    sid = _sent(client)
+    msg = store.messages[-1]
+    assert msg["fallback"] is True and msg["method"] == "keyword"
+    r = client.post(f"/coord/{enc(sid)}/reply", json={"choices": ["A"]})
+    assert r.status_code == 200 and r.json()["parse"]["fallback"] is True
+
+
+def test_request_method_wins_over_default(client, monkeypatch):
+    monkeypatch.setenv("SSUROOM_NLP", "llm")
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    j = client.post("/assistant", json={"text": "지금 현황 알려줘", "method": "keyword"}).json()
+    assert j["command"]["fallback"] is False and j["command"]["method"] == "keyword"
+    monkeypatch.setenv("SSUROOM_NLP", "아무값")                       # 모르는 값이면 keyword
+    assert client.get("/health").json()["nlp"] == "keyword"
+    monkeypatch.delenv("SSUROOM_NLP")
+    j = client.post("/assistant", json={"text": "지금 현황 알려줘"}).json()
+    assert j["command"]["fallback"] is False                           # 기본 keyword 는 언어 모델을 부르지 않음

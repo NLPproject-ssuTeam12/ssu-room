@@ -127,6 +127,7 @@ class Store:
         self.fixed_blocks: List[dict] = _load("fixed_blocks.json")
 
         self.settings: Dict[str, object] = dict(DEFAULT_SETTINGS)   # 학과 설정
+        self.pairs: Dict[str, dict] = {}   # 분반 연강·교차 (메모리 모드): 분반 id → {mode, order}
         self.stage: str = "COLLECT"
         self.round_no: int = 0            # 0 = 조율 시작 전, 1~3 = 차수
         self.timetable: Optional[Timetable] = None
@@ -153,6 +154,12 @@ class Store:
         return self.wishes.get(sid)
 
     def save_wish(self, wish: Wish) -> None:
+        """희망 저장. 수강 인원(enrollment)이 오면 그 분반 정보의 인원도 바꾼다 (메모리 모드)."""
+        sec = self.sections.get(wish.section_id)
+        if wish.enrollment is not None and sec is not None:
+            self.sections[wish.section_id] = sec.model_copy(update={"enrollment": wish.enrollment})
+        elif sec is not None:
+            wish = wish.model_copy(update={"enrollment": sec.enrollment})
         self.wishes[wish.section_id] = wish
 
     # ---------- 단계·시간표 ----------

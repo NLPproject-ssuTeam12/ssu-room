@@ -471,3 +471,64 @@ def test_no_long_class_at_1800_and_late_slot_warning(client):
     assert "18:00에 시작하는 연강은 없어요" in j["answer"] and j["proposal_id"] is None, j["answer"]
     j = client.post("/assistant", json={"text": "확통 화목 저녁 7시 반으로 옮겨줘"}).json()
     assert j["proposal_id"] and "19:30 교시는 다른 방법이 없을 때만" in j["answer"], j["answer"]
+
+
+# ---------- 줄임말 표·같은 이름 과목·키워드 표현 (11/25, 일반 규칙) ----------
+
+from backend.app.nlp import aliases  # noqa: E402
+from backend.app.nlp.assistant import _norm  # noqa: E402
+
+
+def test_alias_table_one_place():
+    names = ["데이터베이스응용", "데이터베이스보안", "시스템프로그래밍"]
+    assert aliases.course_alias_hits(_norm("데베 옮겨"), names, _norm)[0] == ["데이터베이스응용", "데이터베이스보안"]
+    assert aliases.course_alias_hits(_norm("데베응용 옮겨"), names, _norm)[0] == ["데이터베이스응용"]
+    assert aliases.course_alias_hits(_norm("시프 옮겨"), names, _norm)[0] == ["시스템프로그래밍"]
+    assert aliases.course_alias_hits(_norm("데사 옮겨"), names, _norm)[0] == []          # 데이터에 없는 과목은 안 찾음
+    table = aliases.alias_table_text(names, _norm)
+    assert "시프 → 시스템프로그래밍" in table and "데베 → 데이터베이스응용 또는 데이터베이스보안" in table
+    assert "확통" not in table
+
+
+def test_ambiguous_alias_asks_back():
+    names = {s.name for s in store.list_sections()}
+    hits = [x for x in aliases.COURSE_ALIAS["데베"] if x in names]
+    q = read_question("데베 월수 12시로 옮겨", [], store)
+    if len(hits) > 1:
+        assert q.section_id is None and "어느 과목" in q.ask_back
+
+
+def test_same_name_courses_show_code_and_year():
+    secs = [s for s in store.list_sections() if s.name == "알고리즘"]
+    assert len({s.code[:-2] for s in secs}) > 1                       # 데이터에 같은 이름 과목이 둘
+    q = read_question("알고리즘 월수 12시로 옮겨", [], store)
+    assert q.section_id is None and "과목 코드가 다른" in q.ask_back
+    assert all(s.code in q.ask_back for s in secs) and "학년" in q.ask_back
+
+
+def test_not_this_but_that_takes_the_latter():
+    q = read_question("확통 2분반 화목 말고 월수 12시로 옮겨줘", [], store)
+    assert q.intent == "move" and q.days == ["월", "수"] and q.start == "12:00"
+
+
+@pytest.mark.parametrize("text", ["확통 2분반 월수 12시로 당겨줘", "확통 2분반 월수 18시로 미뤄 줘"])
+def test_move_verbs(text):
+    assert read_question(text, [], store).intent == "move"
+
+
+@pytest.mark.parametrize("text", ["확통 2분반 월수 12시면 겹쳐?", "확통 2분반 월수 12시로 가도 문제 없어?",
+                                  "월요일 12시에 정보과학관 자리 있어?"])
+def test_what_if_phrases(text):
+    assert read_question(text, [], store).intent == "what_if"
+
+
+@pytest.mark.parametrize("text", ["답장 언제 와?", "회신 온 거 있어?", "지금 몇 차야?"])
+def test_status_phrases(text):
+    assert read_question(text, [], store).intent == "status"
+
+
+def test_out_of_scope_first_but_keeps_info():
+    q = read_question("교수02한테 확통 2분반 시간표 메일 보내 줘", [], store)
+    assert q.intent == "out_of_scope" and q.professor == "교수02" and q.section_id == sid_of("확률및통계", "02")
+    assert read_question("수강신청 언제 열려?", [], store).intent == "out_of_scope"
+    assert read_question("점심 뭐 먹지?", [], store).intent == "out_of_scope"

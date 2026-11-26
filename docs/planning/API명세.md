@@ -160,10 +160,14 @@ fetch(`http://localhost:8000/coord/${encodeURIComponent(sectionId)}/message`, { 
   },
   "load_warnings": [
     "2150130801: 희망 칸 1개 버림 ['수-17:00']"
-  ]
+  ],
+  "nlp": "keyword",
+  "gemini_key": false
 }
 ```
 - `round_no`: 0 = 조율 전, 1~3 = 차수.
+- `nlp`: 서버 기본 해석 방식 (환경 변수 `SSUROOM_NLP` = `keyword` | `llm`, 없으면 `keyword`). 조율 메시지·답장 해석·다음 차수 자동 메시지·AI 도우미 요청에 `method`가 없으면 이 값을 쓴다. 요청에 `method`가 있으면 그게 우선 (11/26).
+- `gemini_key`: `GEMINI_API_KEY`가 있는지(`true`/`false`)만. 키 값은 내보내지 않는다. `llm`인데 키가 없거나 429·503이면 키워드로 대신 처리하고 응답의 `method`·`fallback`·`fallback_reason`에 남는다.
 - `load_warnings`: 진짜 함수 불러오기 실패 + 희망 파일에서 버린 칸(토요일, 8칸 밖 시각).
 
 ### `GET /sections`
@@ -225,9 +229,10 @@ fetch(`http://localhost:8000/coord/${encodeURIComponent(sectionId)}/message`, { 
 }
 ```
 - `cells`: 칸 이름 `"요일-시작"` → `PREFER`(희망) / `BLOCK`(불가). **없는 칸 = 가능.**
-- `must`: '꼭' 체크 (분반마다 하나).
+- `enrollment`: 분반 수강 인원 (11/24, 교수가 분반마다 정함). **5명 단위 양수**, 아니면 422. 안 보내면 그대로. 강의실 정원보다 많으면 엔진이 그 강의실을 쓰지 않는다. DB 모드는 `course_section.enrollment`에 저장, `GET /wishes`·`GET /sections`에 분반별 값이 나온다. 분반 수는 화면에서 받지 않는다(시드 엑셀).
+- `must`: **사용 안 함** ('꼭'은 11/24 회의에서 뺐다). 옛 화면 호환으로 받기만 하고 배정·저장에 쓰지 않는다.
 - `lab`: 실습실 `MUST`(필요) / `NONE`(필요 없음).
-- `single_day`: 주 1회 연강(하루에 두 교시를 이어서) `MUST`(무조건) / `PREFER`(선호) / `NONE`(필요 없음 = 주 2회, 기본). 하윤 DB `single_day_pref`와 같은 이름. 지금 데이터는 모두 `NONE`(가상 희망에 값이 없어 기본값).
+- `single_day`: 주 1회 연강(하루에 두 교시를 이어서) `MUST`(무조건) / `NONE`(필요 없음 = 주 2회, 기본). 하윤 DB `single_day_pref`와 같은 이름. '선호'(`PREFER`)는 11/24에 뺐고, 옛 화면이 보내면 `NONE`으로 받는다.
 - `professors`: 교수(가명)별 맡은 분반 id. 예전 '연강'(`consecutive`, 맡은 강의를 이어서 하기) 값은 팀 결정(11/21)으로 뺐다.
 
 ### `POST /wishes`
@@ -240,7 +245,7 @@ fetch(`http://localhost:8000/coord/${encodeURIComponent(sectionId)}/message`, { 
   "cells": { "월-09:00": "PREFER", "금-19:30": "BLOCK" },
   "must": false,
   "lab": "MUST",
-  "single_day": "PREFER",
+  "single_day": "MUST",
   "building": null,
   "room": null,
   "note": "화요일 오전 불가"
@@ -254,14 +259,14 @@ fetch(`http://localhost:8000/coord/${encodeURIComponent(sectionId)}/message`, { 
 ```json
 { "saved": { "section_id": "2150164203-(공통-재수강)", "professor": "교수42",
              "cells": { "월-09:00": "PREFER", "금-19:30": "BLOCK" }, "must": false, "lab": "MUST",
-             "single_day": "PREFER", "building": null, "room": null, "note": "화요일 오전 불가" } }
+             "single_day": "MUST", "building": null, "room": null, "note": "화요일 오전 불가" } }
 ```
 
 에러:
 | 코드 | 언제 | detail |
 |---|---|---|
 | 422 | 칸 이름이 틀림 (토요일, `월-09:30` 같은 없는 시작 시각) | `[{"loc": ["body","cells"], "msg": "칸 이름은 '요일-시작'(예: 월-09:00)이어야 함: '토-09:00'"}]` |
-| 422 | 칸 값이 `PREFER`/`BLOCK`이 아님, `lab`이 `MUST`/`NONE`이 아님(`PREFER` 포함), `single_day`가 `MUST`/`PREFER`/`NONE`이 아님 | Pydantic 목록 |
+| 422 | 칸 값이 `PREFER`/`BLOCK`이 아님, `lab`이 `MUST`/`NONE`이 아님(`PREFER` 포함), `single_day`가 `MUST`/`NONE`(옛 `PREFER`는 `NONE`으로 받음)이 아님 | Pydantic 목록 |
 | 422 | 다른 교수 이름 | `이 분반의 담당 교수가 아닙니다.` |
 | 404 | 없는 분반 | `분반이 없습니다: 없는-분반` |
 | 409 | COLLECT가 아님 | `희망은 수집 단계(COLLECT)에서만 받습니다. 지금 단계: FINAL` |
@@ -326,6 +331,7 @@ fetch(`http://localhost:8000/coord/${encodeURIComponent(sectionId)}/message`, { 
 | 단계 | `term.phase`(COLLECTING·ROUND1~3·FINAL) + 시간표 유무. COLLECTING인데 시간표가 있으면 `DRAFT` |
 | `POST /wishes` | 분반마다 `course_response`·`response_slot`, 건물 → 교수 희망 건물, `note` → 기타 요청 |
 | `POST /wishes/pair` | `{section_id, mode: NONE|BACK_TO_BACK|CROSS, order: [분반 id…]}` 분반 연강·교차 (하윤 `set_pair_request`) |
+| `GET /wishes` | 기존 칸(`wishes`·`professors`)에 **`pairs`**를 더한다: `[{section_id, mode, order}]` (POST /wishes/pair 모양 그대로, `section_id` = 붙일 첫 분반). 메모리 모드도 같은 모양 |
 | `POST /draft` | 엔진 `solve` → 조율 대상(`coord_targets`)마다 안건을 열고 대안 A·B·C. 응답에 `coord_status`(OPEN·HOLD·NO_OPTION 개수)·`solver` |
 | `GET /coord` | 항목에 `proposal_id`, `kind`(`UNPLACED`·`MISMATCH`·`PARTIAL`), `current`(지금 자리, 있으면 교수 화면에 KEEP), `state`에 `HOLD`·`NO_OPTION`·`OFFLINE`이 더 있다 |
 | `POST /rounds/next` | 본문 `{method}`(선택). 1차를 열면 보내기 전(`OPEN`) 안건에 조율 메시지를 **자동으로 보낸다**. 2·3차는 `NEXT` 안건을 이어받아 확인된 조건을 쌓은 대안을 만들고(이미 보낸 대안 제외, 없으면 `NO_OPTION`) 보낸다. 응답 `sent`·`next_opened` |
@@ -334,6 +340,7 @@ fetch(`http://localhost:8000/coord/${encodeURIComponent(sectionId)}/message`, { 
 | `POST /coord/{id}/reply` | DB `add_reply`(누른 값 필수: 예전 `choice`나 글만 보내면 `ETC`로 넣음) → 해석 `save_interpretation`(판정·해석 JSON·모델 이름). 기타 글의 시간표 밖 요청(`note`)은 기타 요청 표로 |
 | `POST /coord/{id}/decide` | `decide_reply`. [확인] move는 엔진 `pick_best`(교수가 고른 안 중 지금 놓을 수 있는 첫 안, 글로 밝힌 순서 우선) → `apply_option`(새 시간표 버전, 새 규칙 위반이면 409) |
 | `POST /assistant/apply` | `apply_option`으로 새 시간표 버전 (사유 = 시간표 버전 사유) |
+| `POST /assistant` 가정 실행·이동 미리보기·이유 설명 | 지금 DB를 메모리로 복사(sqlite3 backup)해 **복사본에서만** 하윤 엔진으로 계산하고 버린다. 이동 = 그 칸에 놓아 본 새 위반(`check_timetable`) + 규칙을 지키는 안(`alternatives`, 같이 움직이는 수업), 강의실 못 씀·칸 비우기 = 영향 분반만 부분 재풀이(`solve(free_courses)`). 계산할 수 없는 가정은 "이 가정은 아직 계산할 수 없어요". 새 위반이 생기는 이동은 [적용] 제안을 만들지 않는다. 메모리 모드 답에는 "가짜 엔진 결과" 표시 |
 | `POST /finalize` | 엔진 `finalize` + 단계 FINAL. `/export.xlsx`는 그 시간표 |
 | `POST /reset` | 조율·시간표 기록을 지우고 희망 수집으로 (희망·과목·강의실은 그대로) |
 
@@ -379,7 +386,7 @@ fetch(`http://localhost:8000/coord/${encodeURIComponent(sectionId)}/message`, { 
 조율 메시지를 쓰고 검사한다. 검사를 통과해야 "보냄" 처리. **ROUND에서만.**
 함수: `write_message(MessageInput, method)` → `check_message(text, MessageInput)`.
 
-요청 본문은 없어도 된다. 있으면 `{ "method": "keyword" | "llm" }` (기본 `keyword`).
+요청 본문은 없어도 된다. 있으면 `{ "method": "keyword" | "llm" }` (없으면 서버 기본 `SSUROOM_NLP`, 그것도 없으면 `keyword`).
 
 `MessageInput`은 서버가 채운다(`store.message_input`). 화면에서 받지 않는다.
 
@@ -636,7 +643,7 @@ A  화 13:30~16:15 연강 · 정보과학관 21101
 }
 ```
 - `history`: 앞 대화. 빼도 된다. **응답의 `section_id`를 assistant 항목에 넣어 보내면** "그 강의", "아까 그거", "그거"를 그 분반으로 읽는다.
-- `method`: `keyword`(기본) 또는 `llm`.
+- `method`: `keyword` 또는 `llm`. 안 보내면 서버 기본(`SSUROOM_NLP`, 없으면 `keyword`).
   - `llm`: 언어 모델(Gemini)이 의도와 정보(과목명·분반 번호·교수·요일·시작 시각·강의실·건물)만 뽑는다. 프롬프트는 `backend/app/nlp/prompts/assistant.txt`.
   - 분반 id는 모델이 정하지 않는다. 모델이 쓴 과목명·번호를 키워드 버전과 같은 코드로 실제 분반에 연결한다.
   - 버리는 것: 질문·앞 대화 글에서 과목명 찾기로 찾히지 않는 과목, 질문·앞 대화에 (별칭으로도) 없는 건물, 질문에 없는 강의실 번호·시각 표현, 월~금이 아닌 요일, 없는 교수.
