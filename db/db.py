@@ -747,3 +747,20 @@ def coord_board(con, round_id):
     return con.execute("""SELECT p.id, p.course_id, p.section_no, p.target_kind, p.status, p.reason,
                                  (SELECT COUNT(*) FROM proposal_option o WHERE o.proposal_id = p.id)
                           FROM proposal p WHERE p.round_id=? ORDER BY p.id""", (round_id,)).fetchall()
+
+
+# ---------------------------------------------------------------- 교수 연차 (11/25)
+def set_hire_year(con, professor_id, year):
+    """교수 임용 연도(연차)를 넣는다. None 이면 지운다. 배정 엔진은 희망 칸을 두고 점수가 같을 때
+    가능한 시간이 적은 분반 다음으로 먼저 임용된 교수를 앞에 둔다(비면 이 기준을 건너뜀)."""
+    try:
+        u = con.execute("SELECT role FROM user WHERE id=?", (professor_id,)).fetchone()
+        if u is None or u[0] != "PROF":
+            raise ValueError(f"교수가 아닙니다: 사용자 {professor_id}")
+        if year is not None and not (isinstance(year, int) and 1950 <= year <= 2100):
+            raise ValueError(f"임용 연도는 1950~2100 사이 정수여야 합니다: {year}")
+        con.execute("UPDATE user SET hire_year=? WHERE id=?", (year, professor_id))
+        con.commit()
+    except Exception:
+        con.rollback()
+        raise

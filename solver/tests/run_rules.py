@@ -109,7 +109,7 @@ report("① 같은 과목, 교수가 다른 분반끼리는 겹쳐도 됨", len(
 
 # ② 1학년 채플 = 화 12:00 (가상). 화·목 12:00 만 되는 전공필수는 화요일을 못 써서 한 회차 못 놓음, 전공선택은 둘 다 놓임
 tw = [("화", "12:00"), ("목", "12:00")]
-p = new_course("전공필수", "1", ok_slots=tw); q2 = new_course("전공선택", "1", ok_slots=tw)
+p = new_course("전공필수", "1", ok_slots=tw, dept=2); q2 = new_course("전공선택", "1", ok_slots=tw, dept=2)   # 가상 학과 2: 기준 시간표와 섞이지 않게
 r, t = resolve([p, q2])
 cp, cq = cells(t, p), cells(t, q2)
 report("② 전공필수는 채플 칸(화 12:00)에 놓지 않음", ("화", "12:00") not in [x[2:] for x in cp] and len([k for k in r["unplaced"] if k[0] == p]) == 1,
