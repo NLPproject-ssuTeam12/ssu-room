@@ -29,12 +29,35 @@ XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 log = logging.getLogger("uvicorn.error")
 
+# 화면(Vite) 주소 허용 (CORS). 기본은 이 컴퓨터의 화면만.
+DEFAULT_ORIGINS = ["http://localhost:5173"]
+# 사설망(192.168.x.x · 10.x.x.x · 172.16~31.x.x)의 5173 포트만 (컴퓨터 2대 시연: 다른 컴퓨터가 A의IP:5173 으로 들어옴)
+LAN_ORIGIN_REGEX = (r"http://(192\.168\.\d{1,3}\.\d{1,3}|10\.\d{1,3}\.\d{1,3}\.\d{1,3}"
+                    r"|172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}):5173")
+
+
+def lan_enabled() -> bool:
+    """SSUROOM_LAN=1(true·yes·on)이면 같은 사설망의 다른 컴퓨터 화면도 허용."""
+    return (os.environ.get("SSUROOM_LAN") or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def cors_settings() -> dict:
+    """CORSMiddleware 설정. 환경 변수가 없으면 지금과 같다(http://localhost:5173 만).
+    - SSUROOM_LAN=1: 사설망 주소의 5173 포트 추가 (allow_origin_regex). 다른 주소·포트는 막힘
+    - SSUROOM_CORS="http://주소:포트,http://주소2:포트": 그 목록 추가 (사설망이 아닌 주소일 때)
+    "*"(모두 허용)는 쓰지 않는다."""
+    extra = [o.strip().rstrip("/") for o in (os.environ.get("SSUROOM_CORS") or "").split(",")
+             if o.strip() and o.strip() != "*"]
+    out = dict(allow_origins=list(dict.fromkeys(DEFAULT_ORIGINS + extra)), allow_methods=["*"], allow_headers=["*"])
+    if lan_enabled():
+        out["allow_origin_regex"] = LAN_ORIGIN_REGEX
+    return out
+
+
 app = FastAPI(title="SSU:room", version="0.1.0")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],
-    allow_methods=["*"],
-    allow_headers=["*"],
+    **cors_settings(),
 )
 
 MANUAL_MSG = "조교 직접 배정 분반입니다. 자동 배정·조율 대상이 아닙니다."
@@ -280,6 +303,7 @@ def health():
         "load_warnings": engine.load_warnings() + store.load_warnings,
         "nlp": nlp_default(),                                   # 서버 기본 해석 방식 (요청에 method 가 없을 때)
         "gemini_key": bool(os.environ.get("GEMINI_API_KEY")),   # 키가 있는지만 (값은 내보내지 않는다)
+        "lan": lan_enabled(),                                   # 같은 사설망의 다른 컴퓨터 화면 허용 (SSUROOM_LAN)
     }
 
 

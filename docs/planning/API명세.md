@@ -4,7 +4,7 @@
 예시 응답은 실제 서버(TestClient, 2026-11-21, 실습 데이터 `real`)에서 받은 것을 줄여 붙였다.
 
 - 서버: `http://localhost:8000`
-- 화면: `http://localhost:5173` (서버가 이 주소만 CORS 허용)
+- 화면: `http://localhost:5173` (기본으로 서버가 이 주소만 CORS 허용. 컴퓨터 2대 시연은 `SSUROOM_LAN`·`SSUROOM_CORS`, /health 참고)
 - 실행 (저장소 루트에서):
 
   ```
@@ -162,12 +162,15 @@ fetch(`http://localhost:8000/coord/${encodeURIComponent(sectionId)}/message`, { 
     "2150130801: 희망 칸 1개 버림 ['수-17:00']"
   ],
   "nlp": "keyword",
-  "gemini_key": false
+  "gemini_key": false,
+  "lan": false
 }
 ```
 - `round_no`: 0 = 조율 전, 1~3 = 차수.
 - `nlp`: 서버 기본 해석 방식 (환경 변수 `SSUROOM_NLP` = `keyword` | `llm`, 없으면 `keyword`). 조율 메시지·답장 해석·다음 차수 자동 메시지·AI 도우미 요청에 `method`가 없으면 이 값을 쓴다. 요청에 `method`가 있으면 그게 우선 (11/26).
 - `gemini_key`: `GEMINI_API_KEY`가 있는지(`true`/`false`)만. 키 값은 내보내지 않는다. `llm`인데 키가 없거나 429·503이면 키워드로 대신 처리하고 응답의 `method`·`fallback`·`fallback_reason`에 남는다.
+- `lan`: 환경 변수 `SSUROOM_LAN=1`이면 `true` — 같은 사설망(192.168.x.x·10.x.x.x·172.16~31.x.x)의 다른 컴퓨터 화면(포트 5173)도 허용(CORS, 컴퓨터 2대 시연). 없으면 지금처럼 `http://localhost:5173`만.
+- 환경 변수 `SSUROOM_CORS="http://주소:포트,http://주소2:포트"`: 그 화면 주소들도 허용 (사설망이 아닌 주소일 때). `*`(모두 허용)는 받지 않는다.
 - `load_warnings`: 진짜 함수 불러오기 실패 + 희망 파일에서 버린 칸(토요일, 8칸 밖 시각).
 
 ### `GET /sections`

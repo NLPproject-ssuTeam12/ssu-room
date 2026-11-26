@@ -17,3 +17,6 @@ if str(REPO_ROOT) not in sys.path:
 def _keyword_by_default(monkeypatch):
     """테스트는 늘 키워드 방식이 기본: 서버 기본 해석 방식(SSUROOM_NLP)을 지운다 (.env 나 셸 값에 흔들리지 않게)."""
     monkeypatch.delenv("SSUROOM_NLP", raising=False)
+    # 화면 주소 허용(CORS)도 기본값으로: 컴퓨터 2대 시연용 환경 변수를 지운다
+    monkeypatch.delenv("SSUROOM_LAN", raising=False)
+    monkeypatch.delenv("SSUROOM_CORS", raising=False)
