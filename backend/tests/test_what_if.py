@@ -7,7 +7,7 @@ from backend.tests.test_db_mode import build, client  # noqa: F401  (fixture 재
 from backend.app.nlp import assistant
 from backend.app.nlp.assistant import AssistantQuery, run_assistant
 from backend.app.store import store
-from backend.tests.helpers import free_room, move_blocks, prof_busy  # noqa: F401  (test_db_mode 와 같이 쓴다)
+from backend.tests.helpers import END, free_room, move_blocks, prof_busy  # noqa: F401  (test_db_mode 와 같이 쓴다)
 
 
 def snapshot(db):
@@ -126,8 +126,9 @@ def test_memory_mode_says_stub():
 def _alt(blocks):
     from backend.app.contracts import Alternative
     day = "월화수목금"
-    return Alternative(key="A", meetings=[{"day": day.index(b["day"]), "start": b["start"],
-                                           "end": {"09:00": "10:15", "16:30": "17:45"}.get(b["start"], "17:45"),
+    # 한 칸(75분) 수업. 끝 시각은 교시표(helpers.END)로: move_blocks 가 고른 어느 교시든 한 칸만 차지한다
+    # (예전에는 09:00·16:30 밖이면 17:45로 끝나 두 칸이 되어, 담당 교수의 다른 수업과 교수 겹침이 날 수 있었다)
+    return Alternative(key="A", meetings=[{"day": day.index(b["day"]), "start": b["start"], "end": END[b["start"]],
                                            "room": b["room"]} for b in blocks])
 
 
@@ -141,7 +142,8 @@ def test_violations_after_follow_real_rules(drafted):
     v_bad = main._violations_after("C3-01", _alt(bad))
     assert v_ok == [] and len(v_bad) >= 1 and len(v_ok) != len(v_bad)
     assert {v.rule for v in v_bad} == {"불가 칸"} and all(v.section_ids == ["C3-01"] for v in v_bad)
-    assert "칸 " not in v_bad[0].detail and ("월" in v_bad[0].detail or "수" in v_bad[0].detail)   # 칸 번호 대신 요일 시각
+    days = {b["day"] for b in bad}                       # move_blocks 가 고른 요일 (월·수 또는 화·목)
+    assert "칸 " not in v_bad[0].detail and any(d in v_bad[0].detail for d in days)   # 칸 번호 대신 요일 시각
     assert snapshot(db) == before                         # 진짜 DB는 그대로
     assert main._violations() == []                       # 지금 시간표(하윤 check_timetable) 위반 없음
 
