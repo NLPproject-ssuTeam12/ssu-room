@@ -89,6 +89,20 @@ class WriteAndCheck(unittest.TestCase):
         self.assertIn("다른 강의와 겹칩니다", t)
         self.assertNotIn("가 교수", t)
 
+    def test_own_other_section(self):
+        # 겹친 강의가 받는 교수님 본인의 다른 분반이면 이름을 다시 쓰지 않는다 (11/26 전체 시연). 상대 비공개 설정이어도 알린다
+        for i in [inp(blocker_prof="나"), inp(blocker_prof="나", reveal=False)]:
+            t = write_message(i).text
+            self.assertIn("희망하신 시간(월·수 15:00)이 교수님의 다른 분반(자료구조 01)과 겹칩니다.", t)
+            self.assertNotIn("나 교수님의", t)
+            self.assertEqual(check_message(t, i), [], t)
+        i = inp(blocker_prof="나")
+        self.assertEqual(coord.check_body("희망하신 시간(월·수 15:00)이 교수님의 다른 분반(자료구조 01)과 겹쳐 아래 대안을 드립니다.", i), [])
+        self.assertIn("본인 다른 분반을 남의 강의처럼 교수 이름을 붙여 씀",
+                      coord.check_body("희망하신 시간(월·수 15:00)이 나 교수님의 자료구조 01 분반과 겹칩니다.", i))
+        self.assertIn("1차인데 겹친 본인 다른 분반 이름이 빠지거나 바뀜",
+                      coord.check_body("희망하신 시간(월·수 15:00)이 다른 분반과 겹칩니다.", i))
+
     def test_unknown_blocker_does_not_say_overlap(self):
         # 서버가 겹친 상대를 못 찾으면 '겹친다'고 단정하지 않는다 (밀린 이유가 실습실 부족·학년 규칙일 수도 있음)
         i = inp(blocker_prof=None, blocker_course=None)

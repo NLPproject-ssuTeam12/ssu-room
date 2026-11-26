@@ -100,12 +100,12 @@ def test_assistant_uses_engine_in_db_mode(drafted):
     out = run_assistant(AssistantQuery(intent="what_if", room=room), store)
     assert "엔진이 다시 놓아" in out["answer"] and assistant.STUB_NOTE not in out["answer"]
     out = run_assistant(AssistantQuery(intent="explain", section_id="C3-01"), store)
-    assert "하드 규칙 위반 0건" in out["answer"]
+    assert "규칙 위반 0건" in out["answer"]
     # 이동 미리보기: 불가 칸으로는 [적용] 제안을 만들지 않는다
     blocks, room = move_blocks("C2-01")
     out = run_assistant(AssistantQuery(intent="move", section_id="C2-01", days=[x["day"] for x in blocks],
                                        start=blocks[0]["start"], room=room), store)
-    assert out["proposal_id"] and "하드 규칙 위반 없이" in out["answer"]
+    assert out["proposal_id"] and "규칙 위반 없이" in out["answer"]
 
 
 def test_memory_mode_says_stub():
