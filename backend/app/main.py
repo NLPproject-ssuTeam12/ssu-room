@@ -19,7 +19,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from . import dbmode, engine, export
-from .contracts import Alternative, Key, Timetable, Wish, fix_conditions, dump, meetings_to_blocks, parse, set_place
+from .contracts import (
+    Alternative, Key, Timetable, Violation, Wish, fix_conditions, dump, meetings_to_blocks, parse, set_place,
+)
 from .nlp import assistant
 from .store import MAX_ROUND, store
 
@@ -191,6 +193,24 @@ def _with_alternative(tt: Timetable, sid: str, alt: Alternative) -> Timetable:
     return out
 
 
+def _violations(tt: Optional[Timetable] = None) -> list:
+    """하드 규칙 위반 목록 (Violation 모양: rule, section_ids, detail).
+    DB 모드: 하윤 solver_core.check_timetable (지금 시간표 버전). 메모리 모드: 가짜 check_rules."""
+    db = _db()
+    if db is not None:
+        return [Violation(**v) for v in db.violation_list()]
+    return engine.check_rules(tt if tt is not None else store.timetable)
+
+
+def _violations_after(sid: str, alt: Alternative) -> list:
+    """그 분반을 대안 자리로 옮긴 '뒤' 시간표의 위반. DB 모드는 메모리 복사본에서 하윤 check_timetable
+    (진짜 DB는 그대로), 메모리 모드는 가짜 check_rules."""
+    db = _db()
+    if db is not None:
+        return [Violation(**v) for v in db.violations_after(sid, alt)]
+    return engine.check_rules(_with_alternative(store.timetable, sid, alt))
+
+
 def _unavailable(sid: str, alternatives) -> list:
     """그사이 다른 강의가 들어가서 못 쓰게 된 대안 키 (match_conditions의 unavailable).
     현재 시간표에 그 안을 넣어 보고, 이 분반이 낀 규칙 위반이 생기면 못 쓰는 안으로 본다."""
@@ -198,7 +218,7 @@ def _unavailable(sid: str, alternatives) -> list:
         return []
     out = []
     for alt in alternatives:
-        vs = engine.check_rules(_with_alternative(store.timetable, sid, alt))
+        vs = _violations_after(sid, alt)
         if any(sid in v.section_ids for v in vs):
             out.append(alt.key)
     return out
@@ -327,7 +347,7 @@ def post_draft():
         return {"stage": store.stage, "assignments": len(store.timetable.assignments), "status_count": count,
                 "coord": [c["section_id"] for c in store.list_coord()], "coord_status": kinds,
                 "solver": {k: r[k] for k in ("status", "seconds", "unplaced", "unsupported")},
-                "violations": len(_db().violations())}
+                "violations": len(_violations())}
     tt, delayed = engine.make_draft(store.list_sections(), store.list_wishes(), store.list_rooms())
     tt = _normalize(tt)
     tt.status = "DRAFT"
@@ -350,7 +370,7 @@ def post_draft():
         "assignments": len(tt.assignments),
         "status_count": status_count,
         "coord": [c["section_id"] for c in store.list_coord()],
-        "violations": len(engine.check_rules(tt)),
+        "violations": len(_violations(tt)),
     }
 
 
@@ -450,7 +470,7 @@ def post_decide(section_id: str, body: DecideIn):
         rec =store.add_decision(section_id, r["action"], body.reason, r.get("applied"))
         out = {"decision": rec, "coord": _coord_out(store.get_coord(section_id))}
         if r.get("timetable_id"):
-            out["violations"] = len(_db().violations())
+            out["violations"] = len(_violations())
         return out
 
     if item["state"] == "OFFLINE":
@@ -500,7 +520,7 @@ def post_decide(section_id: str, body: DecideIn):
     rec = store.add_decision(section_id, body.action, body.reason, dump(alt))
     store.update_coord(section_id, state="RESOLVED")
     return {"decision": rec, "coord": _coord_out(store.get_coord(section_id)),
-            "violations": len(engine.check_rules(tt))}
+            "violations": len(_violations(tt))}
 
 
 @app.post("/coord/{section_id}/manual")
@@ -528,7 +548,7 @@ def post_manual(section_id: str, body: ManualIn):
     store.set_timetable(tt)
     rec = store.add_decision(section_id, "manual", body.reason, dump(alt))
     store.update_coord(section_id, state="RESOLVED")
-    vs = [v for v in engine.check_rules(tt) if section_id in v.section_ids]
+    vs = [v for v in _violations(tt) if section_id in v.section_ids]
     return {"decision": rec, "coord": _coord_out(store.get_coord(section_id)),
             "violations": len(vs), "warnings": [dump(v) for v in vs]}
 
@@ -580,11 +600,11 @@ def post_finalize():
         _db_call(_db().finalize)
         left = [a.section_id for a in store.timetable.assignments if a.status == "COORD"]
         return {"stage": store.stage, "round_no": store.round_no, "unresolved": left,
-                "violations": len(_db().violations())}
+                "violations": len(_violations())}
     store.set_stage("FINAL")
     left = [a.section_id for a in store.timetable.assignments if a.status == "COORD"]
     return {"stage": store.stage, "round_no": store.round_no, "unresolved": left,
-            "violations": len(engine.check_rules(store.timetable))}
+            "violations": len(_violations(store.timetable))}
 
 
 @app.post("/reset")
@@ -605,7 +625,15 @@ def post_assistant(body: AssistantIn):
     method="llm"이 실패하면 키워드 방식으로 대신 처리하고 command.fallback=True (fallback_reason에 이유)."""
     cmd = assistant.read_question(body.text, body.history, store, method=body.method)
     out = assistant.run_assistant(cmd, store)
-    return {"command": dump(cmd), "section_id": cmd.section_id, **out}
+    res = {"command": dump(cmd), "section_id": cmd.section_id, **out}
+    prop = assistant.get_proposal(out.get("proposal_id")) if out.get("proposal_id") else None
+    if prop is not None and store.timetable is not None:
+        # 옮기기 제안: '옮긴 뒤' 시간표 기준 위반 (DB 모드는 복사본에서 하윤 check_timetable, 메모리 모드는 가짜)
+        vs = _violations_after(prop["section_id"], prop["alternative"])
+        prop["violations"] = len(vs)
+        res["violations"] = len(vs)
+        res["violation_list"] = [dump(v) for v in vs]
+    return res
 
 
 @app.post("/assistant/apply")
@@ -629,7 +657,7 @@ def post_assistant_apply(body: ApplyIn):
         _db_call(_db().assistant_apply, sid, alt, body.reason.strip())
         rec = store.add_decision(sid, "assistant_move", body.reason.strip(), dump(alt))
         assistant.pop_proposal(body.proposal_id)
-        return {"decision": rec, "summary": prop["summary"], "violations": len(_db().violations())}
+        return {"decision": rec, "summary": prop["summary"], "violations": len(_violations())}
     tt = _normalize(engine.reassign(store.timetable, sid, alt))
     tt.status = store.timetable.status
     store.set_timetable(tt)
@@ -638,7 +666,7 @@ def post_assistant_apply(body: ApplyIn):
     if item is not None and item["state"] not in ("RESOLVED",):
         store.update_coord(sid, state="RESOLVED")   # 조교가 직접 옮겼으므로 이 분반 조율은 끝
     assistant.pop_proposal(body.proposal_id)
-    return {"decision": rec, "summary": prop["summary"], "violations": len(engine.check_rules(tt))}
+    return {"decision": rec, "summary": prop["summary"], "violations": len(_violations(tt))}
 
 
 # ---------- 엑셀 내보내기 ----------

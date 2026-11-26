@@ -134,3 +134,55 @@ def test_memory_mode_says_stub():
     out = run_assistant(AssistantQuery(intent="what_if", room=room), store)
     assert assistant.STUB_NOTE in out["answer"]
     c.post("/reset")
+
+
+# ---------- DB 모드 규칙 검사 = 하윤 check_timetable (가짜 check_rules 아님) ----------
+
+def _alt(blocks):
+    from backend.app.contracts import Alternative
+    day = "월화수목금"
+    return Alternative(key="A", meetings=[{"day": day.index(b["day"]), "start": b["start"],
+                                           "end": {"09:00": "10:15", "16:30": "17:45"}.get(b["start"], "17:45"),
+                                           "room": b["room"]} for b in blocks])
+
+
+def test_violations_after_follow_real_rules(drafted):
+    from backend.app import main
+    c, db = drafted
+    before = snapshot(db)
+    ok, _ = move_blocks("C2-01")                          # 빈 자리 → 위반 0
+    bad, _ = move_blocks("C3-01")                         # C3 은 화·금 09:00 말고 모두 불가 → 불가 칸 위반
+    v_ok = main._violations_after("C2-01", _alt(ok))
+    v_bad = main._violations_after("C3-01", _alt(bad))
+    assert v_ok == [] and len(v_bad) >= 1 and len(v_ok) != len(v_bad)
+    assert {v.rule for v in v_bad} == {"불가 칸"} and all(v.section_ids == ["C3-01"] for v in v_bad)
+    assert "칸 " not in v_bad[0].detail and ("월" in v_bad[0].detail or "수" in v_bad[0].detail)   # 칸 번호 대신 요일 시각
+    assert snapshot(db) == before                         # 진짜 DB는 그대로
+    assert main._violations() == []                       # 지금 시간표(하윤 check_timetable) 위반 없음
+
+
+def test_professor_overlap_names_both_sections(drafted):
+    from backend.app import main
+    c, db = drafted
+    c8 = next(x for x in store.timetable.assignments if x.section_id == "C8-01")     # 교수01, 월 09:00 연강
+    b = c8.blocks[0]
+    room = free_room([f"{b.day}-{b.start}", f"{b.day}-10:30"], skip="C1-01")
+    alt = _alt([{"day": b.day, "start": b.start, "room": room}])
+    alt.meetings[0].end = "11:45"                                                    # 연강 두 칸
+    vs = main._violations_after("C1-01", alt)
+    prof = [v for v in vs if v.rule == "교수 겹침"]
+    assert prof and set(prof[0].section_ids) == {"C1-01", "C8-01"}
+    assert "None" not in prof[0].detail and "교수01" in prof[0].detail
+
+
+def test_assistant_proposal_reports_after_move_violations(drafted):
+    c, db = drafted
+    room = free_room(["월-16:30", "수-16:30"], skip="C2-01")
+    j = c.post("/assistant", json={"text": f"가상과목2 01분반 월수 16:30 {room.split()[1]}로 옮겨줘"}).json()
+    if j.get("proposal_id"):                              # 키워드가 과목을 찾으면: 옮긴 뒤 위반 0
+        assert j["violations"] == 0 and j["violation_list"] == []
+    out = run_assistant(AssistantQuery(intent="move", section_id="C2-01", days=["월", "수"], start="16:30", room=room),
+                        store)
+    from backend.app import main
+    p = assistant.get_proposal(out["proposal_id"])
+    assert len(main._violations_after("C2-01", p["alternative"])) == 0

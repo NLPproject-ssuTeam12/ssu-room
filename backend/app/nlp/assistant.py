@@ -658,7 +658,8 @@ def _rule_lines(res: dict, by_title) -> List[str]:
     if res.get("clash"):
         out.append(res["clash"])
     for r in res.get("rules", [])[:5]:
-        out.append(f"{r['rule']}: {by_title(r['section_id'])} ({r['detail']})")
+        who = ", ".join(by_title(x) for x in (r.get("section_ids") or ([r["section_id"]] if r.get("section_id") else [])))
+        out.append(f"{r['rule']}: {who + ' ' if who else ''}({r['detail']})")
     return out
 
 

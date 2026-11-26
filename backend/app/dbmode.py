@@ -12,6 +12,7 @@
 
 import json
 import os
+import re
 import sqlite3
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -527,6 +528,68 @@ class DBMode:
         tt = tt or self.current_tt()
         return self.sc.check_timetable(self.con, tt) if tt else []
 
+    def view(self, con, tt: int, v: dict) -> dict:
+        """하윤 check_timetable 위반 하나 → {rule, section_ids(서버 분반 id), detail(사람이 읽는 글)}.
+        교수 겹침·교필↔전필·전필↔전필은 하윤 결과에 분반이 없어서(course_id/section_no=None) 관련 분반을 찾아 붙이고,
+        detail 의 '교수 N'·'칸 N'·'강의실 N'·'과목 N' 번호를 가명·요일 시각·강의실·과목명으로 바꾼다."""
+        d = v["detail"] or ""
+        ids: List[str] = []
+        if v.get("course_id") is not None and v.get("section_no") is not None:
+            ids.append(self._sid(v["course_id"], v["section_no"]))
+        elif v["rule"] == "교수 겹침":
+            m = re.search(r"교수 (\d+) 칸 (\d+)", d)
+            if m:
+                prof, slot = int(m.group(1)), int(m.group(2))
+                for cid, sec in con.execute(
+                        """SELECT DISTINCT a.course_id, a.section_no FROM assignment a
+                           JOIN course c ON c.id = a.course_id
+                           LEFT JOIN course_section cs ON cs.course_id = a.course_id AND cs.section_no = a.section_no
+                           WHERE a.timetable_id=? AND a.slot_id=? AND COALESCE(cs.professor_id, c.professor_id)=?""",
+                        (tt, slot, prof)):
+                    ids.append(self._sid(cid, sec))
+        else:
+            courses = [v["course_id"]] if v.get("course_id") is not None else []
+            courses += [int(x) for x in re.findall(r"과목 (\d+)", d)]
+            for cid in courses:
+                ids += [self._sid(cid, sec) for (sec,) in con.execute(
+                    "SELECT DISTINCT section_no FROM assignment WHERE timetable_id=? AND course_id=? ORDER BY 1", (tt, cid))]
+        names = {i: n for n, i in self.prof_id.items()}
+        cname = dict(con.execute("SELECT id, name FROM course"))
+
+        def slot_text(m):
+            info = self.slots.info.get(int(m.group(1)))
+            return f"{info[0]} {info[2]}" if info else m.group(0)
+        d = re.sub(r"교수 (\d+)", lambda m: names.get(int(m.group(1)), "담당 교수"), d)
+        d = re.sub(r"(?:채플 )?칸 (\d+)", lambda m: ("채플 " if m.group(0).startswith("채플") else "") + slot_text(m), d)
+        d = re.sub(r"강의실 (\d+)", lambda m: "강의실 " + self.rooms.name_of.get(int(m.group(1)), m.group(1)), d)
+        d = re.sub(r"과목 (\d+)", lambda m: cname.get(int(m.group(1)), "다른 과목"), d)
+        return dict(rule=v["rule"], section_ids=list(dict.fromkeys(ids)), detail=d)
+
+    def violation_list(self, tt: Optional[int] = None) -> List[dict]:
+        """지금 시간표 버전의 하드 규칙 위반 (하윤 check_timetable) → view 모양."""
+        tt = tt or self.current_tt()
+        return [self.view(self.con, tt, v) for v in self.violations(tt)] if tt else []
+
+    def violations_after(self, sid: str, alt: Alternative) -> List[dict]:
+        """그 분반을 대안 자리로 옮긴 '뒤' 시간표의 하드 규칙 위반 (view 모양). 진짜 DB는 그대로:
+        메모리 복사본에 새 버전을 만들어 하윤 check_timetable 로 잰 뒤 버린다. 같은 칸·같은 강의실이면 '강의실 겹침' 하나."""
+        tt = self.current_tt()
+        if tt is None:
+            return []
+        cid, _ = self.section_key(sid)
+        mem = sqlite3.connect(":memory:")
+        try:
+            self.con.backup(mem)
+            mem.execute("PRAGMA foreign_keys = ON")
+            rows = self.sc.option_rows(mem, option=self.adapter.option_of(sid, alt), timetable_id=tt)
+            try:
+                new = self.hdb.apply_option(mem, None, None, rows, "규칙 검사", course_id=cid, base_timetable_id=tt)
+            except ValueError as e:
+                return [dict(rule="강의실 겹침", section_ids=[sid], detail=str(e))]
+            return [self.view(mem, new, v) for v in self.sc.check_timetable(mem, new)]
+        finally:
+            mem.close()
+
     def assistant_apply(self, sid: str, alt: Alternative, reason: str) -> int:
         """도우미 [적용]: 그 분반의 열린 안건이 있으면 그 안건으로, 없으면 안건 없이 새 시간표 버전."""
         self.adapter.actor_id, self.adapter.apply_reason = self.ta_id, reason
@@ -576,8 +639,10 @@ class DBMode:
     def _sid(self, cid: int, sec: int) -> str:
         return self.pairs.sid_of.get((cid, sec), f"{cid}-{sec}")
 
-    def _rule_text(self, v: dict) -> dict:
-        return dict(rule=v["rule"], section_id=self._sid(v["course_id"], v["section_no"]), detail=v["detail"])
+    def _rule_text(self, v: dict, con=None, tt: Optional[int] = None) -> dict:
+        x = self.view(con or self.con, tt or self.current_tt(), v)
+        return dict(rule=x["rule"], section_id=x["section_ids"][0] if x["section_ids"] else None,
+                    section_ids=x["section_ids"], detail=x["detail"])
 
     def _moved(self, mem, base: int, new: int, keys) -> Tuple[List[dict], List[str]]:
         """두 시간표 버전에서 그 분반들의 자리 비교 → (옮겨진 분반 [{section_id, before, after}], 못 놓인 분반 id)."""
@@ -634,11 +699,12 @@ class DBMode:
             option = dict(alternative=dump(alt), stage=o["stage"],
                           moves=[dict(section_id=self._sid(k[0], k[1]), before=self._cell(*b), after=self._cell(*a))
                                  for k, b, a in o["moves"]])
-        changed = [sid] + sorted({r["section_id"] for r in map(self._rule_text, rules)} - {sid})
+        texts = [self._rule_text(v, mem, new) for v in rules]
+        changed = [sid] + sorted({x for r in texts for x in r["section_ids"]} - {sid})
         if option:
             changed += [m["section_id"] for m in option["moves"] if m["section_id"] not in changed]
         return dict(supported=True, kind="move", feasible=new is not None and not rules, clash=clash,
-                    changed=changed, violations=len(rules), rules=[self._rule_text(v) for v in rules],
+                    changed=changed, violations=len(rules), rules=texts,
                     moved=[], unplaced=[], option=option, engine="하윤 엔진(복사본에서 계산)", note="")
 
     def _cell(self, slot: int, room: int) -> str:
@@ -656,7 +722,7 @@ class DBMode:
         rules = self._new_violations(mem, tt, new)
         changed = [self._sid(c, s) for c, s in sorted(keys)]
         return dict(supported=True, feasible=not unplaced and not rules, clash=None, changed=changed,
-                    violations=len(rules), rules=[self._rule_text(v) for v in rules], moved=moved, unplaced=unplaced,
+                    violations=len(rules), rules=[self._rule_text(v, mem, new) for v in rules], moved=moved, unplaced=unplaced,
                     option=None, engine="하윤 엔진(복사본에서 계산)", note="")
 
     def _what_room_off(self, mem, tt: int, room: Optional[str]) -> dict:
