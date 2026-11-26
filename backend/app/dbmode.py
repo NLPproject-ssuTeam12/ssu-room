@@ -494,14 +494,44 @@ class DBMode:
             (self.term_id, new_no)).lastrowid
         self.con.commit()
         self.hdb.set_phase(self.con, self.term_id, PHASE_OF_ROUND[new_no], self.ta_id)
-        prev_rid = self.round_id(no)
         opened, tt = [], self.current_tt()
-        for (prev,) in self.q("SELECT id FROM proposal WHERE round_id=? AND status='NEXT' ORDER BY id", (prev_rid,)).fetchall():
-            new = self.hdb.open_next_proposal(self.con, prev, rid, timetable_id=tt)
+        for prev, prev_no in self.pending_next(new_no):
+            new, how = self._open_next(prev, prev_no, rid, new_no, tt)
             cond = self.hdb.carried_conditions(self.con, new)
             n = self._fill(new, cond)
-            opened.append(dict(proposal_id=new, options=n, conditions=cond))
+            opened.append(dict(proposal_id=new, options=n, conditions=cond, from_round=prev_no, opened_by=how))
         return new_no, opened
+
+    def pending_next(self, new_no: int) -> List[Tuple[int, int]]:
+        """새 차수(new_no)가 이어받을 안건: 그 학기 이전 모든 차수에서 '다음 차수로'(NEXT)이면서 아직 다음 차수 안건으로
+        이어지지 않은 것 (proposal.prev_proposal_id 로 가리키는 안건이 없음). 답장 대기 중에 차수를 넘긴 뒤 늦게 NEXT 가
+        된 안건도 여기서 잡힌다. 같은 분반의 안건이 이미 새 차수에 있으면 뺀다. -> [(안건 id, 그 안건의 차수)]"""
+        return [(pid, rno) for pid, rno in self.q(
+            """SELECT p.id, r.round_no FROM proposal p JOIN round r ON r.id = p.round_id
+               WHERE r.term_id=? AND r.round_no < ? AND p.status='NEXT'
+                 AND NOT EXISTS (SELECT 1 FROM proposal n WHERE n.prev_proposal_id = p.id)
+                 AND NOT EXISTS (SELECT 1 FROM proposal x JOIN round xr ON xr.id = x.round_id
+                                 WHERE xr.term_id = r.term_id AND xr.round_no = ? AND x.course_id = p.course_id
+                                   AND x.section_no IS p.section_no)
+               ORDER BY p.id""", (self.term_id, new_no, new_no)).fetchall()]
+
+    def _open_next(self, prev: int, prev_no: int, rid: int, new_no: int, tt: Optional[int]) -> Tuple[int, str]:
+        """다음 차수 안건 열기. 바로 다음 차수면 하윤 db.open_next_proposal.
+        차수를 건너뛴 경우(1차 안건이 늦게 NEXT → 3차)는 하윤 함수가 '바로 다음 차수가 아닙니다'로 막으므로, 같은 칸
+        (과목·분반·이유·조율 대상 종류, OPEN, prev_proposal_id = 이전 안건)으로 서버가 직접 넣는다 (하윤에게 확인 요청)."""
+        if new_no == prev_no + 1:
+            return self.hdb.open_next_proposal(self.con, prev, rid, timetable_id=tt), "open_next_proposal"
+        try:
+            row = self.q("SELECT course_id, section_no, reason, target_kind, timetable_id FROM proposal WHERE id=?",
+                         (prev,)).fetchone()
+            new = self.q("""INSERT INTO proposal(round_id, timetable_id, course_id, section_no, reason, status, prev_proposal_id,
+                                                  target_kind) VALUES (?,?,?,?,?, 'OPEN', ?, ?)""",
+                         (rid, tt or row[4], row[0], row[1], row[2], prev, row[3])).lastrowid
+            self.con.commit()
+            return new, "server (차수 건너뜀)"
+        except Exception:
+            self.con.rollback()
+            raise
 
     def _fill(self, pid: int, cond: Optional[dict]) -> int:
         """다음 차수 안건에 대안을 채운다. 희망은 1차 round 응답이라 alternatives 를 1차 round id 로 부르고

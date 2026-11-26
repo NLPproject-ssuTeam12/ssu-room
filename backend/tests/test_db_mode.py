@@ -262,3 +262,28 @@ def test_db_mode_reply_rules(client):
     assert [x["choice"] for x in hdb.reply_choices(db.con, mid)] == ["ETC"]
     label, model = db.q("SELECT label, model_name FROM reply_interpretation WHERE message_id=?", (mid,)).fetchone()
     assert label in ("ACCEPT", "CONDITIONAL", "REJECT", "UNCLEAR") and model == "keyword"
+
+
+def test_late_next_is_carried_to_a_later_round(client):
+    """1차 답장 대기 → 2차 시작 → 1차 답장을 확인해 NEXT → 3차 시작 때 그 안건이 3차에 열린다."""
+    c, db = client
+    c.post("/draft")
+    c.post("/rounds/next")                                              # 1차, OPEN 은 자동 발송
+    sid = "C6-01"
+    assert coord(c)[sid]["state"] == "SENT"
+    p1 = coord(c)[sid]["proposal_id"]
+    assert c.post("/rounds/next").json()["round_no"] == 2               # 답장 대기 중 2차로
+    assert coord(c)[sid]["proposal_id"] == p1                           # 아직 1차 안건
+    r = c.post(f"/coord/{enc(sid)}/reply", json={"choices": ["ETC"], "text": "목요일이면 됩니다"})
+    assert r.json()["proposal"]["action"] == "next"
+    assert c.post(f"/coord/{enc(sid)}/decide", json={"action": "confirm"}).json()["coord"]["state"] == "NEXT"
+    assert db.pending_next(3) == [(p1, 1)]
+    r = c.post("/rounds/next")                                          # 3차
+    assert r.status_code == 200, r.text
+    j = r.json()
+    assert j["round_no"] == 3 and [o["from_round"] for o in j["next_opened"]] == [1]
+    item = coord(c)[sid]
+    assert item["round_no"] == 3 and item["proposal_id"] != p1 and item["state"] in ("SENT", "NO_OPTION")
+    assert db.q("SELECT prev_proposal_id FROM proposal WHERE id=?", (item["proposal_id"],)).fetchone()[0] == p1
+    assert item["prev_conditions"] == {"day_slots": {"3": []}, "end_before": []}   # 1차 조건 이어받음
+    assert db.pending_next(3) == []                                     # 두 번 열지 않음
