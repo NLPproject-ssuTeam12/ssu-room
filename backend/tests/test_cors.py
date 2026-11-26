@@ -1,13 +1,26 @@
 """화면 주소 허용(CORS): 기본은 지금과 같이 http://localhost:5173 만. 컴퓨터 2대 시연용 SSUROOM_LAN·SSUROOM_CORS.
 환경 변수에 따라 설정이 바뀌므로, 설정 함수(main.cors_settings)로 작은 앱을 다시 만들어 확인한다.
-(conftest 가 테스트마다 SSUROOM_LAN·SSUROOM_CORS 를 지운다)"""
+(conftest 가 테스트마다 SSUROOM_LAN·SSUROOM_CORS 를 지운다)
+
+data/private/ 이 없으면(커밋 안 되는 폴더) 이 파일 전체를 건너뛴다. backend.app.main 을 불러오면 서버 저장소(store)가
+그 데이터를 읽기 때문이다 (test_api.py 와 같은 처리).
+"""
+
+import os
+from pathlib import Path
 
 import pytest
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.testclient import TestClient
 
-from backend.app import main
+REPO_ROOT = Path(__file__).resolve().parents[2]
+DATA = REPO_ROOT / "data" / "private" / os.environ.get("DATA_SET", "real")
+if not (DATA / "sections.json").exists():
+    pytest.skip(f"{DATA} 에 데이터가 없어 건너뜀", allow_module_level=True)
+
+from fastapi import FastAPI  # noqa: E402
+from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
+from fastapi.testclient import TestClient  # noqa: E402
+
+from backend.app import main  # noqa: E402
 
 ALLOW = "access-control-allow-origin"
 
