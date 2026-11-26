@@ -24,9 +24,28 @@ def free_room(cells, skip=None):
     return room
 
 
-def move_blocks(sid, days=("월", "수"), start="16:30"):
-    room = free_room([f"{d}-{start}" for d in days], skip=sid)
-    return [{"day": d, "start": start, "slots": 1, "room": room} for d in days], room
+def prof_busy(sid):
+    """그 분반 담당 교수의 다른 분반이 지금 초안에서 쓰는 칸 (옮길 시각이 교수 겹침을 만들지 않게)."""
+    prof = store.get_section(sid).professor
+    return {c for a in store.timetable.assignments if a.section_id != sid
+            and store.get_section(a.section_id) and store.get_section(a.section_id).professor == prof
+            for blk in a.blocks for c in assistant._cells(blk)}
+
+
+def move_blocks(sid):
+    """옮겨 볼 자리: 담당 교수가 비어 있고 빈 강의실이 있는 월·수 또는 화·목 한 교시 (초안마다 다를 수 있어서 찾는다)."""
+    busy = prof_busy(sid)
+    for days in (("월", "수"), ("화", "목")):
+        for start in ("16:30", "15:00", "13:30", "12:00", "10:30"):
+            cells = [f"{d}-{start}" for d in days]
+            if any(c in busy for c in cells):
+                continue
+            try:
+                room = free_room(cells, skip=sid)
+            except AssertionError:
+                continue
+            return [{"day": d, "start": start, "slots": 1, "room": room} for d in days], room
+    raise AssertionError(f"{sid}를 옮겨 볼 빈 자리가 없음")
 
 
 @pytest.fixture()
@@ -117,9 +136,9 @@ def test_assistant_uses_engine_in_db_mode(drafted):
     out = run_assistant(AssistantQuery(intent="explain", section_id="C3-01"), store)
     assert "하드 규칙 위반 0건" in out["answer"]
     # 이동 미리보기: 불가 칸으로는 [적용] 제안을 만들지 않는다
-    room = free_room(["월-16:30", "수-16:30"], skip="C2-01")
-    out = run_assistant(AssistantQuery(intent="move", section_id="C2-01", days=["월", "수"], start="16:30", room=room),
-                        store)
+    blocks, room = move_blocks("C2-01")
+    out = run_assistant(AssistantQuery(intent="move", section_id="C2-01", days=[x["day"] for x in blocks],
+                                       start=blocks[0]["start"], room=room), store)
     assert out["proposal_id"] and "하드 규칙 위반 없이" in out["answer"]
 
 
@@ -177,12 +196,12 @@ def test_professor_overlap_names_both_sections(drafted):
 
 def test_assistant_proposal_reports_after_move_violations(drafted):
     c, db = drafted
-    room = free_room(["월-16:30", "수-16:30"], skip="C2-01")
-    j = c.post("/assistant", json={"text": f"가상과목2 01분반 월수 16:30 {room.split()[1]}로 옮겨줘"}).json()
+    blocks, room = move_blocks("C2-01")
+    days, start = [x["day"] for x in blocks], blocks[0]["start"]
+    j = c.post("/assistant", json={"text": f"가상과목2 01분반 {''.join(days)} {start} {room.split()[1]}로 옮겨줘"}).json()
     if j.get("proposal_id"):                              # 키워드가 과목을 찾으면: 옮긴 뒤 위반 0
         assert j["violations"] == 0 and j["violation_list"] == []
-    out = run_assistant(AssistantQuery(intent="move", section_id="C2-01", days=["월", "수"], start="16:30", room=room),
-                        store)
+    out = run_assistant(AssistantQuery(intent="move", section_id="C2-01", days=days, start=start, room=room), store)
     from backend.app import main
     p = assistant.get_proposal(out["proposal_id"])
     assert len(main._violations_after("C2-01", p["alternative"])) == 0
