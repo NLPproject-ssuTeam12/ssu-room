@@ -112,6 +112,12 @@ def _knows_blocker(inp: MessageInput) -> bool:
     return inp.off != "building" and bool(inp.blocker_prof and inp.blocker_course)
 
 
+def _own_blocker(inp: MessageInput) -> bool:
+    """겹친 강의가 받는 교수님 본인의 다른 분반인가. 남의 강의처럼 이름을 다시 쓰지 않고 '교수님의 다른 분반'이라고 쓴다
+    (11/26 전체 시연: "교수15 교수님, … 교수15 교수님의 인공지능입문 03 분반과 겹쳐"). 본인 분반이라 학과 설정(상대 공개)과 상관없이 알린다."""
+    return _knows_blocker(inp) and inp.blocker_prof == inp.professor
+
+
 def _wish_text(inp: MessageInput) -> str:
     """메시지에 그대로 넣을 처음 희망. 시간만 / 건물만 / 둘 다 (11/25 #21 조율 대상: 건물만 어긋난 분반도 있음)."""
     return {"time": inp.wish, "building": inp.wish_building,
@@ -125,7 +131,10 @@ def _template_body(inp: MessageInput) -> list[str]:
         if not _knows_blocker(inp):
             what = f"시간({inp.wish})" if inp.off == "time" else f"시간({inp.wish})과 건물({inp.wish_building})"
             return [f"희망하신 {what}에 배정하지 못해 아래 대안을 드립니다."]
-        other = f"{inp.blocker_prof} 교수님의 {inp.blocker_course} 분반과" if inp.reveal else "다른 강의와"
+        if _own_blocker(inp):
+            other = f"교수님의 다른 분반({inp.blocker_course})과"
+        else:
+            other = f"{inp.blocker_prof} 교수님의 {inp.blocker_course} 분반과" if inp.reveal else "다른 강의와"
         body = [f"희망하신 시간({inp.wish})이 {other} 겹칩니다."]
         if inp.off == "both":
             body.append(f"희망하신 건물({inp.wish_building})에도 배정하지 못했습니다.")
@@ -161,7 +170,12 @@ def check_body(body: str, inp: MessageInput) -> list[str]:
         return ["설명 문단이 비었음"]
     if re.search(r"[(\[<]\s*상대|<<|>>", body):
         p.append("설명 문단에 자리표시가 남음")
-    if inp.round == 1 and inp.reveal and _knows_blocker(inp):
+    if inp.round == 1 and _own_blocker(inp):
+        if inp.blocker_course not in body:
+            p.append("1차인데 겹친 본인 다른 분반 이름이 빠지거나 바뀜")
+        if f"{inp.professor} 교수" in body:
+            p.append("본인 다른 분반을 남의 강의처럼 교수 이름을 붙여 씀")
+    elif inp.round == 1 and inp.reveal and _knows_blocker(inp):
         if f"{inp.blocker_prof} 교수" not in body or inp.blocker_course not in body:
             p.append("1차인데 겹친 상대 교수·강의 이름이 빠지거나 바뀜")
     plain = body
@@ -192,9 +206,13 @@ def write_message(inp: MessageInput, method: Method = "keyword") -> Message:
         if inp.off == "building":
             situation += " 시간이 어긋났다고 쓰지 않는다."
     elif inp.round == 1:
-        situation = (f"1차 조율. 희망 시간이 {inp.blocker_prof} 교수님의 {inp.blocker_course} 분반과 겹친다. 상대 교수와 강의 이름을 그대로 적는다."
-                     if inp.reveal
-                     else "1차 조율. 희망 시간이 다른 강의와 겹친다. 상대 교수 이름과 강의 이름은 적지 않는다 (학과 설정).")
+        if _own_blocker(inp):
+            situation = (f"1차 조율. 희망 시간이 받는 교수님 본인의 다른 분반({inp.blocker_course})과 겹친다. "
+                         f"\"교수님의 다른 분반({inp.blocker_course})\"처럼 적고, 교수 이름은 다시 적지 않는다.")
+        elif inp.reveal:
+            situation = f"1차 조율. 희망 시간이 {inp.blocker_prof} 교수님의 {inp.blocker_course} 분반과 겹친다. 상대 교수와 강의 이름을 그대로 적는다."
+        else:
+            situation = "1차 조율. 희망 시간이 다른 강의와 겹친다. 상대 교수 이름과 강의 이름은 적지 않는다 (학과 설정)."
         if inp.off == "both":
             situation += " 희망 건물에도 배정하지 못했다."
     elif inp.prev_conditions and not inp.prev_conditions.is_empty():
@@ -227,7 +245,7 @@ def check_message(text: str, inp: MessageInput) -> list[str]:
     for h in inp.hidden:
         if h.strip() and h.strip() in text:
             p.append("상대 교수의 사정(기타 요청)을 썼음")
-    if not inp.reveal and inp.blocker_prof and f"{inp.blocker_prof} 교수" in text:
+    if not inp.reveal and inp.blocker_prof and inp.blocker_prof != inp.professor and f"{inp.blocker_prof} 교수" in text:
         p.append("상대 교수 이름을 썼음 (학과 설정: 알리지 않음)")
     if inp.course not in text:
         p.append("과목·분반 이름이 빠짐")

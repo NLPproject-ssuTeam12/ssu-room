@@ -19,7 +19,8 @@ from typing import Dict, List, Optional, Tuple
 
 from . import engine
 from .contracts import (
-    DAYS, STARTS, Alternative, Assignment, Block, Room, Section, Timetable, Wish, conditions_json, dump, parse,
+    DAYS, STARTS, Alternative, Assignment, Block, Room, Section, Timetable, Wish, block_minutes, conditions_json, dump,
+    parse,
 )
 from .solver.adapter import (
     REPO_ROOT, RoomIndex, SectionMap, SlotIndex, SolverAdapter, assignments_from_db, configure, default_paths,
@@ -887,5 +888,8 @@ def _unsupported(note: str) -> dict:
 
 
 def _place(a) -> str:
-    """배정 → '화 13:30 정보과학관 21303 / 목 13:30 …'."""
-    return " / ".join(f"{b.day} {b.start} {b.room or ''}".strip() for b in a.blocks) or "자리 없음"
+    """배정 → '화 13:30~14:45 정보과학관 21303 / 목 13:30~14:45 …' (도우미 표에서 '전' 칸과 같은 꼴로 끝나는 시각까지)."""
+    def one(b):
+        e = block_minutes(b)[1]
+        return f"{b.day} {b.start}~{e // 60:02d}:{e % 60:02d} {b.room or ''}".strip()
+    return " / ".join(one(b) for b in a.blocks) or "자리 없음"

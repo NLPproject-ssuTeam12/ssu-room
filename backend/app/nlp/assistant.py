@@ -120,6 +120,40 @@ def section_title(sec) -> str:
     return f"{sec.name} {section_label(sec)}"
 
 
+# 숫자 끝 글자 읽는 소리의 받침: 영·일·이·삼·사·오·육·칠·팔·구 (0은 십·백처럼 받침 있음)
+_DIGIT_JONG = {"0": "o", "1": "ㄹ", "2": "", "3": "o", "4": "", "5": "", "6": "o", "7": "ㄹ", "8": "ㄹ", "9": ""}
+
+
+def _jong(word: str) -> str:
+    """끝 글자 받침: '' 없음, 'ㄹ', 'o' 그 밖. '09:00'처럼 정각은 '9시'로 읽어 받침 없음."""
+    w = word.rstrip()
+    if not w or w.endswith(":00"):
+        return ""
+    ch = w[-1]
+    if ch in _DIGIT_JONG:
+        return _DIGIT_JONG[ch]
+    if "가" <= ch <= "힣":
+        j = (ord(ch) - 0xAC00) % 28
+        return "" if j == 0 else ("ㄹ" if j == 8 else "o")
+    return ""
+
+
+def _j(word: str, josa: str) -> str:
+    """word + 받침에 맞는 조사. josa = 은 / 을 / 이 / 과 / 으로 ('은(는)'처럼 둘 다 쓰지 않으려고, 11/26 전체 시연)."""
+    jong = _jong(word)
+    if josa == "으로":
+        return word + ("로" if jong in ("", "ㄹ") else "으로")
+    pair = {"은": ("은", "는"), "을": ("을", "를"), "이": ("이", "가"), "과": ("과", "와")}[josa]
+    return word + (pair[0] if jong else pair[1])
+
+
+# 조율 안건 상태를 화면과 같은 말로 (OFFLINE·KEPT 같은 영어 값을 그대로 보이지 않는다)
+_STATE_TEXT = {"OPEN": "메시지 보내기 전", "SENT": "답장 기다림", "PROPOSED": "처리안 확인 기다림",
+               "RESOLVED": "반영됨", "KEPT": "지금 자리 유지", "HOLD": "조교 선택 대기", "NO_OPTION": "대안 없음",
+               "OFFLINE": "따로 연락 중", "NEXT": "다음 차수로"}
+_DONE_STATES = ("RESOLVED", "KEPT")
+
+
 # ---------- 정보 뽑기 ----------
 
 def _extract_days(text: str) -> List[str]:
@@ -251,10 +285,13 @@ def _pick_section(cands: List[str], rest: str, professor: Optional[str], code_si
             if len(bases) > 1:   # 같은 이름 과목이 둘 이상 (과목 코드가 다름) → 코드·학과·학년을 같이 보여 준다
                 opts = ", ".join(f"{s.code} {section_label(s)}({_course_tag(s)}, {s.professor or '담당 미정'})"
                                  for s in sorted(secs, key=lambda s: s.code))
-                ask = f"{cands[0]}이(가) 과목 코드가 다른 과목 {len(bases)}개에 있어요. 어느 과목·몇 분반인가요? ({opts})"
+                ask = f"{_j(cands[0], '이')} 과목 코드가 다른 과목 {len(bases)}개에 있어요. 어느 과목·몇 분반인가요? ({opts})"
             else:
-                opts = ", ".join(f"{section_label(s)}({s.professor or '담당 미정'}, {s.code})" for s in secs)
-                ask = f"{cands[0]}은(는) 분반이 {len(secs)}개예요. 몇 분반인가요? ({opts})"
+                def opt(s):   # 학교 과목번호 대신 담당과 지금 시간으로 구분한다
+                    a = _assignment(store, s.id)
+                    return f"{section_label(s)}({s.professor or '담당 미정'}{', ' + _asg_text(a) if a and a.blocks else ''})"
+                opts = ", ".join(opt(s) for s in secs)
+                ask = f"{_j(cands[0], '은')} 분반이 {len(secs)}개예요. 몇 분반인가요? ({opts})"
     elif pronoun:
         section_id = _history_section(history or [], store)
         if section_id is None:
@@ -505,7 +542,7 @@ def _ask_pair_day(sec, day: str) -> Optional[str]:
     i = DAYS.index(day)
     other = DAYS[i + 2] if i + 2 < len(DAYS) else DAYS[i - 2]
     pair = "·".join(sorted((day, other), key=DAYS.index))
-    return (f"{section_title(sec)}은(는) 주 2회 수업이에요. {day}요일과 묶을 요일을 하나 더 알려 주세요. "
+    return (f"{_j(section_title(sec), '은')} 주 2회 수업이에요. {day}요일과 묶을 요일을 하나 더 알려 주세요. "
             f"(예: {pair})")
 
 
@@ -669,7 +706,7 @@ def _explain(cmd: AssistantQuery, store) -> dict:
     a = _assignment(store, sec.id)
     lines = []
     if sec.shape == "MANUAL":
-        lines.append(f"{title}은(는) 조교 직접 배정 분반이에요(수업 모양이 주 2회·주 1회 연강이 아님). 자동 배정·조율 대상이 아니에요.")
+        lines.append(f"{_j(title, '은')} 조교 직접 배정 분반이에요(수업 모양이 주 2회·주 1회 연강이 아님). 자동 배정·조율 대상이 아니에요.")
     if a is None:
         if store.timetable is None:
             lines.append("아직 초안이 없어 배정 자리가 없어요. 초안을 만든 뒤 다시 물어봐 주세요.")
@@ -695,39 +732,64 @@ def _explain(cmd: AssistantQuery, store) -> dict:
         # DB 모드: 하윤 check_timetable 로 이 분반이 낀 하드 규칙 위반
         cid, no = db.section_key(sec.id)
         vs = [v for v in db.violations() if v["course_id"] == cid and v["section_no"] == no]
-        lines.append(f"하드 규칙 위반 {len(vs)}건" + (f": {', '.join(v['rule'] for v in vs)}." if vs else "이에요."))
+        lines.append(f"규칙 위반 {len(vs)}건" + (f": {', '.join(v['rule'] for v in vs)}." if vs else "이에요."))
         item = store.get_coord(sec.id)
         if item and item.get("kind"):
             lines.append(f"조율 대상 종류: {_KIND_TEXT.get(item['kind'], item['kind'])}.")
     if a.status == "COORD":
         item = store.get_coord(sec.id)
-        state = {"OPEN": "메시지 보내기 전", "SENT": "답장 기다림", "PROPOSED": "처리안 확인 기다림",
-                 "RESOLVED": "반영됨", "KEPT": "현재대로 유지", "HOLD": "조교 선택 대기", "NO_OPTION": "대안 없음",
-                 "OFFLINE": "따로 연락 중", "NEXT": "다음 차수로"}.get(item["state"], item["state"]) if item else ""
-        lines.append(f"조율 중이에요{f' ({state})' if state else ''}. 밀린 이유: {a.reason or '기록 없음'}")
+        state = _STATE_TEXT.get(item["state"], item["state"]) if item else ""
+        if store.stage == "FINAL":
+            lines.append(f"조율이 끝나지 않아 임시 자리로 확정했어요{f' (마지막 상태: {state})' if state else ''}. "
+                         f"밀린 이유: {a.reason or '기록 없음'}")
+        else:
+            lines.append(f"조율 중이에요{f' ({state})' if state else ''}. 밀린 이유: {a.reason or '기록 없음'}")
     elif a.status == "DONE":
-        lines.append("배정이 정해진 상태(DONE)예요.")
+        lines.append("배정이 끝난 분반이에요.")
     return _result(" ".join(lines))
 
 
 def _status(store) -> dict:
+    """현황. 상태는 화면과 같은 우리말로, 지금 자리 유지(KEPT)도 끝난 것으로 센다 (11/26 전체 시연)."""
     secs = store.list_sections()
     manual = sum(1 for s in secs if s.shape == "MANUAL")
-    stage_name = {"COLLECT": "희망 수집", "DRAFT": "초안", "ROUND": "조율", "FINAL": "확정"}[store.stage]
     if store.stage == "COLLECT":
-        return _result(f"지금은 {stage_name} 단계예요. 아직 초안이 없어요. "
-                       f"분반 {len(secs)}개 중 조교 직접 배정(MANUAL) {manual}개.")
+        return _result(f"지금은 희망 수집 단계예요. 아직 초안이 없어요. "
+                       f"분반 {len(secs)}개 중 조교 직접 배정 {manual}개.")
     items = store.list_coord()
-    open_items = [c for c in items if c["state"] not in ("RESOLVED",)]
-    waiting = sum(1 for c in items if c["state"] == "SENT")
-    proposed = sum(1 for c in items if c["state"] == "PROPOSED")
-    not_sent = sum(1 for c in items if c["state"] == "OPEN")
-    rnd = f" {store.round_no}차" if store.stage == "ROUND" else ""
-    text = (f"지금은 {stage_name}{rnd} 단계예요. 조율 중 분반 {len(open_items)}개"
-            f" (메시지 전 {not_sent}, 답장 기다림 {waiting}, 처리안 확인 기다림 {proposed}),"
-            f" 반영 끝 {len(items) - len(open_items)}개. 조교 직접 배정(MANUAL) {manual}개.")
+    done = [c for c in items if c["state"] in _DONE_STATES]
+    left = [c for c in items if c["state"] not in _DONE_STATES]
+
+    def count(cs):
+        n = {}
+        for c in cs:
+            k = _STATE_TEXT.get(c["state"], c["state"])
+            n[k] = n.get(k, 0) + 1
+        return ", ".join(f"{k} {v}" for k, v in n.items())
+
+    head = {"DRAFT": "초안이 나왔어요.", "FINAL": "시간표를 확정했어요."}.get(
+        store.stage, f"지금은 {store.round_no}차 조율 중이에요.")
+    if not items:
+        text = f"{head} 조율 대상은 없어요. 조교 직접 배정 {manual}개."
+    elif store.stage == "FINAL":
+        text = (f"{head} 조율 대상 {len(items)}개 중 끝난 것 {len(done)}개"
+                f"{f'({count(done)})' if done else ''}, 임시 자리로 확정 {len(left)}개. 조교 직접 배정 {manual}개.")
+    else:
+        text = (f"{head} 조율 대상 {len(items)}개 중 끝난 것 {len(done)}개"
+                f"{f'({count(done)})' if done else ''}, 남은 것 {len(left)}개"
+                f"{f'({count(left)})' if left else ''}. 조교 직접 배정 {manual}개.")
+
+    def note(c):
+        sec = store.get_section(c["section_id"])
+        state = _STATE_TEXT.get(c["state"], c["state"])
+        if store.stage == "FINAL":
+            state = f"임시 자리로 확정 (마지막: {state})"
+        who = sec.professor if sec and sec.professor else "담당 미정"
+        rnd = f" · {c['round_no']}차" if c.get("round_no") and store.stage != "FINAL" else ""
+        return f"{who} · {state}{rnd}"
+
     rows = [{"section_id": c["section_id"], "name": section_title(store.get_section(c["section_id"])),
-             "before": None, "after": None, "note": c["state"]} for c in open_items]
+             "before": None, "after": None, "note": note(c)} for c in left]
     return _result(text, rows)
 
 
@@ -747,10 +809,10 @@ def _what_if(cmd: AssistantQuery, store, as_move: bool) -> dict:
     if not cmd.section_id:
         if cmd.room:
             change = {"kind": "room_off", "room": cmd.room}
-            what = f"{cmd.room}을(를) 못 쓰면"
+            what = f"{_j(cmd.room, '을')} 못 쓰면"
         else:
             change = {"kind": "free", "day": cmd.days[0], "start": cmd.start}
-            what = f"{cmd.days[0]} {cmd.start}을(를) 비우면"
+            what = f"{_j(cmd.days[0] + ' ' + cmd.start, '을')} 비우면"
         res = _run_what_if(tt, change)
         if not res["supported"]:
             return _result(res["note"] or "이 가정은 아직 계산할 수 없어요.")
@@ -774,12 +836,12 @@ def _what_if(cmd: AssistantQuery, store, as_move: bool) -> dict:
     sec = store.get_section(cmd.section_id)
     title = section_title(sec)
     if sec.shape == "MANUAL":
-        return _result(f"{title}은(는) 조교 직접 배정 분반이라 도우미가 옮기지 않아요. 시간표에서 직접 정해 주세요.")
+        return _result(f"{_j(title, '은')} 조교 직접 배정 분반이라 도우미가 옮기지 않아요. 시간표에서 직접 정해 주세요.")
     if as_move and store.stage == "FINAL":
         return _result("시간표가 이미 확정됐어요. 확정 뒤에는 옮길 수 없어요.")
     a = by_id.get(sec.id)
     if a is None:
-        return _result(f"{title}은(는) 시간표에 없어요.")
+        return _result(f"{_j(title, '은')} 시간표에 없어요.")
     blocks, ask = _new_blocks(a.blocks, cmd)
     if ask:
         return _result(ask)
@@ -789,10 +851,10 @@ def _what_if(cmd: AssistantQuery, store, as_move: bool) -> dict:
     else:
         blocks = [b.model_copy(update={"room": b.room or a.room}) for b in blocks]
     if [dump(b) for b in blocks] == [dump(b.model_copy(update={"room": block_room(a, b)})) for b in a.blocks]:
-        return _result(f"{title}은(는) 이미 그 자리예요: {_asg_text(a)}.")
+        return _result(f"{_j(title, '은')} 이미 그 자리예요: {_asg_text(a)}.")
     why_not, chapel_note = _forbidden(blocks, sec, store.get_wish(sec.id), store.fixed_blocks)
     if why_not:   # 교수 불가 시간·채플·18:00 연강으로는 옮기지 않는다 (미리 보기도 하지 않음)
-        return _result(f"{title}을(를) {_place_text(blocks)}(으)로는 옮기지 않아요. {why_not}")
+        return _result(f"{_j(title, '을')} {_j(_place_text(blocks), '으로')}는 옮기지 않아요. {why_not}")
 
     change = {"kind": "move", "section_id": sec.id, "day": blocks[0].day, "start": blocks[0].start,
               "room": room, "blocks": [dump(b) for b in blocks]}
@@ -803,11 +865,11 @@ def _what_if(cmd: AssistantQuery, store, as_move: bool) -> dict:
     rows = [row(sec.id, _place_text(blocks), "옮김")]
     rows += [row(s, "겹침 → 다시 배정 필요", "영향 받음") for s in others]
 
-    lines = [f"{title}을(를) {_place_text(blocks)}(으)로 옮기면"]
+    lines = [f"{_j(title, '을')} {_j(_place_text(blocks), '으로')} 옮기면"]
     if res["real"]:
         name = lambda s: section_title(store.get_section(s)) if store.get_section(s) else s   # noqa: E731
         if res["feasible"]:
-            lines.append("하드 규칙 위반 없이 놓을 수 있어요.")
+            lines.append("규칙 위반 없이 놓을 수 있어요.")
         else:
             lines.append(f"그대로는 놓을 수 없어요. 새 규칙 위반 {res['violations']}건.")
             lines += _rule_lines(res, name)

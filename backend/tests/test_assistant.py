@@ -315,7 +315,8 @@ def test_answers_by_intent(client):
     client.post("/draft")
 
     j = client.post("/assistant", json={"text": "지금 현황 알려줘"}).json()
-    assert "조율 중 분반 3개" in j["answer"] and "MANUAL" in j["answer"]
+    assert "조율 대상 3개 중 끝난 것 0개, 남은 것 3개(메시지 보내기 전 3)" in j["answer"] and "MANUAL" not in j["answer"]
+    assert all("메시지 보내기 전" in c["note"] for c in j["changes"])
 
     j = client.post("/assistant", json={"text": "디지털시스템입문 재수강 분반 왜 밀렸어?"}).json()
     assert "밀린 이유" in j["answer"] and j["needs_apply"] is False
@@ -532,3 +533,14 @@ def test_out_of_scope_first_but_keeps_info():
     assert q.intent == "out_of_scope" and q.professor == "교수02" and q.section_id == sid_of("확률및통계", "02")
     assert read_question("수강신청 언제 열려?", [], store).intent == "out_of_scope"
     assert read_question("점심 뭐 먹지?", [], store).intent == "out_of_scope"
+
+
+def test_josa_matches_last_sound():
+    # '은(는)'·'을(를)'처럼 둘 다 쓰지 않는다 (11/26 전체 시연)
+    j = assistant._j
+    assert j("인공지능입문", "은") == "인공지능입문은" and j("자료구조", "은") == "자료구조는"
+    assert j("정보과학관 21501", "을") == "정보과학관 21501을" and j("정보과학관 21304", "을") == "정보과학관 21304를"
+    assert j("수 09:00", "을") == "수 09:00를" and j("수 10:30", "을") == "수 10:30을"
+    assert j("화 13:30~14:45 · 정보관 305", "으로") == "화 13:30~14:45 · 정보관 305로"
+    assert j("목 16:30~17:45 · 문화관 03407", "으로") == "목 16:30~17:45 · 문화관 03407로"
+    assert j("미래관 410", "으로") == "미래관 410으로" and j("전산관 19328", "으로") == "전산관 19328로"
