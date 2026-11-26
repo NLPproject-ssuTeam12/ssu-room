@@ -13,6 +13,22 @@ def snapshot(db):
     return list(db.con.iterdump())
 
 
+def free_room(cells, skip=None):
+    """지금 초안(store.timetable)에서 그 칸들(["월-16:30", ...])에 아무 수업도 없는 강의실 하나.
+    CP-SAT가 점수가 같은 다른 초안을 고를 수 있어서 강의실을 고정하지 않고 그때그때 찾는다 (강의실 겹침을 피함)."""
+    busy = {(blk.room, c) for a in store.timetable.assignments if a.section_id != skip
+            for blk in a.blocks for c in assistant._cells(blk)}
+    room = next((r.id for r in store.list_rooms() if not r.is_lab and all((r.id, c) not in busy for c in cells)),
+                None)
+    assert room, f"그 칸에 빈 강의실이 없음: {cells}"
+    return room
+
+
+def move_blocks(sid, days=("월", "수"), start="16:30"):
+    room = free_room([f"{d}-{start}" for d in days], skip=sid)
+    return [{"day": d, "start": start, "slots": 1, "room": room} for d in days], room
+
+
 @pytest.fixture()
 def drafted(client):  # noqa: F811
     c, db = client
@@ -24,8 +40,7 @@ def test_move_to_free_place(drafted):
     c, db = drafted
     before = snapshot(db)
     a = next(x for x in store.timetable.assignments if x.section_id == "C2-01")
-    blocks = [{"day": "월", "start": "16:30", "slots": 1, "room": "정보과학관 21304"},
-              {"day": "수", "start": "16:30", "slots": 1, "room": "정보과학관 21304"}]
+    blocks, _ = move_blocks("C2-01")
     r = db.what_if({"kind": "move", "section_id": "C2-01", "blocks": blocks})
     assert r["supported"] and r["feasible"] and r["violations"] == 0 and r["changed"][0] == "C2-01"
     assert r["option"] is not None                                   # 엔진도 그 시각에 놓는 안을 찾음
@@ -36,11 +51,10 @@ def test_move_to_free_place(drafted):
 def test_move_into_blocked_cells_reports_rules(drafted):
     c, db = drafted
     before = snapshot(db)
-    # C3 은 화·금 09:00 말고 모두 불가 → 월·수 16:30 으로 옮기면 불가 칸 위반
-    blocks = [{"day": "월", "start": "16:30", "slots": 1, "room": "정보과학관 21304"},
-              {"day": "수", "start": "16:30", "slots": 1, "room": "정보과학관 21304"}]
+    # C3 은 화·금 09:00 말고 모두 불가 → 월·수 16:30 (빈 강의실)으로 옮기면 강의실 겹침 없이 불가 칸 위반
+    blocks, _ = move_blocks("C3-01")
     r = db.what_if({"kind": "move", "section_id": "C3-01", "blocks": blocks})
-    assert r["supported"] and not r["feasible"] and r["violations"] >= 1
+    assert r["supported"] and not r["feasible"] and r["clash"] is None and r["violations"] >= 1
     assert all(x["section_id"] == "C3-01" for x in r["rules"]) and r["option"] is None
     assert snapshot(db) == before
 
@@ -103,7 +117,9 @@ def test_assistant_uses_engine_in_db_mode(drafted):
     out = run_assistant(AssistantQuery(intent="explain", section_id="C3-01"), store)
     assert "하드 규칙 위반 0건" in out["answer"]
     # 이동 미리보기: 불가 칸으로는 [적용] 제안을 만들지 않는다
-    out = run_assistant(AssistantQuery(intent="move", section_id="C2-01", days=["월", "수"], start="16:30"), store)
+    room = free_room(["월-16:30", "수-16:30"], skip="C2-01")
+    out = run_assistant(AssistantQuery(intent="move", section_id="C2-01", days=["월", "수"], start="16:30", room=room),
+                        store)
     assert out["proposal_id"] and "하드 규칙 위반 없이" in out["answer"]
 
 
