@@ -119,13 +119,15 @@ class DBMode:
     def sections(self) -> List[Section]:
         lab = {(c, s): l for c, s, l in self.q("SELECT course_id, section_no, lab_requirement FROM course_response "
                                                   "WHERE round_id=?", (self.wish_round,))}
+        enr = {(c, s): e for c, s, e in self.q("SELECT course_id, section_no, enrollment FROM course_section")}
         out = []
         for sid, v in self.map["sections"].items():
             weekly = sum(b["slots"] for b in v["blocks"]) if v.get("manual") else 2
             shape = v["shape"]
             out.append(Section(
                 id=sid, code=v["code"], name=v["name"], division=v.get("division"), year=v.get("year"),
-                category=v.get("category_orig") or v.get("category") or "", enrollment=v.get("enrollment"),
+                category=v.get("category_orig") or v.get("category") or "",
+                enrollment=enr.get((v.get("course_id"), v.get("section_no")), v.get("enrollment")),   # DB 값이 기준
                 weekly_blocks=max(weekly, 1), professor=v.get("professor"),
                 lab_need="MUST" if lab.get((v.get("course_id"), v.get("section_no"))) == "MUST" else "NONE",
                 shape=shape if shape in ("TWICE", "ONCE_LONG", "MANUAL") else "MANUAL"))
@@ -145,6 +147,7 @@ class DBMode:
         bld = dict(self.q("""SELECT p.professor_id, b.name FROM professor_building_pref p
                              JOIN building b ON b.id = p.building_id"""))
         notes = dict(self.q("SELECT response_id, body FROM other_request WHERE response_id IS NOT NULL"))
+        enr = {(c, s): e for c, s, e in self.q("SELECT course_id, section_no, enrollment FROM course_section")}
         name_of = {i: n for n, i in self.prof_id.items()}
         out = []
         for rid, cid, sec, pid, lab, single in self.q(
@@ -161,7 +164,7 @@ class DBMode:
                 if d in DAYS and st in STARTS:
                     cells[f"{d}-{st}"] = kind
             out.append(Wish(section_id=sid, professor=name_of.get(pid), cells=cells, lab=lab, single_day=single,
-                            building=bld.get(pid), note=notes.get(rid, "")))
+                            building=bld.get(pid), note=notes.get(rid, ""), enrollment=enr.get((cid, sec))))
         return out
 
     def manual_assignments(self) -> Dict[str, Assignment]:
@@ -271,6 +274,9 @@ class DBMode:
                        (rid, self.slots.id_of[(d, st)], kind))
             if wish.note.strip():
                 self.q("INSERT INTO other_request(response_id, body) VALUES (?,?)", (rid, wish.note.strip()))
+            if wish.enrollment is not None:   # 분반 수강 인원 (하윤 db.py 에 함수가 없어 서버가 직접 바꾼다)
+                self.q("UPDATE course_section SET enrollment=? WHERE course_id=? AND section_no=?",
+                       (wish.enrollment, cid, sec))
             self.q("DELETE FROM professor_building_pref WHERE professor_id=?", (pid,))
             if wish.building:
                 b = self.q("SELECT id FROM building WHERE name=?", (wish.building,)).fetchone()

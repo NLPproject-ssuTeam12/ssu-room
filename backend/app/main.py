@@ -302,7 +302,11 @@ def get_wishes():
         pairs = _db().pair_requests()
     else:
         pairs = [{"section_id": sid, **v} for sid, v in getattr(store, "pairs", {}).items()]
-    return {"wishes": store.list_wishes(), "professors": store.professors, "pairs": pairs}
+    # 희망마다 분반 수강 인원(enrollment)을 같이 보인다. 따로 안 넣은 분반은 분반 정보(/sections)의 인원
+    wishes = [w.model_copy(update={"enrollment": w.enrollment if w.enrollment is not None else
+                                   (store.get_section(w.section_id).enrollment if store.get_section(w.section_id) else None)})
+              for w in store.list_wishes()]
+    return {"wishes": wishes, "professors": store.professors, "pairs": pairs}
 
 
 @app.post("/wishes")
@@ -315,11 +319,13 @@ def post_wish(wish: Wish):
         wish.professor = sec.professor
     elif sec.professor is not None and wish.professor != sec.professor:
         raise HTTPException(status_code=422, detail="이 분반의 담당 교수가 아닙니다.")
+    if wish.enrollment is not None and wish.enrollment % 5:
+        raise HTTPException(status_code=422, detail="수강 인원은 5명 단위로 적어 주세요.")
     if _db():
         _db_call(_db().save_wish, wish)
         return {"saved": store.get_wish(wish.section_id) or wish}
     store.save_wish(wish)
-    return {"saved": wish}
+    return {"saved": store.get_wish(wish.section_id)}
 
 
 @app.post("/wishes/pair")

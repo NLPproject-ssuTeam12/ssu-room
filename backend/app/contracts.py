@@ -83,6 +83,9 @@ class Wish(BaseModel):
     building: Optional[str] = None
     room: Optional[str] = None
     note: str = ""
+    # 분반 수강 인원 (11/24: 교수가 분반마다 정함). 강의실 정원보다 많으면 엔진이 그 강의실을 뺀다 (course_section.enrollment).
+    # 화면 입력은 5명 단위만 받는다(POST /wishes 에서 검사). 시드의 실제 수강인원(예: 28)은 5의 배수가 아닐 수 있어 여기선 양수만 본다
+    enrollment: Optional[int] = Field(None, gt=0)
 
     @field_validator("single_day", mode="before")
     @classmethod

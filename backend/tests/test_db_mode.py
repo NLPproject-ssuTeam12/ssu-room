@@ -331,3 +331,38 @@ def test_pairs_round_trip_db(pair_client):
     assert c.post("/wishes/pair", json={"section_id": "C11-01", "mode": "NONE"}).status_code == 200
     assert c.get("/wishes").json()["pairs"] == []
     assert set(c.get("/wishes").json()) >= {"wishes", "professors", "pairs"}   # 기존 칸은 그대로
+
+
+# ---------- 분반 수강 인원 (DB 모드: course_section.enrollment) ----------
+
+def test_enrollment_saved_and_room_capacity_used(client):
+    c, db = client
+    db.q("UPDATE room SET capacity=40 WHERE id=1")                       # 정보과학관 21303 은 40명
+    db.con.commit()
+    db.sync(store)
+    w = {"section_id": "C2-01", "professor": "교수02", "cells": {"화-09:00": "PREFER", "목-09:00": "PREFER"},
+         "enrollment": 50}
+    assert c.post("/wishes", json=dict(w, enrollment=47)).status_code == 422
+    r = c.post("/wishes", json=w)
+    assert r.status_code == 200, r.text
+    cid, sec = db.section_key("C2-01")
+    assert db.q("SELECT enrollment FROM course_section WHERE course_id=? AND section_no=?",
+                (cid, sec)).fetchone()[0] == 50
+    assert next(x for x in c.get("/wishes").json()["wishes"] if x["section_id"] == "C2-01")["enrollment"] == 50
+    assert next(s for s in c.get("/sections").json() if s["id"] == "C2-01")["enrollment"] == 50
+    # 정원(40)보다 많은 분반은 그 강의실을 쓰지 않는다 (엔진 하드 규칙)
+    assert c.post("/draft").status_code == 200
+    a = next(x for x in c.get("/timetable").json()["assignments"] if x["section_id"] == "C2-01")
+    assert a["blocks"] and all(b["room"] != "정보과학관 21303" for b in a["blocks"])
+    assert db.q("""SELECT COUNT(*) FROM assignment WHERE timetable_id=? AND course_id=? AND section_no=? AND room_id=1""",
+                (db.current_tt(), cid, sec)).fetchone()[0] == 0
+
+
+def test_enrollment_bigger_than_every_room_is_unplaced(client):
+    c, db = client
+    w = {"section_id": "C2-01", "professor": "교수02", "cells": {"화-09:00": "PREFER", "목-09:00": "PREFER"},
+         "enrollment": 65}                                                # 강의실은 모두 60명
+    assert c.post("/wishes", json=w).status_code == 200
+    c.post("/draft")
+    item = coord(c)["C2-01"]
+    assert item["kind"] == "UNPLACED"

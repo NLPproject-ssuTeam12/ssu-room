@@ -826,3 +826,21 @@ def test_pairs_round_trip_memory(client):
     assert client.get("/wishes").json()["pairs"] == []
     client.post("/reset")
     assert client.get("/wishes").json()["pairs"] == []
+
+
+# ---------- 분반 수강 인원 (11/24: 교수가 분반마다 5명 단위) ----------
+
+def test_enrollment_saved_and_read_memory(client):
+    sid = next(s.id for s in store.list_sections() if s.shape != "MANUAL")
+    url = "/wishes"
+    assert client.post(url, json={"section_id": sid, "enrollment": 43}).status_code == 422   # 5명 단위
+    assert client.post(url, json={"section_id": sid, "enrollment": 0}).status_code == 422
+    assert client.post(url, json={"section_id": sid, "enrollment": -5}).status_code == 422
+    r = client.post(url, json={"section_id": sid, "enrollment": 45})
+    assert r.status_code == 200 and r.json()["saved"]["enrollment"] == 45
+    w = next(x for x in client.get("/wishes").json()["wishes"] if x["section_id"] == sid)
+    assert w["enrollment"] == 45
+    assert next(s for s in client.get("/sections").json() if s["id"] == sid)["enrollment"] == 45
+    # 인원 없이 다시 저장하면 분반 인원은 그대로
+    client.post(url, json={"section_id": sid})
+    assert next(x for x in client.get("/wishes").json()["wishes"] if x["section_id"] == sid)["enrollment"] == 45

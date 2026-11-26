@@ -225,6 +225,7 @@ fetch(`http://localhost:8000/coord/${encodeURIComponent(sectionId)}/message`, { 
 }
 ```
 - `cells`: 칸 이름 `"요일-시작"` → `PREFER`(희망) / `BLOCK`(불가). **없는 칸 = 가능.**
+- `enrollment`: 분반 수강 인원 (11/24, 교수가 분반마다 정함). **5명 단위 양수**, 아니면 422. 안 보내면 그대로. 강의실 정원보다 많으면 엔진이 그 강의실을 쓰지 않는다. DB 모드는 `course_section.enrollment`에 저장, `GET /wishes`·`GET /sections`에 분반별 값이 나온다. 분반 수는 화면에서 받지 않는다(시드 엑셀).
 - `must`: **사용 안 함** ('꼭'은 11/24 회의에서 뺐다). 옛 화면 호환으로 받기만 하고 배정·저장에 쓰지 않는다.
 - `lab`: 실습실 `MUST`(필요) / `NONE`(필요 없음).
 - `single_day`: 주 1회 연강(하루에 두 교시를 이어서) `MUST`(무조건) / `NONE`(필요 없음 = 주 2회, 기본). 하윤 DB `single_day_pref`와 같은 이름. '선호'(`PREFER`)는 11/24에 뺐고, 옛 화면이 보내면 `NONE`으로 받는다.

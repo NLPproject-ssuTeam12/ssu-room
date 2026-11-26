@@ -154,6 +154,12 @@ class Store:
         return self.wishes.get(sid)
 
     def save_wish(self, wish: Wish) -> None:
+        """희망 저장. 수강 인원(enrollment)이 오면 그 분반 정보의 인원도 바꾼다 (메모리 모드)."""
+        sec = self.sections.get(wish.section_id)
+        if wish.enrollment is not None and sec is not None:
+            self.sections[wish.section_id] = sec.model_copy(update={"enrollment": wish.enrollment})
+        elif sec is not None:
+            wish = wish.model_copy(update={"enrollment": sec.enrollment})
         self.wishes[wish.section_id] = wish
 
     # ---------- 단계·시간표 ----------
