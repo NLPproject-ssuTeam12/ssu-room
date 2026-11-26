@@ -297,7 +297,12 @@ def get_rooms():
 
 @app.get("/wishes")
 def get_wishes():
-    return {"wishes": store.list_wishes(), "professors": store.professors}
+    """희망 + 분반 연강·교차(pairs). pairs 한 줄은 POST /wishes/pair 에 보내는 모양과 같다 (section_id, mode, order)."""
+    if _db():
+        pairs = _db().pair_requests()
+    else:
+        pairs = [{"section_id": sid, **v} for sid, v in getattr(store, "pairs", {}).items()]
+    return {"wishes": store.list_wishes(), "professors": store.professors, "pairs": pairs}
 
 
 @app.post("/wishes")
@@ -326,7 +331,12 @@ def post_pair(body: PairIn):
     if _db():
         order = _db_call(_db().set_pair, body.section_id, body.mode, body.order)
         return {"section_id": body.section_id, "mode": body.mode, "order": order}
-    store.pairs = {**getattr(store, "pairs", {}), body.section_id: {"mode": body.mode, "order": body.order or []}}
+    pairs = dict(getattr(store, "pairs", {}))
+    if body.mode == "NONE":            # 상관없음 = 지움 (DB set_pair_request 와 같게)
+        pairs.pop(body.section_id, None)
+    else:
+        pairs[body.section_id] = {"mode": body.mode, "order": body.order or []}
+    store.pairs = pairs
     return {"section_id": body.section_id, "mode": body.mode, "order": body.order or []}
 
 

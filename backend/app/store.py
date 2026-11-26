@@ -127,6 +127,7 @@ class Store:
         self.fixed_blocks: List[dict] = _load("fixed_blocks.json")
 
         self.settings: Dict[str, object] = dict(DEFAULT_SETTINGS)   # 학과 설정
+        self.pairs: Dict[str, dict] = {}   # 분반 연강·교차 (메모리 모드): 분반 id → {mode, order}
         self.stage: str = "COLLECT"
         self.round_no: int = 0            # 0 = 조율 시작 전, 1~3 = 차수
         self.timetable: Optional[Timetable] = None

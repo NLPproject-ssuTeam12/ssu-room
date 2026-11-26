@@ -326,6 +326,7 @@ fetch(`http://localhost:8000/coord/${encodeURIComponent(sectionId)}/message`, { 
 | 단계 | `term.phase`(COLLECTING·ROUND1~3·FINAL) + 시간표 유무. COLLECTING인데 시간표가 있으면 `DRAFT` |
 | `POST /wishes` | 분반마다 `course_response`·`response_slot`, 건물 → 교수 희망 건물, `note` → 기타 요청 |
 | `POST /wishes/pair` | `{section_id, mode: NONE|BACK_TO_BACK|CROSS, order: [분반 id…]}` 분반 연강·교차 (하윤 `set_pair_request`) |
+| `GET /wishes` | 기존 칸(`wishes`·`professors`)에 **`pairs`**를 더한다: `[{section_id, mode, order}]` (POST /wishes/pair 모양 그대로, `section_id` = 붙일 첫 분반). 메모리 모드도 같은 모양 |
 | `POST /draft` | 엔진 `solve` → 조율 대상(`coord_targets`)마다 안건을 열고 대안 A·B·C. 응답에 `coord_status`(OPEN·HOLD·NO_OPTION 개수)·`solver` |
 | `GET /coord` | 항목에 `proposal_id`, `kind`(`UNPLACED`·`MISMATCH`·`PARTIAL`), `current`(지금 자리, 있으면 교수 화면에 KEEP), `state`에 `HOLD`·`NO_OPTION`·`OFFLINE`이 더 있다 |
 | `POST /rounds/next` | 본문 `{method}`(선택). 1차를 열면 보내기 전(`OPEN`) 안건에 조율 메시지를 **자동으로 보낸다**. 2·3차는 `NEXT` 안건을 이어받아 확인된 조건을 쌓은 대안을 만들고(이미 보낸 대안 제외, 없으면 `NO_OPTION`) 보낸다. 응답 `sent`·`next_opened` |

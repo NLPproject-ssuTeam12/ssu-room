@@ -294,6 +294,19 @@ class DBMode:
         got = self.hdb.set_pair_request(self.con, self.wish_round, cid, prof, mode, secs)
         return [self.pairs.sid_of[(cid, s)] for s in got]
 
+    def pair_requests(self) -> List[dict]:
+        """분반 연강·교차 (pair_request + pair_request_section, 희망 수집 차수) → POST /wishes/pair 모양.
+        section_id = 붙일 분반 중 첫 분반(교수가 적은 순서), order = 붙일 분반 id 순서."""
+        out = []
+        for pid, cid, mode in self.q("SELECT id, course_id, mode FROM pair_request WHERE round_id=? ORDER BY id",
+                                     (self.wish_round,)).fetchall():
+            order = [self.pairs.sid_of.get((cid, sec)) for (sec,) in self.q(
+                "SELECT section_no FROM pair_request_section WHERE request_id=? ORDER BY seq", (pid,))]
+            order = [x for x in order if x]
+            if order:
+                out.append(dict(section_id=order[0], mode=mode, order=order))
+        return out
+
     # ---------- 초안 ----------
 
     def draft(self) -> dict:

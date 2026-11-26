@@ -287,3 +287,47 @@ def test_late_next_is_carried_to_a_later_round(client):
     assert db.q("SELECT prev_proposal_id FROM proposal WHERE id=?", (item["proposal_id"],)).fetchone()[0] == p1
     assert item["prev_conditions"] == {"day_slots": {"3": []}, "end_before": []}   # 1차 조건 이어받음
     assert db.pending_next(3) == []                                     # 두 번 열지 않음
+
+
+# ---------- 분반 연강·교차 읽기 (GET /wishes pairs) ----------
+
+@pytest.fixture()
+def pair_client(monkeypatch):
+    """test 데이터에 같은 교수가 한 과목 분반 둘을 맡은 과목(11)을 더한다."""
+    monkeypatch.setenv("SSUROOM_ENGINE", "solver")
+    con, mapping = build()
+    q = con.execute
+    q("INSERT INTO user(id, role, name, password_hash) VALUES (50, 'PROF', '교수06', 'x')")
+    q("""INSERT INTO course(id, term_id, department_id, code, name, professor_id, category, target_year, session_count,
+                            slots_per_session) VALUES (11, 1, 1, '21500011', '가상과목11', 50, '전공선택', '2', 2, 1)""")
+    for sec in (1, 2):
+        q("INSERT INTO course_section(course_id, section_no, professor_id, enrollment) VALUES (11, ?, 50, 30)", (sec,))
+        q("""INSERT INTO course_response(round_id, course_id, section_no, professor_id, lab_requirement, single_day_pref)
+             VALUES (1, 11, ?, 50, 'NONE', 'NONE')""", (sec,))
+        mapping["sections"][f"C11-0{sec}"] = dict(course_id=11, section_no=sec, manual=False, code=f"215000110{sec}",
+                                                 name="가상과목11", division=None, category_orig="전선-AI소프트웨어",
+                                                 category="전공선택", professor="교수06", enrollment=30, year=2,
+                                                 shape="TWICE")
+    con.commit()
+    db = dbmode.DBMode(con, mapping, draft_time_limit=10, alt_time_limit=5)
+    dbmode.use(db)
+    db.sync(store)
+    yield TestClient(app), db
+    dbmode.use(None)
+    ad.configure(None)
+    monkeypatch.delenv("SSUROOM_ENGINE")
+    store.reset()
+
+
+def test_pairs_round_trip_db(pair_client):
+    c, db = pair_client
+    assert c.get("/wishes").json()["pairs"] == []
+    body = {"section_id": "C11-02", "mode": "BACK_TO_BACK", "order": ["C11-02", "C11-01"]}
+    r = c.post("/wishes/pair", json=body)
+    assert r.status_code == 200, r.text
+    got = c.get("/wishes").json()["pairs"]
+    assert got == [body]                                        # 보낸 모양 그대로 다시 채울 수 있다
+    assert c.post("/wishes/pair", json=got[0]).status_code == 200   # 받은 값을 그대로 다시 보내도 됨
+    assert c.post("/wishes/pair", json={"section_id": "C11-01", "mode": "NONE"}).status_code == 200
+    assert c.get("/wishes").json()["pairs"] == []
+    assert set(c.get("/wishes").json()) >= {"wishes", "professors", "pairs"}   # 기존 칸은 그대로

@@ -815,3 +815,14 @@ def test_offline_then_manual_place(client):
     assert r.json()["coord"]["state"] == "RESOLVED" and "warnings" in r.json()
     a = next(x for x in client.get("/timetable").json()["assignments"] if x["section_id"] == sid)
     assert a["status"] == "MANUAL" and [(b["day"], b["start"]) for b in a["blocks"]] == [("월", "09:00"), ("수", "09:00")]
+
+
+def test_pairs_round_trip_memory(client):
+    secs = [s.id for s in store.list_sections() if s.shape != "MANUAL"][:2]
+    body = {"section_id": secs[0], "mode": "CROSS", "order": secs}
+    assert client.post("/wishes/pair", json=body).status_code == 200
+    assert client.get("/wishes").json()["pairs"] == [body]
+    assert client.post("/wishes/pair", json={"section_id": secs[0], "mode": "NONE"}).status_code == 200
+    assert client.get("/wishes").json()["pairs"] == []
+    client.post("/reset")
+    assert client.get("/wishes").json()["pairs"] == []
