@@ -20,6 +20,7 @@ from backend.app import dbmode  # noqa: E402
 from backend.app.main import app  # noqa: E402
 from backend.app.solver import adapter as ad  # noqa: E402
 from backend.app.store import store  # noqa: E402
+from backend.tests.helpers import free_meetings  # noqa: E402
 
 hdb, sc = ad.load_haeyoon()
 import seed_time_slot  # noqa: E402
@@ -165,8 +166,7 @@ def test_db_mode_full_loop(client):
 
     # NO_OPTION → [확인] → 따로 연락 → 수동 배치(고정, 경고만)
     assert c.post(f"/coord/{enc(no_opt)}/ack").json()["coord"]["state"] == "OFFLINE"
-    meet = [{"day": 1, "start": "16:30", "end": "17:45", "room": "정보과학관 21303"},
-            {"day": 3, "start": "16:30", "end": "17:45", "room": "정보과학관 21303"}]
+    meet = free_meetings(no_opt)          # 지금 시간표에서 빈 강의실·교수가 빈 시각 (초안마다 다름)
     r = c.post(f"/coord/{enc(no_opt)}/manual", json={"meetings": meet, "reason": "교수님과 통화"})
     assert r.status_code == 200, r.text
     assert r.json()["coord"]["state"] == "RESOLVED" and r.json()["violations"] >= 1    # 불가 칸이라 경고
@@ -224,9 +224,8 @@ def test_db_mode_full_loop(client):
     assert db.q("SELECT reason FROM timetable WHERE id=?", (db.current_tt(),)).fetchone()[0] == "교수님과 통화로 A안"
 
     # 따로 연락한 C7 → 수동 배치
-    meet = [{"day": 0, "start": "16:30", "end": "17:45", "room": "정보과학관 21304"},
-            {"day": 2, "start": "16:30", "end": "17:45", "room": "정보과학관 21304"}]
-    assert c.post(f"/coord/{enc(a7)}/manual", json={"meetings": meet}).status_code == 200
+    r = c.post(f"/coord/{enc(a7)}/manual", json={"meetings": free_meetings(a7)})
+    assert r.status_code == 200, r.text
 
     # ---- 확정 → 엑셀 ----
     r = c.post("/finalize")
@@ -366,3 +365,24 @@ def test_enrollment_bigger_than_every_room_is_unplaced(client):
     c.post("/draft")
     item = coord(c)["C2-01"]
     assert item["kind"] == "UNPLACED"
+
+
+def test_confirm_uses_fresh_room_when_stored_room_is_taken(client):
+    """대안 B의 강의실을 그사이 다른 분반(수동 배치)이 쓰면, [확인]은 pick_best 가 고른 같은 시각 다른 강의실로 반영한다.
+    같은 묶음에 다른 방이 없으면 DB 제약 오류(UNIQUE)가 아니라 '놓을 수 없습니다'로 거부한다."""
+    c, db = client
+    c.post("/draft")
+    c.post("/rounds/next")
+    a1 = "C1-01"
+    b = next(x for x in coord(c)[a1]["alternatives"] if x["key"] == "B")
+    assert c.post(f"/coord/{enc('C4-01')}/ack").status_code == 200
+    r = c.post(f"/coord/{enc('C4-01')}/manual", json={"meetings": b["meetings"]})   # B 자리를 C4 가 차지
+    assert r.status_code == 200, r.text
+    assert c.post(f"/coord/{enc(a1)}/reply", json={"choices": ["B"]}).status_code == 200
+    r = c.post(f"/coord/{enc(a1)}/decide", json={"action": "confirm"})
+    if r.status_code == 200:
+        applied = r.json()["decision"]["applied"]["meetings"]
+        assert [(m["day"], m["start"]) for m in applied] == [(m["day"], m["start"]) for m in b["meetings"]]
+        assert any(m["room"] != n["room"] for m, n in zip(applied, b["meetings"]))   # 다른 강의실
+    else:
+        assert r.status_code == 409 and "UNIQUE" not in r.json()["detail"], r.text
