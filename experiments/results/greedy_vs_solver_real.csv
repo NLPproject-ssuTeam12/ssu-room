@@ -1,0 +1,5 @@
+data,seed,method,status,seconds,sections,unplaced,violations,prefer_rate,building_rate,late,flow,re_changed,re_room_only,re_unplaced,re_violations,re_seconds
+real_noresp,1,solver,OPTIMAL,33.5,82,0,0,,,0,101,0,0,0,0,13.2
+real_noresp,1,greedy,OPTIMAL,8.0,82,0,0,,,0,88,0,0,0,0,8.9
+real_prefer,1,solver,OPTIMAL,28.9,82,0,0,0.944,1.0,0,46,0,0,0,0,24.8
+real_prefer,1,greedy,OPTIMAL,5.1,82,0,0,0.92,1.0,0,36,20,14,0,0,5.1

@@ -312,7 +312,7 @@ def _structures(c, sd):
 
 # ---------------------------------------------------------------- 모델
 def _solve_model(con, term_id, round_id, W, time_limit, workers, prev, prevk, free,
-                 seed, forbid=None, must_sections=None, cond=None, cond_sections=None, locked=None, flow_time_limit=None):
+                 seed, forbid=None, must_sections=None, cond=None, cond_sections=None, locked=None, flow_time_limit=None, skip=None):
     """모델을 만들어 풀고 결과를 메모리로 돌려준다(DB에는 쓰지 않음).
     prev/prevk: 이전 시간표 {(과목,분반,회차): (시작칸, 강의실)} / {(과목,분반,회차): 칸 수}
     free: None이면 전부 새로 풀고, 집합(과목 id 또는 (과목,분반))이면 그 분반만 풀고 나머지는 prev 그대로 고정
@@ -321,6 +321,7 @@ def _solve_model(con, term_id, round_id, W, time_limit, workers, prev, prevk, fr
     cond/cond_sections: 조율 쪽 조건(요일·시간대)과 그것이 적용될 (과목, 분반) 집합
     locked: 고정된 (과목, 분반) 집합. free 에 들어 있어도 prev 그대로 둔다
     두 단계로 푼다(11/25): 1단계 원래 점수 + 동점 순위, 2단계 원래 점수를 1단계보다 나빠지지 않게 묶고 동선을 늘린 뒤 동점 순위.
+    skip: 이번 풀이에서 아예 빼는 (과목, 분반) 집합 (변수를 만들지 않음, 그리디 기준선용).
     flow_time_limit: 2단계 제한 시간(초). 없으면 min(time_limit, FLOW_TIME_LIMIT=20). 2단계가 끝나지 않아도 찾은 해를 쓴다(원래 점수는 그대로)."""
     by_day, courses, secs, rooms, pref, slot_info = load_input(con, term_id, round_id)
     hist_bld, hist_room = load_history(con, term_id)
@@ -374,6 +375,8 @@ def _solve_model(con, term_id, round_id, W, time_limit, workers, prev, prevk, fr
     for c in courses.values():
         n = c["sections"]
         for sec in range(1, n + 1):
+            if skip and (c["id"], sec) in skip:
+                continue                                 # 아직 놓지 않을 분반 (그리디 기준선)
             sd = secs[(c["id"], sec)]
             cid = c["id"]
             if sd["paired"] and sd["single_day"] == "MUST":
