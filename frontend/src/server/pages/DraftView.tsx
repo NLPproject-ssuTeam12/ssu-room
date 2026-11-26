@@ -7,7 +7,7 @@ import TimetableGrid from '../TimetableGrid'
 import { countStatus } from '../timetable'
 
 const STAGE_LEAD: Record<string, string> = {
-  DRAFT: '배정 엔진(CP-SAT)이 만든 초안입니다. 조율 대상은 임시 자리에 두었습니다.',
+  DRAFT: '초안입니다. 조율 대상은 임시 자리에 두었습니다.',
   ROUND: '조율 중인 시간표입니다.',
   FINAL: '확정한 시간표입니다.',
 }

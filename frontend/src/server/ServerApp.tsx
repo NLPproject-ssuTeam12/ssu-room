@@ -1,7 +1,6 @@
 // 서버 모드 화면 (기본). 가짜 데이터 시연은 주소 뒤에 ?demo (App.tsx).
 // 연결된 화면: 조교 희망 확인·시간표·조율·확정·설정·AI 도우미, 교수 희망 입력·공개 시간표·조율 메시지.
 import { useEffect, useState } from 'react'
-import { API_BASE } from '../api/client'
 import type { Stage } from '../api/types'
 import { useVersion } from '../store'
 import { THEMES, applyTheme, getDialog, savedTheme, toast } from '../ui'
@@ -118,7 +117,7 @@ export default function ServerApp() {
         <div className="wrap">
           <div className="logo">SSU<b>:</b>room</div>
           <span className="sub">강의시간표 편성·조율 도우미</span>
-          <span className="virt" title={`서버 ${API_BASE} · 실제 강의 목록에 교수 가명과 가상 희망을 넣은 시연 데이터`}>서버 연결 · 가명·가상 희망</span>
+          <span className="virt" title="실제 강의 목록에 교수 가명과 가상 희망을 넣은 데이터">가명·가상 데이터</span>
           <div className="spacer" />
           <button type="button" className="tog" aria-label={`테마 바꾸기, 지금 ${themeName}`} onClick={nextTheme}>테마: {themeName}</button>
           <div className="seg" role="group" aria-label="역할">
@@ -154,7 +153,6 @@ export default function ServerApp() {
                 </button>
               ))
             )}
-            <a className="small muted" href="?demo" style={{ display: 'block', padding: '10px 12px' }}>가짜 데이터 시연 열기</a>
           </nav>
           <main id="main" tabIndex={-1}>
             {load.status === 'loading' && <div className="card muted">서버에서 불러오는 중…</div>}
@@ -162,7 +160,7 @@ export default function ServerApp() {
               <div className="card" role="alert">
                 <h2>서버에 연결하지 못했습니다</h2>
                 <p className="small">{load.error}</p>
-                <p className="small muted">저장소 맨 위에서 <code>SSUROOM_ENGINE=solver uvicorn backend.app.main:app --port 8000</code>으로 서버를 켠 뒤 다시 시도하세요.</p>
+                <p className="small muted">잠시 뒤 다시 시도하세요.</p>
                 <button className="btn primary" onClick={() => void loadAll()}>다시 시도</button>
               </div>
             )}
@@ -173,7 +171,7 @@ export default function ServerApp() {
             {data && isTA && view === 'timetable' && <DraftView data={data} onGoWishes={() => setView('wishes')} onGoCoord={() => setView('coord')} />}
             {data && isTA && view === 'coord' && <CoordView data={data} />}
             {data && isTA && view === 'final' && <FinalView data={data} />}
-            {data && isTA && view === 'settings' && <SettingsView data={data} />}
+            {data && isTA && view === 'settings' && <SettingsView />}
           </main>
         </div>
       </div>

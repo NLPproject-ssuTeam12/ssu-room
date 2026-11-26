@@ -49,8 +49,6 @@ function BotTurn({ turn, onApply, onCancel }: BotTurnProps) {
     <div className="turn bot">
       <div className="row" style={{ gap: 6, marginBottom: 4 }}>
         <Chip k={intent === 'out_of_scope' ? 'warn' : ''}>{INTENT_LABEL[intent] ?? intent}</Chip>
-        {res.command.method === 'keyword' && <span className="small muted">키워드 해석</span>}
-        {res.command.fallback && <Chip k="warn">언어 모델 실패 → 키워드</Chip>}
       </div>
       <div style={{ whiteSpace: 'pre-wrap' }}>{res.answer}</div>
       <Changes res={res} />
@@ -122,7 +120,7 @@ export default function AssistantPanel({ stage, turns, setTurns, onClose }: Prop
         <button className="btn small" aria-label="AI 도우미 닫기" onClick={onClose}>닫기</button>
       </div>
       <div className="chat" ref={chat} role="log" aria-live="polite">
-        {!turns.length && <div className="muted small">시간표를 말로 물어보면 서버가 뜻을 읽고 다시 계산해 알려 줍니다. 아래 예시를 눌러 보거나 직접 물어보세요.</div>}
+        {!turns.length && <div className="muted small">시간표를 말로 물어보면 다시 계산해 알려 줍니다. 아래 예시를 눌러 보거나 직접 물어보세요.</div>}
         {turns.map((t, i) => {
           if (t.role === 'user') return <div key={i} className="turn ta">{t.text}</div>
           if (t.role === 'error') return <div key={i} className="note" role="alert" style={{ background: 'var(--bad-soft)' }}>{t.text}</div>
