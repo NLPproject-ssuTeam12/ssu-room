@@ -43,7 +43,7 @@ function WishForm({ section, saved, building, locked }: WishFormProps) {
 
   return (
     <div className="card">
-      <h2>{sectionTitle(section)} <span className="small muted">{section.year ? `${section.year}학년` : '전체 학년'} · {section.category} · {section.id}</span></h2>
+      <h2>{sectionTitle(section)} <span className="small muted">{section.year ? `${section.year}학년` : '전체 학년'} · {section.category}</span></h2>
       <div className="pw">
         <div>
           <span className="lbl">수업 가능 시간</span>
@@ -76,7 +76,7 @@ function WishForm({ section, saved, building, locked }: WishFormProps) {
           {!locked && (
             <div className="row" style={{ marginTop: 12 }}>
               <button className="btn primary" disabled={!dirty || busy} onClick={onSave}>{busy ? '저장 중…' : '저장'}</button>
-              <span className="small muted">{dirty ? '저장하지 않은 변경이 있습니다.' : saved ? '서버에 저장된 값입니다.' : '아직 낸 희망이 없습니다.'}</span>
+              <span className="small muted">{dirty ? '저장하지 않은 변경이 있습니다.' : saved ? '저장했습니다.' : '아직 낸 희망이 없습니다.'}</span>
             </div>
           )}
           {error && <p className="note" role="alert" style={{ background: 'var(--bad-soft)', marginTop: 8 }}>{error}</p>}
@@ -162,7 +162,7 @@ function PairRow({ name, list, locked }: { name: string; list: Section[]; locked
   }
   const pick = (value: string, set: (v: string) => void, label: string) => (
     <select aria-label={`${name} ${label}`} value={value} disabled={locked} onChange={(e) => set(e.target.value)}>
-      {list.map((s) => <option key={s.id} value={s.id}>{sectionTitle(s)} ({s.id})</option>)}
+      {list.map((s) => <option key={s.id} value={s.id}>{sectionTitle(s)}</option>)}
     </select>
   )
   return (
@@ -198,7 +198,7 @@ export default function ProfWishes({ data, prof }: { data: ServerData; prof: str
   return (
     <>
       <h1 tabIndex={-1}>희망 입력</h1>
-      <p className="lead">{prof} · 맡은 분반 {auto.length}개{locked ? ' · 접수가 마감되어 읽기만 됩니다' : ' · 분반마다 [저장]을 눌러야 서버에 들어갑니다'}</p>
+      <p className="lead">{prof} · 맡은 분반 {auto.length}개{locked ? ' · 접수가 마감되어 읽기만 됩니다' : ' · 분반마다 [저장]을 눌러야 반영됩니다'}</p>
       {!auto.length && <div className="card muted">자동 배정할 담당 분반이 없습니다.</div>}
       {auto.length > 0 && (
         <BuildingCard prof={prof} buildings={buildings} saved={savedBuilding} hasWishes={myWishes.length > 0} locked={locked} value={building} onChange={setBuilding} />

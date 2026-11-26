@@ -60,7 +60,7 @@ function DraftButton({ data, onDrafted }: { data: ServerData; onDrafted: () => v
   }
   const onClick = () => askConfirm({
     title: '초안을 만들까요?',
-    body: '배정 엔진이 지금 희망으로 초안을 만듭니다 (몇 초 걸립니다).\n만들면 희망 수집이 끝나서 교수님 희망 입력이 잠깁니다.',
+    body: '지금 희망으로 초안을 만듭니다 (몇 초 걸립니다).\n만들면 희망 수집이 끝나서 교수님 희망 입력이 잠깁니다.',
     ok: '초안 만들기',
   }, () => { void run() })
   return (
