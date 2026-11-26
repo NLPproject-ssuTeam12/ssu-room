@@ -400,12 +400,16 @@ class DBMode:
             raise DBModeError("아직 처리안이 없습니다. 답장을 먼저 넣으세요.")
         return row[0], json.loads(row[1] or "{}")
 
-    def _apply(self, pid: int, mid: int, decide_args: dict, option_id: int, reason: Optional[str]) -> int:
+    def _apply(self, pid: int, mid: int, decide_args: dict, option_id: int, reason: Optional[str],
+               placed: Optional[dict] = None) -> int:
         """조교 결정 기록(decide_reply) + 새 시간표 버전(apply_option). 새 규칙 위반이면 결정을 되돌리고 거부한다.
         (하윤 apply_option 은 안건을 RESOLVED 로 바꾸고 decide_reply 는 PROPOSED 일 때만 받으므로 결정을 먼저 쓴다.
-         두 함수를 한 트랜잭션으로 묶는 함수가 없어, 거부되면 서버가 결정 기록을 되돌린다.)"""
+         두 함수를 한 트랜잭션으로 묶는 함수가 없어, 거부되면 서버가 결정 기록을 되돌린다.)
+        placed: pick_best 가 지금 시간표에 놓아 본 결과(placements·ks). 있으면 그 칸·강의실로 rows 를 만든다.
+        저장된 대안의 강의실은 그사이 다른 수업(예: 수동 배치)이 쓸 수 있어서다 (pick_best 는 같은 묶음의 다른 방을 고름)."""
         self.hdb.decide_reply(self.con, mid, self.ta_id, option_id=option_id, reason=reason, **decide_args)
-        rows = self.sc.option_rows(self.con, option_id=option_id)
+        rows = (self.sc.option_rows(self.con, option=placed, timetable_id=self.current_tt()) if placed
+                else self.sc.option_rows(self.con, option_id=option_id))
         try:
             new_tt = self.sc.apply_option(self.con, pid, self.ta_id, rows, reason, base_timetable_id=self.current_tt())
         except ValueError:
@@ -436,11 +440,11 @@ class DBMode:
             self.hdb.decide_reply(self.con, mid, self.ta_id, "OFFLINE", reason=reason)
             return dict(action="offline", applied=None)
         if action == "edit":
-            oid = self.option_id(pid, choice)
-            if oid is None:
+            if self.option_id(pid, choice) is None:
                 raise DBModeError(f"{choice}안이 없습니다.")
-            tt = self._apply(pid, mid, dict(action="EDIT", conditions=cond if has_cond else None), oid, reason)
-            return dict(action="edit", applied=self._alt_dict(pid, oid), timetable_id=tt)
+            oid, placed = self._pick(sid, pid, {"picks": [choice], "ordered": True}, None, edit=True)
+            tt = self._apply(pid, mid, dict(action="EDIT", conditions=cond if has_cond else None), oid, reason, placed)
+            return dict(action="edit", applied=self._alt_dict(pid, oid, placed), timetable_id=tt)
         # confirm
         if prop.get("action") == "next":
             self.hdb.decide_reply(self.con, mid, self.ta_id, "CONFIRM", reason=reason, conditions=cond,
@@ -449,14 +453,15 @@ class DBMode:
         if prop.get("action") != "move":
             raise DBModeError(f"조교가 직접 정해야 하는 처리안입니다 (action={prop.get('action')}). "
                               "[수정]·[현재대로 유지]·[따로 연락]을 고르세요.")
-        oid = self._pick(sid, pid, parsed, cond if has_cond else None)
+        oid, placed = self._pick(sid, pid, parsed, cond if has_cond else None)
         tt = self._apply(pid, mid, dict(action="CONFIRM", proposal_action="move", conditions=cond if has_cond else None),
-                         oid, reason)
-        return dict(action="confirm", applied=self._alt_dict(pid, oid), timetable_id=tt)
+                         oid, reason, placed)
+        return dict(action="confirm", applied=self._alt_dict(pid, oid, placed), timetable_id=tt)
 
-    def _pick(self, sid: str, pid: int, parsed: dict, cond: Optional[dict]) -> int:
+    def _pick(self, sid: str, pid: int, parsed: dict, cond: Optional[dict], edit: bool = False) -> Tuple[int, dict]:
         """교수가 고른 안 중 지금 놓을 수 있는 첫 안 (엔진 pick_best, 교수가 밝힌 순서 respect_order).
-        기타 조건으로 엔진이 새 안을 만들었으면 그 안을 4번 대안으로 저장해 쓴다."""
+        기타 조건으로 엔진이 새 안을 만들었으면 그 안을 4번 대안으로 저장해 쓴다.
+        -> (대안 id, pick_best 가 지금 시간표에 놓아 본 결과: 그 칸·강의실로 반영한다)"""
         cid, sec = self.section_key(sid)
         picks = [k for k in parsed.get("picks", []) if self.option_id(pid, k)]
         oids = [self.option_id(pid, k) for k in picks]
@@ -465,14 +470,18 @@ class DBMode:
                                  time_limit=self.alt_time_limit, respect_order=bool(parsed.get("ordered")))
         ok = [b for b in best if b["feasible"]]
         if not ok:
-            raise DBModeError("고른 안을 지금은 놓을 수 없습니다. [수정]·[현재대로 유지]·[따로 연락] 중에서 정해 주세요.")
+            raise DBModeError("그 안은 지금 놓을 수 없습니다. 다른 안을 고르거나 [따로 연락]해 주세요." if edit else
+                              "고른 안을 지금은 놓을 수 없습니다. [수정]·[현재대로 유지]·[따로 연락] 중에서 정해 주세요.")
         b = ok[0]
-        return b["option_id"] if b.get("option_id") else self.sc.add_option(self.con, pid, b, source="ETC")
+        oid = b["option_id"] if b.get("option_id") else self.sc.add_option(self.con, pid, b, source="ETC")
+        return oid, b
 
-    def _alt_dict(self, pid: int, oid: int) -> dict:
+    def _alt_dict(self, pid: int, oid: int, placed: Optional[dict] = None) -> dict:
+        """반영한 안 (placed 가 있으면 실제로 놓은 칸·강의실)."""
         cid = self.q("SELECT course_id FROM proposal WHERE id=?", (pid,)).fetchone()[0]
         no = self.q("SELECT option_no FROM proposal_option WHERE id=?", (oid,)).fetchone()[0]
-        alt = option_to_alternative(KEYS[min(no, 3) - 1], self.sc.load_option(self.con, oid), cid, self.slots, self.rooms)
+        opt = placed if placed and placed.get("placements") else self.sc.load_option(self.con, oid)
+        alt = option_to_alternative(KEYS[min(no, 3) - 1], opt, cid, self.slots, self.rooms)
         return dump(alt)
 
     def manual_place(self, sid: str, meetings: List[dict], reason: Optional[str]) -> Tuple[int, list]:
