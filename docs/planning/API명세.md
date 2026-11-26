@@ -160,10 +160,14 @@ fetch(`http://localhost:8000/coord/${encodeURIComponent(sectionId)}/message`, { 
   },
   "load_warnings": [
     "2150130801: 희망 칸 1개 버림 ['수-17:00']"
-  ]
+  ],
+  "nlp": "keyword",
+  "gemini_key": false
 }
 ```
 - `round_no`: 0 = 조율 전, 1~3 = 차수.
+- `nlp`: 서버 기본 해석 방식 (환경 변수 `SSUROOM_NLP` = `keyword` | `llm`, 없으면 `keyword`). 조율 메시지·답장 해석·다음 차수 자동 메시지·AI 도우미 요청에 `method`가 없으면 이 값을 쓴다. 요청에 `method`가 있으면 그게 우선 (11/26).
+- `gemini_key`: `GEMINI_API_KEY`가 있는지(`true`/`false`)만. 키 값은 내보내지 않는다. `llm`인데 키가 없거나 429·503이면 키워드로 대신 처리하고 응답의 `method`·`fallback`·`fallback_reason`에 남는다.
 - `load_warnings`: 진짜 함수 불러오기 실패 + 희망 파일에서 버린 칸(토요일, 8칸 밖 시각).
 
 ### `GET /sections`
@@ -382,7 +386,7 @@ fetch(`http://localhost:8000/coord/${encodeURIComponent(sectionId)}/message`, { 
 조율 메시지를 쓰고 검사한다. 검사를 통과해야 "보냄" 처리. **ROUND에서만.**
 함수: `write_message(MessageInput, method)` → `check_message(text, MessageInput)`.
 
-요청 본문은 없어도 된다. 있으면 `{ "method": "keyword" | "llm" }` (기본 `keyword`).
+요청 본문은 없어도 된다. 있으면 `{ "method": "keyword" | "llm" }` (없으면 서버 기본 `SSUROOM_NLP`, 그것도 없으면 `keyword`).
 
 `MessageInput`은 서버가 채운다(`store.message_input`). 화면에서 받지 않는다.
 
@@ -639,7 +643,7 @@ A  화 13:30~16:15 연강 · 정보과학관 21101
 }
 ```
 - `history`: 앞 대화. 빼도 된다. **응답의 `section_id`를 assistant 항목에 넣어 보내면** "그 강의", "아까 그거", "그거"를 그 분반으로 읽는다.
-- `method`: `keyword`(기본) 또는 `llm`.
+- `method`: `keyword` 또는 `llm`. 안 보내면 서버 기본(`SSUROOM_NLP`, 없으면 `keyword`).
   - `llm`: 언어 모델(Gemini)이 의도와 정보(과목명·분반 번호·교수·요일·시작 시각·강의실·건물)만 뽑는다. 프롬프트는 `backend/app/nlp/prompts/assistant.txt`.
   - 분반 id는 모델이 정하지 않는다. 모델이 쓴 과목명·번호를 키워드 버전과 같은 코드로 실제 분반에 연결한다.
   - 버리는 것: 질문·앞 대화 글에서 과목명 찾기로 찾히지 않는 과목, 질문·앞 대화에 (별칭으로도) 없는 건물, 질문에 없는 강의실 번호·시각 표현, 월~금이 아닌 요일, 없는 교수.

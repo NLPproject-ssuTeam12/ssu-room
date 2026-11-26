@@ -280,6 +280,7 @@ cp .env.example .env   # Windows: copy .env.example .env
 
 1. **설치:** 위 "개발 환경 준비"처럼 `.venv`를 만들고 `pip install -r backend/requirements.txt`
 2. **언어 모델 키:** `.env`에 `GEMINI_API_KEY=…`. 없으면 조율 메시지·회신 해석·AI 도우미가 모두 키워드 방식으로 돈다
+   - **기본 해석 방식:** `SSUROOM_NLP=llm`이면 화면이 `method`를 안 보내도 언어 모델로 돈다(없으면 `keyword`). Windows `set SSUROOM_NLP=llm` / macOS·Linux `export SSUROOM_NLP=llm` (또는 `.env`에 한 줄). 요청에 `method`를 주면 그게 우선이고, 언어 모델이 막히면(429·503·키 없음) 키워드로 대신 처리한다
 3. **데이터 넣기(시드):** 강의정보 엑셀 → DB(`ssuroom.db`)와 분반 대응표. 시연은 `--demo`
    ```bash
    python backend/tools/seed_db.py          # 실제 강의 목록 + 교수 가명 + 가상 희망(실제 강의 칸)
@@ -312,6 +313,7 @@ API는 [docs/planning/API명세.md](docs/planning/API명세.md)를 본다.
 
 - **노트북 2대:** 조교 화면(서버를 켠 노트북)과 교수 화면(같은 서버 주소로 접속). 교수 답장은 시스템 안에서만 받는다
 - **준비:** `python backend/tools/seed_db.py --demo` → 서버를 DB 모드로 켬. 2026-2 엑셀 기준 초안이 약 10초, 조율 대상 OPEN 5·HOLD 2·NO_OPTION 1 (11/25 측정)
+- **언어 모델 켜기:** `.env`에 `GEMINI_API_KEY=…`, 서버 켜기 전에 Windows `set SSUROOM_NLP=llm` / macOS·Linux `export SSUROOM_NLP=llm`. `GET /health`의 `nlp`가 `llm`, `gemini_key`가 `true`인지 확인
 - **순서:**
   1. 초안 만들기 → 시간표와 조율 대상(못 놓음·어긋남·일부 어긋남·대안 없음) 확인
   2. 1차 조율 시작 → 조율 메시지 자동 발송 (일부 어긋남은 조교가 [보내기], 대안 없음은 [확인] → 따로 연락)

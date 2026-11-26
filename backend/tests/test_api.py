@@ -844,3 +844,34 @@ def test_enrollment_saved_and_read_memory(client):
     # 인원 없이 다시 저장하면 분반 인원은 그대로
     client.post(url, json={"section_id": sid})
     assert next(x for x in client.get("/wishes").json()["wishes"] if x["section_id"] == sid)["enrollment"] == 45
+
+
+# ---------- 서버 기본 해석 방식 SSUROOM_NLP (요청에 method 가 없을 때) ----------
+
+def test_nlp_default_llm_without_key_falls_back(client, monkeypatch):
+    monkeypatch.setenv("SSUROOM_NLP", "llm")
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    h = client.get("/health").json()
+    assert h["nlp"] == "llm" and h["gemini_key"] is False
+    assert "GEMINI_API_KEY" not in str(h.get("gemini_key"))           # 값이 아니라 있음/없음만
+    # AI 도우미: method 안 보냄 → llm 으로 시도 → 키 없음 → 키워드로 대신 처리 표시
+    j = client.post("/assistant", json={"text": "지금 현황 알려줘"}).json()
+    assert j["command"]["fallback"] is True and j["command"]["fallback_reason"]
+    # 조율 메시지·답장 해석도 같은 기본값
+    sid = _sent(client)
+    msg = store.messages[-1]
+    assert msg["fallback"] is True and msg["method"] == "keyword"
+    r = client.post(f"/coord/{enc(sid)}/reply", json={"choices": ["A"]})
+    assert r.status_code == 200 and r.json()["parse"]["fallback"] is True
+
+
+def test_request_method_wins_over_default(client, monkeypatch):
+    monkeypatch.setenv("SSUROOM_NLP", "llm")
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    j = client.post("/assistant", json={"text": "지금 현황 알려줘", "method": "keyword"}).json()
+    assert j["command"]["fallback"] is False and j["command"]["method"] == "keyword"
+    monkeypatch.setenv("SSUROOM_NLP", "아무값")                       # 모르는 값이면 keyword
+    assert client.get("/health").json()["nlp"] == "keyword"
+    monkeypatch.delenv("SSUROOM_NLP")
+    j = client.post("/assistant", json={"text": "지금 현황 알려줘"}).json()
+    assert j["command"]["fallback"] is False                           # 기본 keyword 는 언어 모델을 부르지 않음

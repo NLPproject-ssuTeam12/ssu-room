@@ -67,7 +67,7 @@ def _log_sources() -> None:
 # ---------- 요청 모양 ----------
 
 class MessageIn(BaseModel):
-    method: Literal["keyword", "llm"] = "keyword"
+    method: Optional[Literal["keyword", "llm"]] = None   # None = 서버 기본(SSUROOM_NLP)
 
 
 Choice = Literal["A", "B", "C", "ETC", "KEEP"]
@@ -78,7 +78,7 @@ class ReplyIn(BaseModel):
     # 교수 답장 화면에서 누른 값 (하나 이상, 여러 개 가능). ETC = 기타(글 필수), KEEP = 지금 자리 그대로
     choices: Optional[List[Choice]] = None
     choice: Optional[Literal["A", "B", "C", "none"]] = None   # 예전 화면 값 (choices가 있으면 choices를 쓴다)
-    method: Literal["keyword", "llm"] = "keyword"
+    method: Optional[Literal["keyword", "llm"]] = None   # None = 서버 기본(SSUROOM_NLP)
 
 
 class DecideIn(BaseModel):
@@ -104,7 +104,7 @@ class ManualIn(BaseModel):
 class AssistantIn(BaseModel):
     text: str
     history: List[dict] = []         # [{"role": "user"|"assistant", "text": "...", "section_id": 선택}]
-    method: Literal["keyword", "llm"] = "keyword"
+    method: Optional[Literal["keyword", "llm"]] = None   # None = 서버 기본(SSUROOM_NLP)
 
 
 class SettingsIn(BaseModel):
@@ -128,10 +128,22 @@ class PairIn(BaseModel):
 
 
 class RoundIn(BaseModel):
-    method: Literal["keyword", "llm"] = "keyword"   # DB 모드에서 자동으로 보내는 조율 메시지 방식
+    method: Optional[Literal["keyword", "llm"]] = None   # DB 모드에서 자동으로 보내는 조율 메시지 방식. None = SSUROOM_NLP
 
 
 # ---------- 도우미 ----------
+
+def nlp_default() -> str:
+    """서버 기본 해석 방식: 환경 변수 SSUROOM_NLP (keyword | llm). 없거나 다른 값이면 keyword."""
+    v = (os.environ.get("SSUROOM_NLP") or "").strip().lower()
+    return v if v in ("keyword", "llm") else "keyword"
+
+
+def _nlp(method: Optional[str]) -> str:
+    """요청에 method 가 오면 그것, 없으면(None) 서버 기본(SSUROOM_NLP). 조율 메시지·답장 해석·자동 메시지·AI 도우미 공통.
+    llm 이 막히면(429·503·키 없음) 각 함수가 키워드로 대신 처리하고 응답에 method·fallback 을 남긴다."""
+    return method if method in ("keyword", "llm") else nlp_default()
+
 
 def _conflict(msg: str) -> HTTPException:
     return HTTPException(status_code=409, detail=msg)
@@ -266,6 +278,8 @@ def health():
         "round_no": store.round_no,
         "engine": engine.sources(),
         "load_warnings": engine.load_warnings() + store.load_warnings,
+        "nlp": nlp_default(),                                   # 서버 기본 해석 방식 (요청에 method 가 없을 때)
+        "gemini_key": bool(os.environ.get("GEMINI_API_KEY")),   # 키가 있는지만 (값은 내보내지 않는다)
     }
 
 
@@ -409,7 +423,7 @@ def post_message(section_id: str, body: Optional[MessageIn] = None):
     item = _coord_target(section_id)
     if not item["alternatives"]:
         raise _conflict("대안이 없어 조율 메시지를 쓸 수 없습니다. [수정]이나 [현재대로 유지]로 정해 주세요.")
-    method = body.method if body else "keyword"
+    method = _nlp(body.method if body else None)
     inp = store.message_input(section_id)
     msg = engine.write_message(inp, method)
     issues = list(engine.check_message(msg.text, inp))
@@ -452,7 +466,7 @@ def post_reply(section_id: str, body: ReplyIn):
     _check_reply(body, can_keep)
     alts = item["alternatives"]
     parsed = engine.parse_reply(body.text, body.choice, choices=body.choices, alternatives=alts,
-                                message=item["message"] or "", method=body.method, can_keep=can_keep)
+                                message=item["message"] or "", method=_nlp(body.method), can_keep=can_keep)
     if _db():
         # DB는 누른 값이 하나 이상 있어야 받는다(add_reply). 예전 값은 바꿔 넣는다: 안 → 그 안, 모두 어려움·글만 → 기타
         choices = list(dict.fromkeys(body.choices or ([body.choice] if body.choice in ("A", "B", "C") else ["ETC"])))
@@ -464,10 +478,10 @@ def post_reply(section_id: str, body: ReplyIn):
         proposal = engine.match_conditions(parsed, alts, store.round_no, [])
         model = "keyword" if parsed.method == "keyword" else os.environ.get("GEMINI_MODEL", "gemini-3.5-flash-lite")
         _db_call(db.save_interpretation, pid, mid, parsed, proposal, model)
-        return store.add_reply(section_id, body.text, choices, body.method, parsed, proposal, [])
+        return store.add_reply(section_id, body.text, choices, parsed.method, parsed, proposal, [])
     unavailable = _unavailable(section_id, alts)
     proposal = engine.match_conditions(parsed, alts, store.round_no, unavailable)
-    rec = store.add_reply(section_id, body.text, body.choices or body.choice, body.method, parsed, proposal,
+    rec = store.add_reply(section_id, body.text, body.choices or body.choice, parsed.method, parsed, proposal,
                           unavailable)
     store.update_coord(section_id, state="PROPOSED", proposal=proposal, last_parse=parsed)
     return rec
@@ -580,7 +594,7 @@ def post_next_round(body: Optional[RoundIn] = None):
         sent = []
         for c in store.list_coord():
             if c["state"] == "OPEN" and c["round_no"] == no:
-                post_message(c["section_id"], MessageIn(method=body.method if body else "keyword"))
+                post_message(c["section_id"], MessageIn(method=_nlp(body.method if body else None)))
                 sent.append(c["section_id"])
         _db().sync(store)
         open_items = [c["section_id"] for c in store.list_coord() if c["state"] not in ("RESOLVED", "KEPT")]
@@ -639,7 +653,7 @@ def post_reset():
 def post_assistant(body: AssistantIn):
     """조교 질문 → 의도·정보 → 배정 함수 호출 → 설명. move는 제안만 만들고 반영하지 않는다.
     method="llm"이 실패하면 키워드 방식으로 대신 처리하고 command.fallback=True (fallback_reason에 이유)."""
-    cmd = assistant.read_question(body.text, body.history, store, method=body.method)
+    cmd = assistant.read_question(body.text, body.history, store, method=_nlp(body.method))
     out = assistant.run_assistant(cmd, store)
     res = {"command": dump(cmd), "section_id": cmd.section_id, **out}
     prop = assistant.get_proposal(out.get("proposal_id")) if out.get("proposal_id") else None
