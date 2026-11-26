@@ -205,3 +205,36 @@ def test_assistant_proposal_reports_after_move_violations(drafted):
     from backend.app import main
     p = assistant.get_proposal(out["proposal_id"])
     assert len(main._violations_after("C2-01", p["alternative"])) == 0
+
+
+def test_room_clash_proposes_engine_room_and_applies(drafted):
+    """요청한 강의실만 차 있으면 엔진이 같은 시각 다른 강의실로 찾은 안을 제안하고, [적용]하면 새 시간표 버전이 된다."""
+    c, db = drafted
+    used = {(blk.room, cc) for a in store.timetable.assignments if a.section_id != "C2-01"
+            for blk in a.blocks for cc in assistant._cells(blk)}
+    busy = prof_busy("C2-01")
+    found = None
+    for days in (("월", "수"), ("화", "목"), ("월", "목"), ("화", "금")):
+        for start in ("09:00", "10:30", "12:00", "13:30", "15:00", "16:30"):
+            cells = [f"{d}-{start}" for d in days]
+            if any(cc in busy for cc in cells):
+                continue
+            taken = [r.id for r in store.list_rooms() if any((r.id, cc) in used for cc in cells)]
+            free = [r.id for r in store.list_rooms() if all((r.id, cc) not in used for cc in cells)]
+            if taken and free:
+                found = (list(days), start, cells, taken[0])
+                break
+        if found:
+            break
+    assert found, "차 있는 강의실과 빈 강의실이 함께 있는 시각이 없음"
+    days, start, cells, taken = found
+    out = run_assistant(AssistantQuery(intent="move", section_id="C2-01", days=days, start=start, room=taken), store)
+    if not out["proposal_id"]:
+        assert "찾지 못했어요" in out["answer"] or "움직이는 수업" in out["answer"]
+        return
+    p = assistant.get_proposal(out["proposal_id"])
+    assert all((m.room, f"{'월화수목금'[m.day]}-{m.start}") not in used for m in p["alternative"].meetings)
+    before = db.current_tt()
+    r = c.post("/assistant/apply", json={"proposal_id": out["proposal_id"], "reason": "테스트"})
+    assert r.status_code == 200, r.text
+    assert db.current_tt() != before and r.json()["violations"] == 0

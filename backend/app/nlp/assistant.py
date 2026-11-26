@@ -819,7 +819,14 @@ def _what_if(cmd: AssistantQuery, store, as_move: bool) -> dict:
                              (f" (같이 움직이는 수업 {len(opt['moves'])}개)" if opt["moves"] else "") + ".")
             else:
                 lines.append("규칙을 지키며 그 시각에 놓는 안도 엔진이 찾지 못했어요.")
-            if as_move:   # 새 위반이 생기는 안은 [적용]해도 엔진(apply_option)이 거부하므로 제안을 만들지 않는다
+            if as_move and opt and not opt["moves"] and not res["violations"]:
+                # 요청한 강의실만 그 시간에 차 있고, 엔진이 같은 요일·시각에 다른 강의실로 규칙을 지키는 안을 찾음
+                # (다른 수업을 움직이지 않음) → 그 안으로 제안한다. 엔진 안은 apply_option 이 받는다
+                from ..contracts import meetings_to_blocks, Meeting
+                blocks, _ = meetings_to_blocks([Meeting(**m) for m in opt["alternative"]["meetings"]])
+                rows = [row(sec.id, _place_text(blocks), "옮김 (엔진이 고른 강의실)")]
+                lines.append("요청한 강의실 대신 이 안으로 제안해요.")
+            elif as_move:   # 새 위반이 생기거나 다른 수업까지 움직여야 하는 안은 [적용]해도 거부되므로 제안을 만들지 않는다
                 return _result(" ".join(lines), rows)
     else:
         lines.append(f"같이 바뀌어야 하는 다른 분반 {len(others)}개, 규칙 위반 {res['violations']}건이에요. {STUB_NOTE}")
