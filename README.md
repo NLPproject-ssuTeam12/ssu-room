@@ -100,7 +100,7 @@ SSU:room은 **AI가 교수 글을 읽고, 솔버가 시간표를 짜면, 조교�
 
 ## 배정 방식 비교 실험
 
-배정 엔진으로 CP-SAT를 고른 근거입니다. 합성 데이터 100분반, 강의실 18개, 시드 10개로 비교했습니다.
+중간 발표(11/5) 때 배정 엔진으로 CP-SAT를 고른 근거입니다. 그때 엔진으로 합성 데이터 100분반, 강의실 18개, 시드 10개를 비교했습니다. 그때 실험 코드는 이 저장소에 없고, 지금 엔진으로 다시 잰 결과와 코드는 바로 아래 절(`experiments/`)에 있습니다.
 
 | 지표 | 그리디 + 규칙 기반 | CP-SAT 시간 + 강의실 동시 배정 |
 |---|---|---|
@@ -228,13 +228,15 @@ backend/          서버 (FastAPI)
   requirements.txt
   app/
     main.py       API 엔드포인트
+    dbmode.py     DB 모드: 상태를 SQLite DB에 저장하고 배정 엔진을 부름 (SSUROOM_ENGINE=solver)
+    store.py      메모리 모드 (테스트용)
     engine.py     배정·조율 함수를 진짜 모듈에서 가져옴 (없으면 가짜 함수)
     solver/       배정 엔진(solver/)을 서버에 잇는 어댑터
     nlp/          조율 NLP(coord.py: 조율 메시지·회신 해석·처리안), AI 도우미(assistant.py), 언어 모델 호출(llm.py), 프롬프트
   tests/          서버·조율·도우미 테스트
   tools/          DB 시드, 실제 데이터 가져오기 (교수 이름은 가명으로)
 db/               SQLite 스키마·migration·DB 함수
-solver/           CP-SAT 배정 엔진 (초안, 대안 A·B·C, 최소 변경 재배정, 조율 대상)
+solver/           CP-SAT 배정 엔진 (초안, 대안 A·B·C, 최소 변경 재배정, 조율 대상), 그리디 기준선
 frontend/         React 화면 (교수 입력·답장, 조교 확인 화면)
 data/
   synthetic/      가상 데이터 (커밋)
@@ -242,7 +244,7 @@ data/
 eval/             평가 스크립트
   labels/         평가 답장과 정답 (사람이 작성)
   results/        측정 결과
-experiments/      배정 방식 비교 실험
+experiments/      배정 방식 비교 실험 (그리디 기준선 vs 배정 엔진)
 docs/
   midterm/        중간 발표 덱과 대본
   prototype/      화면 시안
