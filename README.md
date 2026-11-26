@@ -429,6 +429,9 @@ AI가 만든 결과물은 팀이 확인하고 고쳤습니다.
 | Pydantic | 출력 형식 검증 | MIT |
 | FastAPI | 서버 (제안) | MIT |
 | React | 화면 | MIT |
+| Vite, @vitejs/plugin-react | 화면 개발 서버·빌드 | MIT |
+| TypeScript | 화면 타입 검사 | Apache 2.0 |
+| Vitest | 화면 단위 테스트 | MIT |
 | Uvicorn | 서버 실행 | BSD 3-Clause |
 | google-genai | Gemini API 호출 | Apache 2.0 |
 | python-dotenv | `.env` 읽기 | BSD 3-Clause |
