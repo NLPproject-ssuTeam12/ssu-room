@@ -357,7 +357,9 @@ def post_wish(wish: Wish):
         wish.professor = sec.professor
     elif sec.professor is not None and wish.professor != sec.professor:
         raise HTTPException(status_code=422, detail="이 분반의 담당 교수가 아닙니다.")
-    if wish.enrollment is not None and wish.enrollment % 5:
+    # 5명 단위 검사는 인원을 바꿀 때만. GET /wishes 로 받은 지금 값을 그대로 되돌려 보내면 통과 (11/27 안전장치).
+    # 인원이 비어 있는(NULL) 분반에 처음 넣는 값은 검사한다
+    if wish.enrollment is not None and wish.enrollment != sec.enrollment and wish.enrollment % 5:
         raise HTTPException(status_code=422, detail="수강 인원은 5명 단위로 적어 주세요.")
     if _db():
         _db_call(_db().save_wish, wish)
