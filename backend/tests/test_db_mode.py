@@ -386,3 +386,48 @@ def test_confirm_uses_fresh_room_when_stored_room_is_taken(client):
         assert any(m["room"] != n["room"] for m, n in zip(applied, b["meetings"]))   # 다른 강의실
     else:
         assert r.status_code == 409 and "UNIQUE" not in r.json()["detail"], r.text
+
+
+# ---------- 기타 요청 확인 (11/27, DB 모드: 하윤 other_request) ----------
+
+def test_requests_db_mode(client, monkeypatch):
+    c, db = client
+    w = {"section_id": "C2-01", "professor": "교수02", "cells": {"화-09:00": "PREFER"}, "note": "실습 조교 배정 부탁"}
+    assert c.post("/wishes", json=w).status_code == 200
+    reqs = c.get("/requests", params={"status": "PENDING"}).json()
+    mine = [r for r in reqs if r["section_id"] == "C2-01"]
+    assert len(mine) == 1 and mine[0]["source"] == "wish" and mine[0]["professor"] == "교수02"
+    assert mine[0]["course"] == "가상과목2" and mine[0]["status"] == "PENDING"
+    rid = mine[0]["id"]
+    assert next(x for x in c.get("/wishes").json()["wishes"] if x["section_id"] == "C2-01")["note_status"] == "PENDING"
+    r = c.post(f"/requests/{rid}/confirm", json={"memo": "배정함"})
+    assert r.status_code == 200 and r.json()["status"] == "CONFIRMED" and r.json()["ta_memo"] == "배정함"
+    assert db.q("SELECT status, ta_memo, confirmed_by FROM other_request WHERE id=?", (rid,)).fetchone() == \
+        ("CONFIRMED", "배정함", db.ta_id)
+    assert next(x for x in c.get("/wishes").json()["wishes"] if x["section_id"] == "C2-01")["note_status"] == "CONFIRMED"
+    r = c.post(f"/requests/{rid}/confirm", json={"memo": "메모만"})
+    assert r.status_code == 200 and r.json()["ta_memo"] == "메모만"
+    # 같은 글 다시 저장 → 같은 요청·확인 그대로, 바뀌면 다시 PENDING (응답 행은 그대로라 요청 id 도 그대로)
+    c.post("/wishes", json=w)
+    assert db.q("SELECT id, status FROM other_request WHERE id=?", (rid,)).fetchone() == (rid, "CONFIRMED")
+    c.post("/wishes", json=dict(w, note="실습 조교 두 명 부탁"))
+    assert db.q("SELECT status, body FROM other_request WHERE id=?", (rid,)).fetchone() == ("PENDING", "실습 조교 두 명 부탁")
+    c.post("/wishes", json=dict(w, note=""))
+    assert db.q("SELECT COUNT(*) FROM other_request WHERE id=?", (rid,)).fetchone()[0] == 0
+    assert c.post("/requests/99999/confirm", json={}).status_code == 404
+
+    # 답장 기타의 시간표 밖 요청도 같은 목록에 (add_reply_request)
+    from backend.app import engine
+    from backend.app.contracts import ReplyParse
+    c.post("/draft")
+    c.post("/rounds/next")
+    sid = next(s for s, x in coord(c).items() if x["state"] == "SENT")
+
+    def fake_parse(text, choice=None, *, choices=None, alternatives=None, message="", method="keyword", can_keep=False):
+        return ReplyParse(kind="조건부", picks=["A"], note="실습실 PC 점검 부탁", method="llm")
+
+    monkeypatch.setattr(engine, "parse_reply", fake_parse)
+    assert c.post(f"/coord/{enc(sid)}/reply", json={"choices": ["A", "ETC"], "text": "A 좋아요. PC 점검 부탁"}).status_code == 200
+    rep = [r for r in c.get("/requests").json() if r["source"] == "reply"]
+    assert len(rep) == 1 and rep[0]["section_id"] == sid and rep[0]["body"] == "실습실 PC 점검 부탁"
+    assert rep[0]["status"] == "PENDING"

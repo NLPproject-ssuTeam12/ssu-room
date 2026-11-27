@@ -238,6 +238,8 @@ fetch(`http://localhost:8000/coord/${encodeURIComponent(sectionId)}/message`, { 
 - `single_day`: 주 1회 연강(하루에 두 교시를 이어서) `MUST`(무조건) / `NONE`(필요 없음 = 주 2회, 기본). 하윤 DB `single_day_pref`와 같은 이름. '선호'(`PREFER`)는 11/24에 뺐고, 옛 화면이 보내면 `NONE`으로 받는다.
 - `professors`: 교수(가명)별 맡은 분반 id. 예전 '연강'(`consecutive`, 맡은 강의를 이어서 하기) 값은 팀 결정(11/21)으로 뺐다.
 
+- 희망마다 `note_status`(11/27): 기타 글(`note`)의 조교 확인 상태 `PENDING`(미확인) / `CONFIRMED`(확인함) / `null`(기타 글 없음). 다른 칸은 그대로.
+
 ### `POST /wishes`
 분반 하나의 희망을 저장한다(덮어씀). **COLLECT에서만.**
 
@@ -273,6 +275,21 @@ fetch(`http://localhost:8000/coord/${encodeURIComponent(sectionId)}/message`, { 
 | 422 | 다른 교수 이름 | `이 분반의 담당 교수가 아닙니다.` |
 | 404 | 없는 분반 | `분반이 없습니다: 없는-분반` |
 | 409 | COLLECT가 아님 | `희망은 수집 단계(COLLECT)에서만 받습니다. 지금 단계: FINAL` |
+
+### `GET /requests` · `POST /requests/{id}/confirm` (기타 요청 확인, 11/27)
+교수가 '기타'에 쓴 요청을 조교가 읽고 [확인함]을 누른다. 배정 엔진은 읽지 않는다. 모든 단계.
+DB 모드는 하윤 `other_request` 표(`db.confirm_other_request`), 메모리 모드는 서버 메모리.
+
+`GET /requests?status=PENDING|CONFIRMED` (생략하면 전체, 미확인 먼저):
+```json
+[{ "id": 3, "source": "wish", "section_id": "2150163303", "course": "알고리즘", "professor": "교수04",
+   "body": "실습 조교 배정 부탁드립니다", "status": "PENDING", "ta_memo": null, "confirmed_at": null,
+   "created_at": "2026-11-27 06:10:00" }]
+```
+- `source`: `wish`(희망 입력의 기타) / `reply`(조율 답장에서 기타를 고르고 쓴 시간표 밖 요청)
+- 희망을 다시 저장할 때 기타 글이 같으면 확인 상태 그대로, 바뀌면 다시 `PENDING`, 비우면 요청이 지워진다
+
+`POST /requests/{id}/confirm` 본문 `{ "memo": "조교 배정함" }`(선택) → 그 요청(위 모양, `status: "CONFIRMED"`). 이미 확인한 요청은 메모만 바꾼다. 없는 id 는 404.
 
 ### `POST /draft`
 초안을 만든다. COLLECT → DRAFT. 요청 본문 없음. STUB: `make_draft`·`make_alternatives`·`check_rules`(문하윤).

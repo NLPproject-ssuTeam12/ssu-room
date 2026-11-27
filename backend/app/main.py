@@ -139,6 +139,10 @@ class ApplyIn(BaseModel):
     reason: Optional[str] = None
 
 
+class RequestConfirmIn(BaseModel):
+    memo: Optional[str] = None      # 조교 메모 (예: "실습 조교 배정 완료")
+
+
 class HoldIn(BaseModel):
     send: bool = True               # True = [보내기] (OPEN), False = 보내지 않음 (KEPT)
 
@@ -344,7 +348,38 @@ def get_wishes():
     wishes = [w.model_copy(update={"enrollment": w.enrollment if w.enrollment is not None else
                                    (store.get_section(w.section_id).enrollment if store.get_section(w.section_id) else None)})
               for w in store.list_wishes()]
-    return {"wishes": wishes, "professors": store.professors, "pairs": pairs}
+    # 기타 글의 확인 상태 (PENDING | CONFIRMED | null = 기타 글 없음)
+    status = {r["section_id"]: r["status"] for r in _requests() if r["source"] == "wish"}
+    out = [dict(dump(w), note_status=status.get(w.section_id)) for w in wishes]
+    return {"wishes": out, "professors": store.professors, "pairs": pairs}
+
+
+def _requests(status: Optional[str] = None) -> List[dict]:
+    return _db().requests(status) if _db() else store.list_requests(status)
+
+
+# ---------- 기타 요청 (조교 확인) ----------
+
+@app.get("/requests")
+def get_requests(status: Optional[Literal["PENDING", "CONFIRMED"]] = None):
+    """교수가 '기타'에 쓴 요청 (희망 입력 = wish, 조율 답장 기타의 시간표 밖 요청 = reply). 미확인 먼저.
+    조교가 읽고 [확인함]을 누른다. 배정 엔진은 읽지 않는다."""
+    return _requests(status)
+
+
+@app.post("/requests/{request_id}/confirm")
+def post_request_confirm(request_id: int, body: Optional[RequestConfirmIn] = None):
+    """[확인함]. 이미 확인한 요청은 메모만 바꾼다. 없는 id 는 404."""
+    memo = body.memo if body else None
+    if _db():
+        try:
+            return _db_call(_db().confirm_request, request_id, memo)
+        except KeyError:
+            raise HTTPException(status_code=404, detail=f"기타 요청이 없습니다: {request_id}")
+    rec = store.confirm_request(request_id, memo)
+    if rec is None:
+        raise HTTPException(status_code=404, detail=f"기타 요청이 없습니다: {request_id}")
+    return rec
 
 
 @app.post("/wishes")

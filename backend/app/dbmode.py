@@ -259,22 +259,23 @@ class DBMode:
         if pid is None:
             raise DBModeError(f"교수가 없습니다: {wish.professor}")
         try:
+            single = "MUST" if wish.single_day == "MUST" else "NONE"
             old = self.q("SELECT id FROM course_response WHERE round_id=? AND course_id=? AND section_no=? AND professor_id=?",
                          (self.wish_round, cid, sec, pid)).fetchone()
-            if old:
-                self.q("DELETE FROM response_slot WHERE response_id=?", (old[0],))
-                self.q("DELETE FROM other_request WHERE response_id=?", (old[0],))
-                self.q("DELETE FROM request_item WHERE response_id=?", (old[0],))
-                self.q("DELETE FROM course_response WHERE id=?", (old[0],))
-            rid = self.q("""INSERT INTO course_response(round_id, course_id, section_no, professor_id, lab_requirement,
-                                                        single_day_pref, submitted_at) VALUES (?,?,?,?,?,?,datetime('now'))""",
-                         (self.wish_round, cid, sec, pid, wish.lab, "MUST" if wish.single_day == "MUST" else "NONE")).lastrowid
+            if old:   # 응답 행은 그대로 두고 고친다 (기타 요청이 그 응답에 붙어 있어서: other_request.response_id UNIQUE)
+                rid = old[0]
+                self.q("""UPDATE course_response SET lab_requirement=?, single_day_pref=?, submitted_at=datetime('now')
+                          WHERE id=?""", (wish.lab, single, rid))
+                self.q("DELETE FROM response_slot WHERE response_id=?", (rid,))
+            else:
+                rid = self.q("""INSERT INTO course_response(round_id, course_id, section_no, professor_id, lab_requirement,
+                                                            single_day_pref, submitted_at) VALUES (?,?,?,?,?,?,datetime('now'))""",
+                             (self.wish_round, cid, sec, pid, wish.lab, single)).lastrowid
             for cell, kind in wish.cells.items():
                 d, _, st = cell.partition("-")
                 self.q("INSERT INTO response_slot(response_id, slot_id, kind) VALUES (?,?,?)",
                        (rid, self.slots.id_of[(d, st)], kind))
-            if wish.note.strip():
-                self.q("INSERT INTO other_request(response_id, body) VALUES (?,?)", (rid, wish.note.strip()))
+            self._save_wish_note(rid, wish.note.strip())
             if wish.enrollment is not None:   # 분반 수강 인원 (하윤 db.py 에 함수가 없어 서버가 직접 바꾼다)
                 self.q("UPDATE course_section SET enrollment=? WHERE course_id=? AND section_no=?",
                        (wish.enrollment, cid, sec))
@@ -291,6 +292,58 @@ class DBMode:
         except Exception:
             self.con.rollback()
             raise
+
+    def _save_wish_note(self, rid: int, body: str) -> None:
+        """희망 입력의 기타 요청 (other_request, 응답당 하나). 글이 같으면 그대로(확인 상태 유지),
+        바뀌면 새 글로 바꾸고 다시 미확인(PENDING), 비우면 지운다. commit 은 부르는 쪽."""
+        cur = self.q("SELECT id, body FROM other_request WHERE response_id=?", (rid,)).fetchone()
+        if not body:
+            if cur:
+                self.q("DELETE FROM request_item WHERE other_request_id=?", (cur[0],))
+                self.q("DELETE FROM other_request WHERE id=?", (cur[0],))
+        elif cur is None:
+            self.q("INSERT INTO other_request(response_id, body) VALUES (?,?)", (rid, body))
+        elif cur[1] != body:
+            self.q("""UPDATE other_request SET body=?, status='PENDING', confirmed_by=NULL, confirmed_at=NULL
+                      WHERE id=?""", (body, cur[0]))
+
+    # ---------- 기타 요청 (조교 확인) ----------
+
+    def requests(self, status: Optional[str] = None) -> List[dict]:
+        """기타 요청 전체 (희망 입력의 기타 = wish, 조율 답장 기타의 시간표 밖 요청 = reply). 미확인 먼저."""
+        name_of = {i: n for n, i in self.prof_id.items()}
+        cname = dict(self.q("SELECT id, name FROM course"))
+        out = []
+        for oid, rid, mid, body, st, memo, at, created in self.q(
+                """SELECT id, response_id, message_id, body, status, ta_memo, confirmed_at, created_at
+                   FROM other_request ORDER BY CASE status WHEN 'PENDING' THEN 0 ELSE 1 END, id""").fetchall():
+            if rid is not None:
+                row = self.q("SELECT course_id, section_no, professor_id FROM course_response WHERE id=?", (rid,)).fetchone()
+                source = "wish"
+            else:
+                row = self.q("""SELECT p.course_id, p.section_no, m.sender_id FROM message m
+                                JOIN proposal p ON p.id = m.proposal_id WHERE m.id=?""", (mid,)).fetchone()
+                source = "reply"
+            cid, sec, prof = row if row else (None, None, None)
+            if status and st != status:
+                continue
+            out.append(dict(id=oid, source=source, section_id=self.pairs.sid_of.get((cid, sec)),
+                            course=cname.get(cid), professor=name_of.get(prof), body=body, status=st, ta_memo=memo,
+                            confirmed_at=at, created_at=created))
+        return out
+
+    def confirm_request(self, oid: int, memo: Optional[str]) -> dict:
+        """조교 [확인함]. 하윤 db.confirm_other_request. 이미 확인한 요청은 메모만 바꾼다. 없는 id 는 KeyError."""
+        row = self.q("SELECT status FROM other_request WHERE id=?", (oid,)).fetchone()
+        if row is None:
+            raise KeyError(oid)
+        if row[0] == "CONFIRMED":
+            if memo is not None:
+                self.q("UPDATE other_request SET ta_memo=? WHERE id=?", (memo, oid))
+                self.con.commit()
+        else:
+            self.hdb.confirm_other_request(self.con, oid, self.ta_id, memo)
+        return next(r for r in self.requests() if r["id"] == oid)
 
     def set_pair(self, sid: str, mode: str, order: Optional[List[str]] = None) -> List[str]:
         """분반 연강·교차 (과목 단위로 한 번). order = 붙일 분반 id, 교수가 적은 순서."""

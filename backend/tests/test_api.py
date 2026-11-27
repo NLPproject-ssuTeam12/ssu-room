@@ -893,3 +893,45 @@ def test_enrollment_same_value_passes(client):
     store.sections[sec.id] = store.sections[sec.id].model_copy(update={"enrollment": None})
     assert client.post("/wishes", json={"section_id": sec.id, "enrollment": 43}).status_code == 422
     assert client.post("/wishes", json={"section_id": sec.id, "enrollment": 30}).status_code == 200
+
+
+# ---------- 기타 요청 확인 (11/27, 메모리 모드) ----------
+
+def test_requests_wish_note_flow_memory(client):
+    sid = next(s.id for s in store.list_sections() if s.shape != "MANUAL" and not (store.get_wish(s.id) and store.get_wish(s.id).note))
+    assert client.post("/wishes", json={"section_id": sid, "note": "실습 조교 배정 부탁드립니다"}).status_code == 200
+    reqs = [r for r in client.get("/requests", params={"status": "PENDING"}).json() if r["section_id"] == sid]
+    assert len(reqs) == 1 and reqs[0]["source"] == "wish" and reqs[0]["body"] == "실습 조교 배정 부탁드립니다"
+    assert set(reqs[0]) >= {"id", "source", "section_id", "course", "professor", "body", "status", "ta_memo",
+                            "confirmed_at", "created_at"}
+    rid = reqs[0]["id"]
+    w = next(x for x in client.get("/wishes").json()["wishes"] if x["section_id"] == sid)
+    assert w["note_status"] == "PENDING"
+    r = client.post(f"/requests/{rid}/confirm", json={"memo": "조교 배정함"})
+    assert r.status_code == 200 and r.json()["status"] == "CONFIRMED" and r.json()["ta_memo"] == "조교 배정함"
+    at = r.json()["confirmed_at"]
+    r = client.post(f"/requests/{rid}/confirm", json={"memo": "메모만 바꿈"})                 # 이미 확인: 메모만
+    assert r.json()["ta_memo"] == "메모만 바꿈" and r.json()["confirmed_at"] == at
+    assert next(x for x in client.get("/wishes").json()["wishes"] if x["section_id"] == sid)["note_status"] == "CONFIRMED"
+    assert all(x["status"] == "PENDING" for x in client.get("/requests", params={"status": "PENDING"}).json())
+    # 같은 글로 다시 저장 → 확인 그대로, 글이 바뀌면 다시 PENDING, 비우면 사라짐
+    client.post("/wishes", json={"section_id": sid, "note": "실습 조교 배정 부탁드립니다"})
+    assert next(x for x in client.get("/wishes").json()["wishes"] if x["section_id"] == sid)["note_status"] == "CONFIRMED"
+    client.post("/wishes", json={"section_id": sid, "note": "실습 조교 두 명 부탁드립니다"})
+    assert next(x for x in client.get("/wishes").json()["wishes"] if x["section_id"] == sid)["note_status"] == "PENDING"
+    client.post("/wishes", json={"section_id": sid, "note": ""})
+    assert next(x for x in client.get("/wishes").json()["wishes"] if x["section_id"] == sid)["note_status"] is None
+    assert client.post("/requests/99999/confirm", json={}).status_code == 404
+
+
+def test_requests_reply_etc_memory(client, monkeypatch):
+    from backend.app.contracts import ReplyParse
+    sid = _sent(client)
+
+    def fake_parse(text, choice=None, *, choices=None, alternatives=None, message="", method="keyword", can_keep=False):
+        return ReplyParse(kind="조건부", picks=["A"], note="실습실 PC 점검 부탁", method="llm")
+
+    monkeypatch.setattr(engine, "parse_reply", fake_parse)
+    assert client.post(f"/coord/{enc(sid)}/reply", json={"choices": ["A", "ETC"], "text": "A 좋아요. PC 점검 부탁"}).status_code == 200
+    reqs = [r for r in client.get("/requests").json() if r["source"] == "reply"]
+    assert len(reqs) == 1 and reqs[0]["section_id"] == sid and reqs[0]["body"] == "실습실 PC 점검 부탁"
