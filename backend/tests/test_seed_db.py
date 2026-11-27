@@ -257,3 +257,87 @@ def test_estimated_capacity_follows_rounded_enrollment(tmp_path):
     assert mp["rooms"]["정보과학관 21303"]["capacity"] == 45          # 추정치 43 → 반올림 인원 45
     assert mp["rooms"]["정보과학관 21304"]["capacity"] == 43          # 실제 정원은 그대로
     assert out["over_capacity"] == ["2150000902"]                    # 실제 정원보다 커진 분반은 알려 준다
+
+
+# ---------- 희망 넓히기 (11/27) ----------
+
+def big_xlsx(path: Path) -> Path:
+    """과목 12개 × 분반 2개 (분반마다 같은 교수). 요일 쌍과 시각을 돌려 가며. 3학년 전공필수 과목은 채플(목 10:30)이 있다."""
+    from openpyxl import Workbook
+    pairs = [("월", "수"), ("화", "목"), ("월", "목"), ("화", "금")]
+    starts = ["09:00", "10:30", "12:00", "13:30", "15:00", "16:30"]
+    ends = {"09:00": "10:15", "10:30": "11:45", "12:00": "13:15", "13:30": "14:45", "15:00": "16:15", "16:30": "17:45"}
+    wb = Workbook()
+    ws = wb.active
+    ws.append(HEAD)
+    for c in range(12):
+        prof = f"가상교수{c:02d}"
+        for sec in (1, 2):
+            d1, d2 = pairs[(c + sec) % 4]
+            st = starts[(c * 2 + sec) % 6]
+            room = "정보과학관 21303" if sec == 1 else "정보과학관 21304"
+            times = f"{d1} {st}-{ends[st]} ({room}-{prof})\n{d2} {st}-{ends[st]} ({room}-{prof})"
+            cat = "전필-AI소프트웨어" if c == 0 else "전선-AI소프트웨어"
+            ws.append(row(f"21500{c + 10:02d}{sec:02d}", f"과목{c:02d}", prof, times, cat=cat, enroll=30,
+                          target="3학년 AI소프트웨어학부" if c == 0 else "2학년 AI소프트웨어학부"))
+    wb.save(path)
+    return path
+
+
+def _seed_big(tmp_path, **kw):
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    x = big_xlsx(tmp_path / "big.xlsx")
+    (tmp_path / "rooms.json").write_text(json.dumps(ROOMS, ensure_ascii=False), encoding="utf-8")
+    fixed = [{"kind": "채플", "day": "목", "start": "10:30", "end": "11:40", "scope": "AI대학", "years": [3]}]
+    (tmp_path / "fixed.json").write_text(json.dumps(fixed, ensure_ascii=False), encoding="utf-8")
+    out = sd.seed(x, tmp_path / "t.db", tmp_path / "map.json", tmp_path / "alias.json", tmp_path / "rooms.json",
+                  tmp_path / "fixed.json", **kw)
+    con = sqlite3.connect(tmp_path / "t.db")
+    mp = json.loads((tmp_path / "map.json").read_text(encoding="utf-8"))
+    cells = {}
+    for c, n, kind, day, st in con.execute(
+            """SELECT r.course_id, r.section_no, s.kind, t.day, t.start_time FROM course_response r
+               JOIN response_slot s ON s.response_id = r.id JOIN time_slot t ON t.id = s.slot_id"""):
+        cells.setdefault((c, n), {}).setdefault(kind, set()).add(f"{day}-{st}")
+    return out, mp, cells
+
+
+def test_widen_kinds_and_actual_cells_kept(tmp_path):
+    out, mp, cells = _seed_big(tmp_path)
+    _, mp_n, cells_n = _seed_big(tmp_path / "narrow", narrow=True)
+    kinds = {sid: v["wish_kind"] for sid, v in mp["sections"].items()}
+    assert set(kinds.values()) == {"exact", "adjacent", "other_days", "wide_block"}        # 네 종류 모두
+    assert dict(out["wish_kinds"]) == dict(sd.Counter(kinds.values()))
+    for sid, v in mp["sections"].items():
+        key = (v["course_id"], v["section_no"])
+        actual = cells_n[key]["PREFER"]                                  # --narrow = 실제 칸만
+        prefer, block = cells[key].get("PREFER", set()), cells[key].get("BLOCK", set())
+        assert actual <= prefer and not (actual & block), sid           # 실제 칸은 늘 희망, 불가 아님
+        assert not any(c.endswith("19:30") for c in prefer - actual)     # 늦은 교시는 칠하지 않음
+        if v["wish_kind"] == "exact":
+            assert prefer == actual and not block
+        if v["wish_kind"] in ("adjacent", "other_days"):
+            assert prefer > actual and not block
+        if v["wish_kind"] == "wide_block":
+            assert block and len({c.split("-")[0] for c in block}) == 1  # 하루 불가
+        if v["category"] == "전공필수":                                  # 3학년 전필: 채플 칸(목 10:30)은 칠하지 않음
+            assert "목-10:30" not in prefer - actual
+    assert all(v["wish_kind"] == "exact" for v in mp_n["sections"].values())
+    assert all(not c.get("BLOCK") for c in cells_n.values())
+
+
+def test_widen_skips_demo_and_blank(tmp_path):
+    out, mp, cells = _seed_big(tmp_path, demo=True, blank_prof="")
+    out_n, mp_n, cells_n = _seed_big(tmp_path / "narrow", demo=True, blank_prof="", narrow=True)
+    assert out["demo_changed"] == out_n["demo_changed"] and out["blank_prof"] == out_n["blank_prof"]   # 넓히기와 무관
+    demo = set(out["demo_changed"])
+    blank = set(out["blank_prof"]["sections"])
+    assert demo and blank and not (demo & blank)
+    for sid in demo | blank:
+        assert mp["sections"][sid]["wish_kind"] is None                  # 넓히지 않음
+    for sid in demo:                                                      # --demo 결과가 넓히기와 상관없이 같다
+        v = mp["sections"][sid]
+        assert cells.get((v["course_id"], v["section_no"])) == cells_n.get((v["course_id"], v["section_no"]))
+    for sid in blank:                                                     # 희망 비운 교수는 그대로 비어 있음
+        v = mp["sections"][sid]
+        assert (v["course_id"], v["section_no"]) not in cells
