@@ -48,11 +48,35 @@ export interface Wish {
   building: string | null
   room: string | null
   note: string
+  /** 분반 수강 인원 (5명 단위). 교수가 분반마다 정한다. 보내지 않으면 그대로 */
+  enrollment?: number | null
+  /** 기타 글의 조교 확인 상태 (서버가 GET /wishes 에만 붙인다. 없으면 기타 글 없음) */
+  note_status?: RequestStatus | null
 }
 
 export interface WishesResponse {
   wishes: Wish[]
   professors: Record<string, { sections: string[] }>
+  /** 저장한 분반 연강·교차 (POST /wishes/pair 응답과 같은 모양) */
+  pairs?: PairResponse[]
+}
+
+// ---------- 기타 요청 (GET /requests, POST /requests/{id}/confirm) ----------
+
+export type RequestStatus = 'PENDING' | 'CONFIRMED'
+
+/** 교수가 '기타'에 쓴 요청. wish = 희망 입력, reply = 조율 답장의 시간표 밖 요청 */
+export interface OtherRequest {
+  id: number
+  source: 'wish' | 'reply'
+  section_id: string
+  course: string | null
+  professor: string | null
+  body: string
+  status: RequestStatus
+  ta_memo: string | null
+  confirmed_at: string | null
+  created_at: string | null
 }
 
 export interface Health {

@@ -1,6 +1,6 @@
 // 서버 모드 희망 화면이 쓰는 순수 함수. 상태를 바꾸지 않고 새 값을 돌려준다 (wish.test.ts).
 import { DAYS, STARTS } from '../api/types'
-import type { CellKey, CellMark, Cells, Day, Section, Start, Wish } from '../api/types'
+import type { CellKey, CellMark, Cells, Day, PairResponse, Section, Start, Wish } from '../api/types'
 
 export const cellKey = (day: Day, start: Start): CellKey => `${day}-${start}`
 
@@ -30,8 +30,23 @@ export function emptyWish(section: Section, building: string | null): Wish {
     building,
     room: null,
     note: '',
+    enrollment: section.enrollment,
   }
 }
+
+/** 수강 인원은 5명 단위 (11/27 팀 결정) */
+export const ENROLLMENT_STEP = 5
+
+/** 수강 인원 칸 검사. 문제 없으면 빈 글 */
+export function enrollmentError(n: number | null | undefined): string {
+  if (n == null) return '수강 인원을 적어 주세요.'
+  if (!Number.isInteger(n) || n <= 0) return '수강 인원은 1명 이상인 정수로 적어 주세요.'
+  if (n % ENROLLMENT_STEP) return `수강 인원은 ${ENROLLMENT_STEP}명 단위로 적어 주세요.`
+  return ''
+}
+
+/** 입력 칸 글 → 인원 (비우면 null) */
+export const parseEnrollment = (text: string): number | null => (text.trim() === '' ? null : Number(text))
 
 const countOf = (cells: Cells, mark: CellMark): number => Object.values(cells).filter((v) => v === mark).length
 
@@ -58,6 +73,7 @@ export function wishChips(wish: Wish): ChipItem[] {
   const out: ChipItem[] = [prefer ? [`희망 ${prefer}`, 'good'] : ['희망 시간 없음 (아무 때나)', '']]
   const blocked = countOf(wish.cells, 'BLOCK')
   if (blocked) out.push([`불가 ${blocked}칸`, 'bad'])
+  if (wish.enrollment != null) out.push([`${wish.enrollment}명`, ''])
   if (wish.lab === 'MUST') out.push(['실습실 필요', 'lab'])
   if (wish.single_day === 'MUST') out.push(['주 1회 연강', ''])
   if (wish.single_day === 'PREFER') out.push(['주 1회 연강 선호', ''])
@@ -84,13 +100,19 @@ export function multiSectionCourses(sections: Section[]): Map<string, Section[]>
 const sortedCells = (cells: Cells): [string, string][] =>
   Object.entries(cells).filter((e): e is [string, CellMark] => !!e[1]).sort(([a], [b]) => a.localeCompare(b))
 
-/** 저장할 값이 같은지 (칸 순서는 무시) */
+/** 저장할 값이 같은지 (칸 순서는 무시, 서버가 붙이는 확인 상태 note_status는 비교하지 않음) */
 export function wishEquals(a: Wish | undefined, b: Wish): boolean {
   if (!a) return false
-  const { cells: ca, ...ra } = a
-  const { cells: cb, ...rb } = b
-  const keys = Object.keys(ra) as (keyof typeof ra)[]
-  return keys.every((k) => ra[k] === rb[k]) && JSON.stringify(sortedCells(ca)) === JSON.stringify(sortedCells(cb))
+  const { cells: ca, note_status: _sa, ...ra } = a
+  const { cells: cb, note_status: _sb, ...rb } = b
+  const keys = [...new Set([...Object.keys(ra), ...Object.keys(rb)])] as (keyof typeof ra)[]
+  return keys.every((k) => (ra[k] ?? null) === (rb[k] ?? null)) && JSON.stringify(sortedCells(ca)) === JSON.stringify(sortedCells(cb))
+}
+
+/** 이 과목 분반들에 저장된 연강·교차 (없으면 undefined) */
+export function savedPairFor(pairs: PairResponse[], list: Section[]): PairResponse | undefined {
+  const ids = new Set(list.map((s) => s.id))
+  return pairs.find((p) => p.mode !== 'NONE' && (ids.has(p.section_id) || p.order.some((id) => ids.has(id))))
 }
 
 /** 교수가 낸 희망 중 첫 건물 (서버는 건물을 교수당 하나로 저장한다) */

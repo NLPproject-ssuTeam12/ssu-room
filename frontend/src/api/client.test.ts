@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test, vi } from 'vitest'
-import { ApiError, EXPORT_URL, api, coordPath, detailText } from './client'
+import { ApiError, EXPORT_URL, api, apiBase, coordPath, detailText } from './client'
 
 afterEach(() => vi.unstubAllGlobals())
 
@@ -15,6 +15,22 @@ describe('detailText', () => {
 
   test('falls back to status code', () => {
     expect(detailText(null, 500)).toBe('서버 오류 (500)')
+  })
+})
+
+describe('apiBase', () => {
+  test('follows the host the page was opened from (two-computer demo)', () => {
+    expect(apiBase(undefined, { protocol: 'http:', hostname: '192.168.0.12' })).toBe('http://192.168.0.12:8000')
+    expect(apiBase(undefined, { protocol: 'http:', hostname: 'localhost' })).toBe('http://localhost:8000')
+  })
+
+  test('uses VITE_API_BASE when set, without a trailing slash', () => {
+    expect(apiBase('http://10.0.0.5:9000/', { protocol: 'http:', hostname: 'localhost' })).toBe('http://10.0.0.5:9000')
+  })
+
+  test('falls back to localhost when there is no page address', () => {
+    expect(apiBase(undefined, undefined)).toBe('http://localhost:8000')
+    expect(apiBase(undefined, { protocol: 'file:', hostname: '' })).toBe('http://localhost:8000')
   })
 })
 

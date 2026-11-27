@@ -13,6 +13,7 @@ import CoordView from './pages/CoordView'
 import FinalView from './pages/FinalView'
 import SettingsView from './pages/SettingsView'
 import { groupCoord } from './coord'
+import { pendingRequests } from './RequestConfirm'
 
 type TaView = 'wishes' | 'timetable' | 'coord' | 'final' | 'settings'
 
@@ -46,9 +47,10 @@ export default function TaApp({ data, onLogout }: { data: ServerData; onLogout: 
   const openTt = () => { setBotOpen(false); setTtOpen(true) }
   const openTimetablePage = () => { setTtOpen(false); setView('timetable') }
   const todo = groupCoord(data.coord).todo.length
+  const wishReqs = pendingRequests((data.requests ?? []).filter((r) => r.source === 'wish'))
 
   const menu: MenuItem<TaView>[] = [
-    { key: 'wishes', label: '희망 확인' },
+    { key: 'wishes', label: '희망 확인', badge: wishReqs, badgeLabel: `기타 요청 미확인 ${wishReqs}건` },
     { key: 'timetable', label: '시간표' },
     { key: 'coord', label: '조율', badge: todo, badgeLabel: `할 일 ${todo}건` },
     { key: 'final', label: '확정·내보내기' },

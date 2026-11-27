@@ -1,12 +1,13 @@
 // 조교: 희망 확인 (서버 GET /sections, GET /wishes) + 초안 만들기 (POST /draft)
 import { useState } from 'react'
-import type { Section, Wish } from '../../api/types'
+import type { OtherRequest, Section, Wish } from '../../api/types'
 import { Chip } from '../../components/common'
 import { askConfirm, toast } from '../../ui'
 import type { ServerData } from '../data'
 import { makeDraft } from '../data'
 import { CellLegend, MiniGrid } from '../CellGrid'
 import { reviewOrder, sectionTitle, wishChips } from '../wish'
+import { RequestConfirm } from '../RequestConfirm'
 
 function SectionCell({ s }: { s: Section }) {
   return (
@@ -20,7 +21,7 @@ function SectionCell({ s }: { s: Section }) {
   )
 }
 
-function WishRow({ s, w }: { s: Section; w: Wish | undefined }) {
+function WishRow({ s, w, req }: { s: Section; w: Wish | undefined; req: OtherRequest | undefined }) {
   if (!w) {
     return (
       <tr className="flag">
@@ -36,6 +37,7 @@ function WishRow({ s, w }: { s: Section; w: Wish | undefined }) {
       <td>{wishChips(w).map(([t, k]) => <Chip key={t} k={k}>{t}</Chip>)}</td>
       <td style={{ minWidth: 170 }}>
         {w.note.trim() ? <div className="small">{w.note}</div> : <span className="small muted">없음</span>}
+        {w.note.trim() && req && <RequestConfirm key={req.id} req={req} />}
       </td>
     </tr>
   )
@@ -81,6 +83,8 @@ export default function WishReview({ data, onDrafted }: { data: ServerData; onDr
   const rows = reviewOrder(auto, (id) => wishBy.get(id))
   const missing = auto.filter((s) => !wishBy.has(s.id)).length
   const noteN = auto.filter((s) => wishBy.get(s.id)?.note.trim()).length
+  const reqBy = new Map((data.requests ?? []).filter((r) => r.source === 'wish').map((r) => [r.section_id, r]))
+  const notePending = [...reqBy.values()].filter((r) => r.status === 'PENDING').length
   const noProf = auto.filter((s) => !s.professor).length
 
   return (
@@ -91,7 +95,7 @@ export default function WishReview({ data, onDrafted }: { data: ServerData; onDr
         <div className="row" style={{ gap: 8 }}>
           <Chip>자동 배정 분반 {auto.length}개</Chip>
           <Chip k={missing ? 'warn' : 'good'}>희망 접수 {auto.length - missing}/{auto.length}</Chip>
-          {noteN > 0 && <Chip k="warn">기타 요청 {noteN}건</Chip>}
+          {noteN > 0 && <Chip k={notePending ? 'warn' : 'good'}>기타 요청 {noteN}건{data.requests ? ` · 미확인 ${notePending}` : ''}</Chip>}
           {noProf > 0 && <Chip k="warn">담당 미정 {noProf}개</Chip>}
           <Chip>직접 배정 분반 {manual.length}개</Chip>
           <Chip>강의실 {data.rooms.length}개 (실습실 {data.rooms.filter((r) => r.is_lab).length}개)</Chip>
@@ -103,7 +107,7 @@ export default function WishReview({ data, onDrafted }: { data: ServerData; onDr
           <table>
             <tbody>
               <tr><th style={{ width: 190 }}>분반</th><th style={{ width: 110 }}>시간 칠하기</th><th>배정 조건</th><th>기타 요청 (조교 확인)</th></tr>
-              {rows.map((s) => <WishRow key={s.id} s={s} w={wishBy.get(s.id)} />)}
+              {rows.map((s) => <WishRow key={s.id} s={s} w={wishBy.get(s.id)} req={reqBy.get(s.id)} />)}
             </tbody>
           </table>
         </div>

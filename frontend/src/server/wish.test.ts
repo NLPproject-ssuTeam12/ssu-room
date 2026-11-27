@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'vitest'
 import type { Section, Wish } from '../api/types'
 import {
-  emptyWish, multiSectionCourses, nextMark, preferText, profBuilding, reviewOrder, sectionTitle, wishChips, wishEquals,
+  emptyWish, enrollmentError, multiSectionCourses, parseEnrollment, savedPairFor, nextMark, preferText, profBuilding, reviewOrder, sectionTitle, wishChips, wishEquals,
   withCell,
 } from './wish'
 
@@ -44,11 +44,11 @@ describe('preferText', () => {
 })
 
 describe('wishChips', () => {
-  test('lists preference, blocks, lab, single day, building and note', () => {
+  test('lists preference, blocks, enrollment, lab, single day, building and note', () => {
     const chips = wishChips(wish('s1', {
       cells: { '월-09:00': 'PREFER', '금-18:00': 'BLOCK' }, lab: 'MUST', single_day: 'MUST', building: '정보과학관', note: '대강 2회',
     }))
-    expect(chips.map(([t]) => t)).toEqual(['희망 월 09:00', '불가 1칸', '실습실 필요', '주 1회 연강', '정보과학관 선호', '기타 요청 있음'])
+    expect(chips.map(([t]) => t)).toEqual(['희망 월 09:00', '불가 1칸', '40명', '실습실 필요', '주 1회 연강', '정보과학관 선호', '기타 요청 있음'])
   })
 
   test('says any time when no cells are painted', () => {
@@ -98,5 +98,38 @@ describe('small helpers', () => {
 
   test('emptyWish starts from the section lab need', () => {
     expect(emptyWish(sec('1', 'A', { lab_need: 'MUST' }), '문화관')).toMatchObject({ lab: 'MUST', building: '문화관', cells: {} })
+  })
+})
+
+describe('enrollment', () => {
+  test('accepts multiples of 5 only', () => {
+    expect(enrollmentError(30)).toBe('')
+    expect(enrollmentError(null)).toMatch(/적어 주세요/)
+    expect(enrollmentError(28)).toMatch(/5명 단위/)
+    expect(enrollmentError(0)).toMatch(/1명 이상/)
+    expect(enrollmentError(Number.NaN)).toMatch(/1명 이상/)
+  })
+
+  test('parses the input box (blank = null)', () => {
+    expect(parseEnrollment('')).toBeNull()
+    expect(parseEnrollment(' 45 ')).toBe(45)
+  })
+
+  test('shows enrollment as a chip and compares it', () => {
+    expect(wishChips(wish('s1', { enrollment: 40 })).map(([t]) => t)).toContain('40명')
+    expect(wishEquals(wish('s1', { enrollment: 40 }), wish('s1', { enrollment: 45 }))).toBe(false)
+  })
+
+  test('ignores the server-only note status when comparing', () => {
+    expect(wishEquals(wish('s1', { note_status: 'PENDING' }), wish('s1'))).toBe(true)
+  })
+})
+
+describe('savedPairFor', () => {
+  test('finds the pair saved for these sections', () => {
+    const list = [sec('a', '알고리즘'), sec('b', '알고리즘')]
+    const pairs = [{ section_id: 'x', mode: 'CROSS' as const, order: ['x', 'y'] }, { section_id: 'b', mode: 'BACK_TO_BACK' as const, order: ['b', 'a'] }]
+    expect(savedPairFor(pairs, list)?.order).toEqual(['b', 'a'])
+    expect(savedPairFor([pairs[0]], list)).toBeUndefined()
   })
 })

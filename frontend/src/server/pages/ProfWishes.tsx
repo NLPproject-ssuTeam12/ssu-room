@@ -1,12 +1,14 @@
 // 교수: 희망 입력 (서버 POST /wishes, POST /wishes/pair)
 import { useState } from 'react'
-import type { LabNeed, PairMode, Section, SingleDay, Wish } from '../../api/types'
+import type { LabNeed, PairMode, PairResponse, Section, SingleDay, Wish } from '../../api/types'
 import { Chip } from '../../components/common'
 import { toast } from '../../ui'
 import type { ServerData } from '../data'
 import { saveProfBuilding, savePair, saveWish } from '../data'
 import { CellLegend, PaintGrid } from '../CellGrid'
-import { emptyWish, multiSectionCourses, profBuilding, sectionTitle, wishChips, wishEquals } from '../wish'
+import {
+  ENROLLMENT_STEP, emptyWish, enrollmentError, multiSectionCourses, parseEnrollment, profBuilding, savedPairFor, sectionTitle, wishChips, wishEquals,
+} from '../wish'
 
 const errorText = (e: unknown): string => (e instanceof Error ? e.message : '저장하지 못했습니다.')
 
@@ -18,11 +20,12 @@ interface WishFormProps {
 }
 
 function WishForm({ section, saved, building, locked }: WishFormProps) {
-  const [draft, setDraft] = useState<Wish>(() => saved ?? emptyWish(section, building))
+  const [draft, setDraft] = useState<Wish>(() => (saved ? { ...saved, enrollment: saved.enrollment ?? section.enrollment } : emptyWish(section, building)))
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const toSave: Wish = { ...draft, building }
   const dirty = !wishEquals(saved, toSave)
+  const badEnrollment = enrollmentError(draft.enrollment)
   const update = (patch: Partial<Wish>) => setDraft((w) => ({ ...w, ...patch }))
   // 저장하는 동안 입력을 잠근다 (늦게 온 응답이 그사이 입력을 덮지 않게)
   const frozen = locked || busy
@@ -55,6 +58,12 @@ function WishForm({ section, saved, building, locked }: WishFormProps) {
         <div>
           <div className="row" style={{ gap: 14, alignItems: 'flex-end' }}>
             <div>
+              <label className="lbl" htmlFor={`enr-${section.id}`}>수강 인원</label>
+              <input id={`enr-${section.id}`} className="enr" type="number" inputMode="numeric" min={ENROLLMENT_STEP} step={ENROLLMENT_STEP}
+                value={draft.enrollment ?? ''} disabled={frozen} placeholder="예: 40" aria-describedby={`enr-help-${section.id}`}
+                onChange={(e) => update({ enrollment: parseEnrollment(e.target.value) })} /> 명
+            </div>
+            <div>
               <div className="lbl">실습실</div>
               <select aria-label="실습실" value={draft.lab} disabled={frozen} onChange={(e) => update({ lab: e.target.value as LabNeed })}>
                 <option value="NONE">필요 없음</option><option value="MUST">필요</option>
@@ -68,14 +77,21 @@ function WishForm({ section, saved, building, locked }: WishFormProps) {
               </select>
             </div>
           </div>
-          <div className="lbl">기타 요청 <span className="muted small">(위 칸으로 정할 수 없는 것만)</span></div>
+          <p id={`enr-help-${section.id}`} className={`small ${badEnrollment ? 'bad-text' : 'muted'}`} style={{ margin: '6px 0 0' }}>
+            {badEnrollment || `${ENROLLMENT_STEP}명 단위로 적습니다. 이 인원이 들어가는 강의실에만 배정합니다.`}
+          </p>
+          <div className="lbl">기타 요청 <span className="muted small">(위 칸으로 정할 수 없는 것만)</span>
+            {saved?.note.trim() && draft.note === saved.note && saved.note_status && (
+              <> <Chip k={saved.note_status === 'CONFIRMED' ? 'good' : ''}>{saved.note_status === 'CONFIRMED' ? '학과사무실 확인함' : '학과사무실 확인 전'}</Chip></>
+            )}
+          </div>
           <textarea value={draft.note} disabled={frozen} placeholder="예: 학기 중 두 번 대강이 필요합니다. 학과사무실에서 직접 확인합니다."
             onChange={(e) => update({ note: e.target.value })} />
           <div className="lbl">접수 내용</div>
           <div>{wishChips(toSave).map(([t, k]) => <Chip key={t} k={k}>{t}</Chip>)}</div>
           {!locked && (
             <div className="row" style={{ marginTop: 12 }}>
-              <button className="btn primary" disabled={!dirty || busy} onClick={onSave}>{busy ? '저장 중…' : '저장'}</button>
+              <button className="btn primary" disabled={!dirty || busy || !!badEnrollment} onClick={onSave}>{busy ? '저장 중…' : '저장'}</button>
               <span className="small muted">{dirty ? '저장하지 않은 변경이 있습니다.' : saved ? '저장했습니다.' : '아직 낸 희망이 없습니다.'}</span>
             </div>
           )}
@@ -138,22 +154,26 @@ const PAIR_TIP: Record<PairMode, string> = {
 }
 
 /** 같은 과목 분반 둘 이상: 연강·교차와 붙일 순서 (최대 두 분반) */
-function PairRow({ name, list, locked }: { name: string; list: Section[]; locked: boolean }) {
-  const [mode, setMode] = useState<PairMode>('NONE')
-  const [first, setFirst] = useState(list[0].id)
-  const [second, setSecond] = useState(list[1].id)
-  const [busy, setBusy] = useState(false)
-  const [savedText, setSavedText] = useState('')
-  const [error, setError] = useState('')
+function pairText(p: PairResponse, titleOf: (id: string) => string): string {
+  return p.mode === 'NONE' ? '따로 놓기로 저장함' : `${PAIR_LABEL[p.mode]} 저장함: ${p.order.map(titleOf).join(' → ')}`
+}
+
+function PairRow({ name, list, saved, locked }: { name: string; list: Section[]; saved: PairResponse | undefined; locked: boolean }) {
   const titleOf = (id: string) => sectionTitle(list.find((s) => s.id === id) ?? list[0])
+  const [mode, setMode] = useState<PairMode>(saved?.mode ?? 'NONE')
+  const [first, setFirst] = useState(saved?.order[0] ?? list[0].id)
+  const [second, setSecond] = useState(saved?.order[1] ?? list[1].id)
+  const [busy, setBusy] = useState(false)
+  const [savedText, setSavedText] = useState(saved ? pairText(saved, titleOf) : '')
+  const [error, setError] = useState('')
   const badOrder = mode !== 'NONE' && first === second
 
   const onSave = async () => {
     setBusy(true)
     setError('')
     try {
-      const r = await savePair({ section_id: list[0].id, mode, order: mode === 'NONE' ? undefined : [first, second] })
-      setSavedText(r.mode === 'NONE' ? '따로 놓기로 저장함' : `${PAIR_LABEL[r.mode]} 저장함: ${r.order.map(titleOf).join(' → ')}`)
+      const r = await savePair({ section_id: list[0].id, mode, order: mode === 'NONE' ? undefined : [first, second] }, list.map((s) => s.id))
+      setSavedText(pairText(r, titleOf))
     } catch (e: unknown) {
       setError(errorText(e))
     } finally {
@@ -206,8 +226,7 @@ export default function ProfWishes({ data, prof }: { data: ServerData; prof: str
       {pairs.length > 0 && (
         <div className="card">
           <h2>같은 과목 분반끼리</h2>
-          <p className="small muted" style={{ margin: '-4px 0 6px' }}>저장한 값은 아직 서버에서 다시 읽어 올 수 없어서, 새로 열면 &lsquo;따로 놓기&rsquo;로 보입니다.</p>
-          {pairs.map(([name, list]) => <PairRow key={name} name={name} list={list} locked={locked} />)}
+          {pairs.map(([name, list]) => <PairRow key={name} name={name} list={list} saved={savedPairFor(data.pairs, list)} locked={locked} />)}
         </div>
       )}
       {auto.map((s) => (
