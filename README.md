@@ -309,7 +309,7 @@ cp .env.example .env   # Windows: copy .env.example .env
 3. **데이터 넣기(시드):** 강의정보 엑셀 → DB(`ssuroom.db`)와 분반 대응표. 시연은 `--demo`
    ```bash
    python backend/tools/seed_db.py          # 실제 강의 목록 + 교수 가명 + 가상 희망(실제 강의 칸)
-   python backend/tools/seed_db.py --demo   # 시연용: 일부 분반의 가상 희망을 서로 겹치게 (조율 대상이 생김)
+   python backend/tools/seed_db.py --demo --blank-prof   # 시연용: 가상 희망 일부를 겹치게(조율 대상이 생김) + 교수 한 명의 희망을 비워 둠
    ```
 4. **서버 켜기 (DB 모드):** 배정은 하윤 엔진, 상태는 DB에 저장
    ```bash
@@ -333,11 +333,13 @@ API는 [docs/planning/API명세.md](docs/planning/API명세.md)를 본다.
 | `data/private/real/*.json` | 메모리 모드·평가용 가명 데이터, 시드가 만든 분반 대응표 `section_map.json` |
 
 시연 데이터는 **실제 강의 목록 + 교수 가명 + 가상 희망**입니다. 희망은 실제 강의 칸을 희망으로 넣은 가상 값이고, `--demo`는 그중 일부를 시연용으로 겹치게 바꾼 값입니다(바꾼 분반은 출력과 `section_map.json`의 `demo_changed`에 남음). 화면·발표에서 가상 데이터임을 표시합니다.
+수강 인원은 화면이 5명 단위로 받으므로 시드가 엑셀 수강인원을 5명 단위로 반올림해 넣습니다(22→20, 23→25, 원래 값은 대응표 `enrollment_orig`). `--blank-prof`로 희망을 비운 교수는 대응표 `blank_prof`에 남습니다.
 
 ## 시연 준비
 
 - **노트북 2대:** 조교 화면(서버를 켠 노트북)과 교수 화면(같은 서버 주소로 접속). 교수 답장은 시스템 안에서만 받는다
-- **준비:** `python backend/tools/seed_db.py --demo` → 서버를 DB 모드로 켬. 2026-2 엑셀 기준 초안이 약 10초, 조율 대상 OPEN 5·HOLD 2·NO_OPTION 1 (11/25 측정)
+- **준비:** `python backend/tools/seed_db.py --demo --blank-prof` → 서버를 DB 모드로 켬. 2026-2 엑셀 기준 초안이 약 25~30초, 조율 대상 OPEN 5·HOLD 2·NO_OPTION 1 (11/27 측정). 시드 끝에 "희망 비운 교수: 교수NN (분반 …)"이 나온다
+- **희망 수집부터:** 희망 비운 교수로 시연을 시작 → 교수 화면에서 희망 칸·인원·분반 연강을 입력 → 조교 화면에서 희망 확인 → 초안
 - **언어 모델 켜기:** `.env`에 `GEMINI_API_KEY=…`, 서버 켜기 전에 Windows `set SSUROOM_NLP=llm` / macOS·Linux `export SSUROOM_NLP=llm`. `GET /health`의 `nlp`가 `llm`, `gemini_key`가 `true`인지 확인
 - **순서:**
   1. 초안 만들기 → 시간표와 조율 대상(못 놓음·어긋남·일부 어긋남·대안 없음) 확인
