@@ -178,3 +178,82 @@ def test_demo_makes_overlaps(tmp_path):
     assert {k: (v.get("course_id"), v.get("section_no"), v["enrollment"]) for k, v in mp["sections"].items()} == \
         {k: (v.get("course_id"), v.get("section_no"), v["enrollment"]) for k, v in base[1]["sections"].items()}
     assert out["real_name_hits"] == 0
+
+
+# ---------- 11/27: 수강 인원 5명 단위 반올림, 희망 비운 교수 ----------
+
+@pytest.mark.parametrize("n,want", [(22, 20), (23, 25), (28, 30), (3, 5), (0, 5), (45, 45), (None, None)])
+def test_round5(n, want):
+    assert sd.round5(n) == want
+
+
+def _seed(tmp_path, **kw):
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    x = fake_xlsx(tmp_path / "fake.xlsx")
+    (tmp_path / "rooms.json").write_text(json.dumps(ROOMS, ensure_ascii=False), encoding="utf-8")
+    (tmp_path / "fixed.json").write_text(json.dumps(FIXED, ensure_ascii=False), encoding="utf-8")
+    out = sd.seed(x, tmp_path / "t.db", tmp_path / "map.json", tmp_path / "alias.json", tmp_path / "rooms.json",
+                  tmp_path / "fixed.json", **kw)
+    con = sqlite3.connect(tmp_path / "t.db")
+    mp = json.loads((tmp_path / "map.json").read_text(encoding="utf-8"))
+    alias = json.loads((tmp_path / "alias.json").read_text(encoding="utf-8"))
+    return out, con, mp, alias
+
+
+def test_enrollment_orig_kept(tmp_path):
+    out, con, mp, _ = _seed(tmp_path)
+    for v in mp["sections"].values():
+        assert v["enrollment"] == sd.round5(v["enrollment_orig"])
+    assert out["rounded"] == 0 and out["blank_prof"] is None and mp["blank_prof"] is None
+
+
+def test_blank_prof_auto(tmp_path):
+    out, con, mp, alias = _seed(tmp_path, blank_prof="")
+    bp = out["blank_prof"]
+    assert bp["professor"] == alias[FAKE_A]                       # 같은 과목(자료구조) 분반 둘, MANUAL 없음
+    assert mp["blank_prof"] == bp and sorted(bp["sections"]) == ["2150000102", "2150000105-(공통-재수강)"]
+    pid = con.execute("SELECT id FROM user WHERE name=?", (bp["professor"],)).fetchone()[0]
+    assert con.execute("SELECT COUNT(*) FROM course_response WHERE professor_id=?", (pid,)).fetchone()[0] == 0
+    assert con.execute("SELECT COUNT(*) FROM professor_building_pref WHERE professor_id=?", (pid,)).fetchone()[0] == 0
+    rows = con.execute("SELECT section_no, enrollment FROM course_section WHERE professor_id=? ORDER BY 1", (pid,)).fetchall()
+    assert rows == [(1, None), (2, None)]                         # 분반·담당은 남고 인원만 비움
+    assert con.execute("SELECT status FROM round_invite WHERE professor_id=?", (pid,)).fetchone()[0] == "PENDING"
+    assert all(mp["sections"][s]["enrollment"] is None for s in bp["sections"])
+    # 다른 교수는 그대로
+    other = con.execute("SELECT id FROM user WHERE name=?", (alias[FAKE_B],)).fetchone()[0]
+    assert con.execute("SELECT COUNT(*) FROM course_response WHERE professor_id=?", (other,)).fetchone()[0] == 1
+    assert con.execute("SELECT enrollment FROM course_section WHERE professor_id=?", (other,)).fetchone()[0] == 30
+    assert out["real_name_hits"] == 0
+
+
+def test_blank_prof_by_alias_and_errors(tmp_path):
+    _, _, _, alias = _seed(tmp_path / "a")
+    out, con, mp, _ = _seed(tmp_path / "b", blank_prof=alias[FAKE_B])
+    assert out["blank_prof"]["professor"] == alias[FAKE_B] and out["blank_prof"]["sections"] == ["2150000201"]
+    with pytest.raises(ValueError, match="가명이 없습니다"):
+        _seed(tmp_path / "c", blank_prof="교수99")
+    # --demo 가 같은 과목 분반 둘인 유일한 교수를 썼으면 자동 후보가 없다
+    with pytest.raises(ValueError, match="후보가 없습니다"):
+        _seed(tmp_path / "d", demo=True, blank_prof="")
+
+
+def test_estimated_capacity_follows_rounded_enrollment(tmp_path):
+    """rooms.json 정원이 추정치면 반올림한 인원(43→45)보다 작아지지 않는다. 추정이 아닌 정원은 그대로."""
+    x = tmp_path / "x.xlsx"
+    from openpyxl import Workbook
+    wb = Workbook()
+    ws = wb.active
+    ws.append(HEAD)
+    ws.append(row("2150000901", "가상", FAKE_A, f"월 09:00-10:15 (정보과학관 21303-{FAKE_A})\n수 09:00-10:15 (정보과학관 21303-{FAKE_A})", enroll=43))
+    ws.append(row("2150000902", "가상2", FAKE_B, f"화 09:00-10:15 (정보과학관 21304-{FAKE_B})\n목 09:00-10:15 (정보과학관 21304-{FAKE_B})", enroll=43))
+    wb.save(x)
+    rooms = [dict(id="정보과학관 21303", building="정보과학관", room_no="21303", capacity=43, is_lab=False, estimated=True),
+             dict(id="정보과학관 21304", building="정보과학관", room_no="21304", capacity=43, is_lab=False, estimated=False)]
+    (tmp_path / "rooms.json").write_text(json.dumps(rooms, ensure_ascii=False), encoding="utf-8")
+    (tmp_path / "fixed.json").write_text("[]", encoding="utf-8")
+    out = sd.seed(x, tmp_path / "t.db", tmp_path / "map.json", tmp_path / "alias.json", tmp_path / "rooms.json",
+                  tmp_path / "fixed.json")
+    mp = json.loads((tmp_path / "map.json").read_text(encoding="utf-8"))
+    assert mp["rooms"]["정보과학관 21303"]["capacity"] == 45          # 추정치 43 → 반올림 인원 45
+    assert mp["rooms"]["정보과학관 21304"]["capacity"] == 43          # 실제 정원은 그대로
+    assert out["over_capacity"] == ["2150000902"]                    # 실제 정원보다 커진 분반은 알려 준다

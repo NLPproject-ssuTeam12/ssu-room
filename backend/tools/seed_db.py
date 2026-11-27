@@ -20,6 +20,12 @@
 - 채플: data/private/real/fixed_blocks.json 의 채플(AI대학 대상) 칸 → 학년별 chapel_slot. 교양필수 고정 시간은 넣지 않는다.
 - 조교 계정 하나(user role TA, 이름 '조교')를 만든다(조교 결정 함수가 조교만 받음).
 - 전 학기(2026-1) 기록은 넣지 않는다: 엔진 load_history 는 전년도 같은 학기만 읽는다.
+- 수강 인원(11/27 팀 결정): 화면은 5명 단위로 받으므로 엑셀 수강인원을 가장 가까운 5의 배수로 반올림해 넣는다
+  (22→20, 23→25, 28→30, 최소 5). 엑셀 원래 값은 대응표에 enrollment_orig 로 남긴다. 추정 정원도 반올림한 인원 기준.
+- --blank-prof (기본 꺼짐, 11/27 팀 결정): 희망 수집 시연용으로 교수 한 명의 희망을 비워 둔다. 그 교수가 시연에서
+  화면으로 직접 입력한다. 값 없이 주면 자동으로 고르고(같은 과목 분반 둘 이상·MANUAL 분반 없음·--demo 가 바꾼
+  분반 없음, 가명 순 첫째), 가명을 주면 그 교수. 빼는 것: 분반 희망 응답·칠한 칸(실습실·주 1회 연강 포함)·희망 건물·
+  분반 인원(NULL). 남기는 것: 과목·분반·담당 교수(course_section)와 그 밖의 DB. --demo 다음에 적용한다.
 - --demo (기본 꺼짐): 시연용으로 일부 분반의 **가상 희망만** 서로 겹치게 바꾼다 (과목·분반·강의실·인원은 그대로).
   고정 난수 시드로 늘 같은 분반을 고른다. 바꾼 분반은 출력하고 대응표에 "demo_changed"(무엇을 바꿨는지)로 남긴다.
     겹침(MISMATCH → OPEN)  같은 교수의 다른 분반이 그 칸만 되게 막고, 이 분반은 그 칸만 희망 → 희망 칸을 하나도 못 받음
@@ -155,6 +161,13 @@ def shape_of(row: dict) -> Tuple[str, List[dict], str]:
     return "MANUAL", raw, f"주 2칸 모양이 아님 (수업 {len(ms)}번)"
 
 
+def round5(n: Optional[int]) -> Optional[int]:
+    """수강 인원 → 가장 가까운 5의 배수 (2.5 이상 올림), 최소 5. 22→20, 23→25, 28→30, 3→5. 없으면 None."""
+    if n is None:
+        return None
+    return max(5, int(n / 5 + 0.5) * 5)
+
+
 def make_aliases(rows: List[dict], old: Optional[Dict[str, str]] = None) -> Dict[str, str]:
     """실명 → 가명(교수01…). 이미 있는 대응은 그대로 두고 새 이름만 다음 번호로."""
     alias = dict(old or {})
@@ -185,7 +198,8 @@ def build_plan(rows: List[dict], alias: Dict[str, str], rooms_info: Dict[str, di
             section_id=section_id(r), code=r["code"], name=r["name"], division=r["division"],
             category_orig=r["category"], category=db_category(r["category"]), department=department_of(r["category"]),
             professor=alias.get(r["prof_real"]) if r["prof_real"] else None,
-            enrollment=r["enrollment"], year=r["year"], shape=shape, blocks=blocks, manual_reason=why or None,
+            enrollment=round5(r["enrollment"]), enrollment_orig=r["enrollment"],   # 5명 단위로 반올림 (11/27)
+            year=r["year"], shape=shape, blocks=blocks, manual_reason=why or None,
         ))
     ids = Counter(s["section_id"] for s in sections)
     dup = [k for k, v in ids.items() if v > 1]
@@ -207,7 +221,8 @@ def build_plan(rows: List[dict], alias: Dict[str, str], rooms_info: Dict[str, di
         for no, s in enumerate(secs, start=1):
             s.update(course_id=cid, section_no=no, orig_section_no=s["code"][-2:])
 
-    # 강의실: 엑셀에 나온 호수 (MANUAL 분반 포함)
+    # 강의실: 엑셀에 나온 호수 (MANUAL 분반 포함). 추정 정원은 반올림한 인원 기준 (반올림 때문에 원래 그 방을
+    # 쓰던 분반이 정원 초과가 되지 않게)
     used: Dict[str, List[int]] = defaultdict(list)
     for s in sections:
         for b in s["blocks"]:
@@ -220,6 +235,10 @@ def build_plan(rows: List[dict], alias: Dict[str, str], rooms_info: Dict[str, di
         est = cap is None or bool(info and info.get("estimated"))
         if cap is None:
             cap = max(5 * -(-max(used[rid]) // 5), 5)
+        elif est:
+            # rooms.json 정원도 추정치면, 그 방을 실제로 쓰는 분반의 (반올림한) 인원보다 작지 않게 (11/27:
+            # 반올림 때문에 원래 그 방을 쓰던 분반이 정원 초과가 되지 않게). 추정이 아닌 정원은 그대로 둔다
+            cap = max(cap, max(used[rid]))
         b, no = rid.split(" ", 1)
         rooms.append(dict(id=rid, building=b, room_no=no, capacity=cap, is_lab=rid in LABS, estimated=est))
 
@@ -302,6 +321,9 @@ def create_db(con, plan: dict, year: int = 2026, semester: str = "2", deadline: 
                   (rid, slot[(d, st)], kind))
     for p in sorted({w["professor"] for w in plan["wishes"]}):
         q("INSERT INTO round_invite(round_id, professor_id, status) VALUES (?,?, 'RESPONDED')", (rnd, user[p]))
+    if plan.get("blank_prof"):   # 희망을 비운 교수: 희망 입력 요청만 보낸 상태 (아직 응답 없음)
+        q("INSERT INTO round_invite(round_id, professor_id, status) VALUES (?,?, 'PENDING')",
+          (rnd, user[plan["blank_prof"]["professor"]]))
     for p, b in plan["building_pref"].items():
         q("INSERT INTO professor_building_pref(professor_id, building_id) VALUES (?,?)", (user[p], bld[b]))
     for ch in plan["chapel"]:
@@ -372,12 +394,48 @@ def apply_demo(plan: dict, seed: int = DEMO_SEED, counts: Optional[dict] = None)
     return changed
 
 
+def pick_blank_prof(plan: dict, given: Optional[str] = None) -> str:
+    """희망을 비워 둘 교수 (가명). given 이 있으면 그 교수(있는지 확인), 없으면 자동:
+    같은 과목에서 분반을 둘 이상 맡고(분반 연강·교차 시연용), MANUAL 분반이 없고, --demo 가 바꾼 분반(겹침 상대 포함)에
+    들어가지 않는 교수 중 가명 순 첫째."""
+    profs = {s["professor"] for s in plan["sections"] if s["professor"]}
+    if given:
+        if given not in profs:
+            raise ValueError(f"그런 교수 가명이 없습니다: {given}")
+        return given
+    changed = set(plan.get("demo_changed", {}))
+    cands = []
+    for p in sorted(profs):
+        mine = [s for s in plan["sections"] if s["professor"] == p]
+        if any(s["shape"] == "MANUAL" for s in mine) or any(s["section_id"] in changed for s in mine):
+            continue
+        per_course = Counter(s["course_id"] for s in mine)
+        if per_course and max(per_course.values()) >= 2:
+            cands.append(p)
+    if not cands:
+        raise ValueError("희망을 비워 둘 교수 후보가 없습니다 (같은 과목 분반 둘 이상·MANUAL 없음·--demo 분반 아님)")
+    return cands[0]
+
+
+def apply_blank_prof(plan: dict, prof: str) -> List[str]:
+    """그 교수의 희망을 비운다: 분반 응답(칠한 칸·실습실·주 1회 연강) 없음, 희망 건물 없음, 분반 인원 NULL.
+    과목·분반·담당 교수는 그대로. -> 비운 분반 id (과목 코드 순)."""
+    secs = sorted((s for s in plan["sections"] if s["professor"] == prof and s["shape"] != "MANUAL"),
+                  key=lambda s: s["code"])
+    ids = {s["section_id"] for s in secs}
+    plan["wishes"] = [w for w in plan["wishes"] if w["section_id"] not in ids]
+    plan["building_pref"].pop(prof, None)
+    for s in secs:
+        s["enrollment"] = None
+    return [s["section_id"] for s in secs]
+
+
 def section_map(plan: dict, ids: dict, db_path: str) -> dict:
     """서버 분반 id → 분반 정보. DB에 넣은 분반은 course_id·section_no, MANUAL은 "manual": true 와 칸."""
     secs = {}
     for s in plan["sections"]:
         e = {k: s[k] for k in ("code", "name", "division", "category_orig", "category", "professor", "enrollment",
-                               "year", "shape")}
+                               "enrollment_orig", "year", "shape")}
         if s["shape"] == "MANUAL":
             e.update(manual=True, manual_reason=s["manual_reason"], blocks=s["blocks"])
         else:
@@ -392,7 +450,9 @@ def section_map(plan: dict, ids: dict, db_path: str) -> dict:
         "sections": secs,
         "rooms": {r["id"]: dict(room_id=ids["rooms"][r["id"]], capacity=r["capacity"], is_lab=r["is_lab"],
                                 estimated=r["estimated"]) for r in plan["rooms"]},
-        "note": "가명 데이터. 희망은 실제 강의 칸으로 만든 가상 값. 교양필수 고정 시간은 넣지 않음.",
+        "note": "가명 데이터. 희망은 실제 강의 칸으로 만든 가상 값. 교양필수 고정 시간은 넣지 않음. "
+                "수강 인원은 5명 단위로 반올림(원래 값 enrollment_orig).",
+        "blank_prof": plan.get("blank_prof"),    # 희망을 비워 둔 교수 {professor, sections} 또는 None
     }
 
 
@@ -434,7 +494,8 @@ def counts(con, plan: dict) -> List[Tuple[str, int]]:
 
 
 def seed(xlsx: Path, db_path: Path, map_path: Path, alias_path: Path, rooms_json: Path, fixed_json: Path,
-         year: int = 2026, semester: str = "2", demo: bool = False) -> dict:
+         year: int = 2026, semester: str = "2", demo: bool = False, blank_prof: Optional[str] = None) -> dict:
+    """blank_prof: None = 끔, "" = 자동으로 고름, 가명 = 그 교수. --demo 다음에 적용한다."""
     rows = read_excel(xlsx)
     old = json.loads(alias_path.read_text(encoding="utf-8")) if alias_path.exists() else {}
     alias = make_aliases(rows, old)
@@ -442,6 +503,10 @@ def seed(xlsx: Path, db_path: Path, map_path: Path, alias_path: Path, rooms_json
     fixed = json.loads(fixed_json.read_text(encoding="utf-8")) if fixed_json.exists() else []
     plan = build_plan(rows, alias, rooms_info, fixed)
     plan["demo_changed"] = apply_demo(plan) if demo else {}
+    plan["blank_prof"] = None
+    if blank_prof is not None:
+        who = pick_blank_prof(plan, blank_prof or None)
+        plan["blank_prof"] = dict(professor=who, sections=apply_blank_prof(plan, who))
     if db_path.exists():
         db_path.unlink()
     con = sqlite3.connect(db_path)
@@ -458,8 +523,18 @@ def seed(xlsx: Path, db_path: Path, map_path: Path, alias_path: Path, rooms_json
     con.close()
     manual = Counter(s["manual_reason"] for s in plan["sections"] if s["shape"] == "MANUAL")
     return dict(counts=table, real_name_hits=hits, manual_reasons=manual, term_id=ids["term_id"],
-                demo_changed=plan["demo_changed"],
+                demo_changed=plan["demo_changed"], blank_prof=plan["blank_prof"],
+                rounded=sum(1 for s in plan["sections"] if s["enrollment_orig"] is not None
+                            and s["enrollment_orig"] != round5(s["enrollment_orig"])),
+                over_capacity=over_capacity(plan),
                 round_id=ids["round_id"])
+
+
+def over_capacity(plan: dict) -> List[str]:
+    """반올림한 인원이 지금 쓰는 강의실 정원보다 많은 분반 (엑셀 강의실 기준, MANUAL 제외)."""
+    cap = {r["id"]: r["capacity"] for r in plan["rooms"]}
+    return sorted(s["section_id"] for s in plan["sections"] if s["shape"] != "MANUAL" and s["enrollment"]
+                  and any(b["room"] and cap.get(b["room"]) and s["enrollment"] > cap[b["room"]] for b in s["blocks"]))
 
 
 def main() -> None:
@@ -473,8 +548,11 @@ def main() -> None:
     ap.add_argument("--year", type=int, default=2026)
     ap.add_argument("--semester", default="2")
     ap.add_argument("--demo", action="store_true", help="시연용: 일부 분반의 가상 희망을 서로 겹치게 (기본 꺼짐)")
+    ap.add_argument("--blank-prof", nargs="?", const="", default=None, metavar="가명",
+                    help="희망 수집 시연용: 교수 한 명의 희망을 비워 둠. 값 없이 주면 자동 선택 (기본 꺼짐)")
     a = ap.parse_args()
-    out = seed(a.xlsx, a.db, a.map, a.alias, a.rooms, a.fixed, a.year, a.semester, demo=a.demo)
+    out = seed(a.xlsx, a.db, a.map, a.alias, a.rooms, a.fixed, a.year, a.semester, demo=a.demo,
+               blank_prof=a.blank_prof)
     print(f"DB: {a.db}  (term {out['term_id']}, round {out['round_id']})")
     for k, v in out["counts"]:
         print(f"{k:<24}{v}")
@@ -483,6 +561,12 @@ def main() -> None:
         print(f"시연용 겹침(--demo): 가상 희망을 바꾼 분반 {len(out['demo_changed'])}개 (희망은 실제 값이 아닌 가상)")
         for sid, what in out["demo_changed"].items():
             print(f"  {sid}: {what}")
+    print(f"수강 인원 5명 단위 반올림으로 바뀐 분반: {out['rounded']}개 (원래 값은 대응표 enrollment_orig)")
+    if out["over_capacity"]:
+        print(f"  주의: 반올림한 인원이 엑셀 강의실 정원보다 많은 분반 {len(out['over_capacity'])}개: {out['over_capacity']}")
+    if out["blank_prof"]:
+        bp = out["blank_prof"]
+        print(f"희망 비운 교수: {bp['professor']} ({', '.join(bp['sections'])})")
     print(f"실명 검색(DB·대응표·출력): {out['real_name_hits']}건")
     print("교양필수 고정 시간은 넣지 않음. 전 학기(2026-1)는 엔진이 읽지 않아(전년도 같은 학기만) 넣지 않음.")
 
