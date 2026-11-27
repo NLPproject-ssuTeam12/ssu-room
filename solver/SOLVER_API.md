@@ -101,7 +101,8 @@ dict(stage="다른 수업은 그대로" | "같은 교수·같은 학년 필수�
 | 항목 | 값 |
 |---|---|
 | 분반 수강 인원 `course_section.enrollment` | 정수(>0) 또는 NULL(미정). 정원이 더 작은 강의실은 후보에서 뺌 |
-| 희망 건물 `professor_building_pref.building_id` | 교수당 하나. 그 밖의 건물은 벌점(`building_other`) |
+| 희망 건물 `professor_building_pref.building_id` | 교수가 학기(`term_id`)마다 하나. 그 밖의 건물은 벌점(`building_other`). 그 학기에 켜진 강의실이 없는 건물이면 무시 |
+| 학기 강의실 `term_room` | 그 학기에 켠 강의실만 배정 후보(012). 꺼진 방에 이미 놓인 고정·비해제 분반은 그대로, `check_timetable` 규칙 `꺼진 강의실` |
 | 실습실 `course_response.lab_requirement` (분반마다) | `MUST` 필요(실습실만 배정) / `NONE` 필요 없음 (필수 입력, 010에서 1/0을 이름으로) |
 | 칠한 칸 `response_slot.kind` | `PREFER` 희망 / `BLOCK` 불가. 칠하지 않은 칸은 상관없음 |
 | 주 1회 연강 `course_response.single_day_pref` (분반마다) | `MUST` 하루에 연속 2칸 / `NONE` 1칸씩 이틀 (필수 입력. `PREFER`는 11/24에 없앰) |

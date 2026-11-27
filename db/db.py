@@ -764,3 +764,468 @@ def set_hire_year(con, professor_id, year):
     except Exception:
         con.rollback()
         raise
+
+
+
+# ---------------------------------------------------------------- 건물·강의실과 학기별 켜기 (11/27, 012)
+# 조교가 건물·강의실을 넣고, 학기마다 배정에 쓸 강의실을 켜고 끈다(term_room). 건물은 따로 켜지 않는다:
+# 켜진 강의실이 하나라도 있는 건물이 그 학기에 교수가 희망 건물로 고를 수 있는 건물이다.
+# 강의실 필수 입력: 건물·호수·정원·실습실 여부. 학과 전용(reserved_department_id)은 선택.
+# 새 강의실은 확정 전 모든 학기에 켜지고, 새 학기는 바로 전 학기 설정을 이어받는다(DB 트리거).
+ROOM_CAPACITY_MAX = 500
+_KEEP = object()                                        # update_room: 바꾸지 않는 칸
+
+
+def _term_phase(con, term_id):
+    row = con.execute("SELECT phase FROM term WHERE id=?", (term_id,)).fetchone()
+    if row is None:
+        raise ValueError(f"없는 학기입니다: {term_id}")
+    return row[0]
+
+
+def _name(value, what):
+    if isinstance(value, int) and not isinstance(value, bool):
+        value = str(value)                              # 호수 21304 처럼 숫자로 와도 받는다
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{what}을(를) 넣어야 합니다")
+    return value.strip()
+
+
+def _capacity(value):
+    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= ROOM_CAPACITY_MAX:
+        raise ValueError(f"정원은 1~{ROOM_CAPACITY_MAX} 사이 정수여야 합니다: {value!r}")
+    return value
+
+
+def _lab_flag(value):
+    if isinstance(value, bool) or value in (0, 1):
+        return int(value)
+    raise ValueError(f"실습실 여부는 예/아니오(True/False 또는 1/0)로 넣어야 합니다: {value!r}")
+
+
+def _department(con, department_id):
+    if department_id is not None and con.execute("SELECT 1 FROM department WHERE id=?", (department_id,)).fetchone() is None:
+        raise ValueError(f"없는 학과입니다: {department_id}")
+    return department_id
+
+
+def _building(con, building_id):
+    if con.execute("SELECT 1 FROM building WHERE id=?", (building_id,)).fetchone() is None:
+        raise ValueError(f"없는 건물입니다: {building_id}")
+
+
+def _room(con, room_id):
+    row = con.execute("SELECT building_id FROM room WHERE id=?", (room_id,)).fetchone()
+    if row is None:
+        raise ValueError(f"없는 강의실입니다: {room_id}")
+    return row[0]
+
+
+def add_building(con, user_id, name):
+    """건물을 넣는다. -> 건물 id. 이름이 같은 건물이 있으면 ValueError."""
+    try:
+        _ta(con, user_id, "건물을 넣을 수 있습니다")
+        name = _name(name, "건물 이름")
+        if con.execute("SELECT 1 FROM building WHERE name=?", (name,)).fetchone():
+            raise ValueError(f"이미 있는 건물입니다: {name}")
+        bid = con.execute("INSERT INTO building(name) VALUES (?)", (name,)).lastrowid
+        con.commit()
+        return bid
+    except Exception:
+        con.rollback()
+        raise
+
+
+def rename_building(con, user_id, building_id, name):
+    try:
+        _ta(con, user_id, "건물 이름을 바꿀 수 있습니다")
+        name = _name(name, "건물 이름")
+        _building(con, building_id)
+        if con.execute("SELECT 1 FROM building WHERE name=? AND id<>?", (name, building_id)).fetchone():
+            raise ValueError(f"이미 있는 건물입니다: {name}")
+        con.execute("UPDATE building SET name=? WHERE id=?", (name, building_id))
+        con.commit()
+    except Exception:
+        con.rollback()
+        raise
+
+
+def delete_building(con, user_id, building_id):
+    """강의실이 하나도 없고 희망 건물로 고른 교수도 없는 건물만 지운다. 아니면 ValueError (강의실을 꺼서 쓰지 않게 한다)."""
+    try:
+        _ta(con, user_id, "건물을 지울 수 있습니다")
+        _building(con, building_id)
+        if con.execute("SELECT 1 FROM room WHERE building_id=?", (building_id,)).fetchone():
+            raise ValueError(f"강의실이 있는 건물은 지울 수 없습니다: 건물 {building_id} (강의실을 끄세요)")
+        if con.execute("SELECT 1 FROM professor_building_pref WHERE building_id=?", (building_id,)).fetchone():
+            raise ValueError(f"희망 건물로 고른 교수가 있어 지울 수 없습니다: 건물 {building_id}")
+        con.execute("DELETE FROM building WHERE id=?", (building_id,))
+        con.commit()
+    except Exception:
+        con.rollback()
+        raise
+
+
+def add_room(con, user_id, building_id, room_no, capacity, is_lab, reserved_department_id=None):
+    """강의실을 넣는다 (건물·호수·정원·실습실 여부 필수). -> 강의실 id.
+    확정 전 모든 학기에 켜진 채로 들어간다(트리거 trg_room_on). 실습실은 좌석·PC 수를 정원으로 넣는다."""
+    try:
+        _ta(con, user_id, "강의실을 넣을 수 있습니다")
+        _building(con, building_id)
+        room_no = _name(room_no, "호수")
+        cap, lab = _capacity(capacity), _lab_flag(is_lab)
+        _department(con, reserved_department_id)
+        if con.execute("SELECT 1 FROM room WHERE building_id=? AND room_no=?", (building_id, room_no)).fetchone():
+            raise ValueError(f"그 건물에 이미 있는 호수입니다: {room_no}")
+        rid = con.execute("""INSERT INTO room(building_id, room_no, capacity, is_lab, reserved_department_id)
+                             VALUES (?,?,?,?,?)""", (building_id, room_no, cap, lab, reserved_department_id)).lastrowid
+        con.commit()
+        return rid
+    except Exception:
+        con.rollback()
+        raise
+
+
+def update_room(con, user_id, room_id, *, room_no=_KEEP, capacity=_KEEP, is_lab=_KEEP, reserved_department_id=_KEEP):
+    """강의실의 호수·정원·실습실 여부·학과 전용을 고친다(넘긴 것만). 이미 만든 시간표는 그대로이고,
+    바뀐 값 때문에 생긴 규칙 위반은 배정 엔진 check_timetable 이 경고한다(엔진이 알아서 옮기지 않음)."""
+    try:
+        _ta(con, user_id, "강의실을 고칠 수 있습니다")
+        bld = _room(con, room_id)
+        sets = {}
+        if room_no is not _KEEP:
+            sets["room_no"] = _name(room_no, "호수")
+            if con.execute("SELECT 1 FROM room WHERE building_id=? AND room_no=? AND id<>?",
+                           (bld, sets["room_no"], room_id)).fetchone():
+                raise ValueError(f"그 건물에 이미 있는 호수입니다: {sets['room_no']}")
+        if capacity is not _KEEP:
+            sets["capacity"] = _capacity(capacity)
+        if is_lab is not _KEEP:
+            sets["is_lab"] = _lab_flag(is_lab)
+        if reserved_department_id is not _KEEP:
+            sets["reserved_department_id"] = _department(con, reserved_department_id)
+        if sets:
+            con.execute("UPDATE room SET " + ", ".join(k + "=?" for k in sets) + " WHERE id=?", (*sets.values(), room_id))
+        con.commit()
+    except Exception:
+        con.rollback()
+        raise
+
+
+def delete_room(con, user_id, room_id):
+    """한 번도 쓰이지 않은 강의실만 지운다(시간표·대안에 없음). 쓰인 적 있으면 ValueError → 학기에서 끈다(set_room_enabled)."""
+    try:
+        _ta(con, user_id, "강의실을 지울 수 있습니다")
+        _room(con, room_id)
+        if (con.execute("SELECT 1 FROM assignment WHERE room_id=? LIMIT 1", (room_id,)).fetchone()
+                or con.execute("SELECT 1 FROM proposal_option_slot WHERE room_id=? LIMIT 1", (room_id,)).fetchone()):
+            raise ValueError(f"시간표나 대안에 쓰인 강의실은 지울 수 없습니다: 강의실 {room_id} (학기에서 끄세요)")
+        con.execute("DELETE FROM term_room WHERE room_id=?", (room_id,))
+        con.execute("DELETE FROM room WHERE id=?", (room_id,))
+        con.commit()
+    except Exception:
+        con.rollback()
+        raise
+
+
+def _editable_term(con, term_id):
+    if _term_phase(con, term_id) == "FINAL":
+        raise ValueError(f"확정된 학기의 강의실은 바꿀 수 없습니다: 학기 {term_id}")
+
+
+def _set_rooms(con, term_id, room_ids, on):
+    """-> 실제로 바뀐 강의실 수"""
+    n = 0
+    for r in room_ids:
+        if on:
+            n += con.execute("INSERT OR IGNORE INTO term_room(term_id, room_id) VALUES (?,?)", (term_id, r)).rowcount
+        else:
+            n += con.execute("DELETE FROM term_room WHERE term_id=? AND room_id=?", (term_id, r)).rowcount
+    return n
+
+
+def set_room_enabled(con, user_id, term_id, room_id, on):
+    """그 학기에 이 강의실을 배정에 쓸지(켜기/끄기). 끈 뒤 이미 그 방에 놓인 분반은 check_timetable 이 경고한다."""
+    try:
+        _ta(con, user_id, "강의실을 켜고 끌 수 있습니다")
+        _editable_term(con, term_id)
+        _room(con, room_id)
+        _set_rooms(con, term_id, [room_id], on)
+        con.commit()
+    except Exception:
+        con.rollback()
+        raise
+
+
+def set_building_enabled(con, user_id, term_id, building_id, on):
+    """그 건물의 강의실을 모두 켜거나 끈다. -> 실제로 바뀐 강의실 수"""
+    try:
+        _ta(con, user_id, "건물을 켜고 끌 수 있습니다")
+        _editable_term(con, term_id)
+        _building(con, building_id)
+        ids = [r for (r,) in con.execute("SELECT id FROM room WHERE building_id=?", (building_id,))]
+        n = _set_rooms(con, term_id, ids, on)
+        con.commit()
+        return n
+    except Exception:
+        con.rollback()
+        raise
+
+
+def term_rooms(con, term_id):
+    """조교 화면용: 모든 강의실과 그 학기에 켜졌는지.
+    -> [dict(room_id, building_id, building, room_no, capacity, is_lab, reserved_department_id, on)]"""
+    _term_phase(con, term_id)
+    cols = ("room_id", "building_id", "building", "room_no", "capacity", "is_lab", "reserved_department_id", "on")
+    return [dict(zip(cols, r)) for r in con.execute(
+        """SELECT r.id, b.id, b.name, r.room_no, r.capacity, r.is_lab, r.reserved_department_id,
+                  EXISTS (SELECT 1 FROM term_room tr WHERE tr.term_id=? AND tr.room_id=r.id)
+           FROM room r JOIN building b ON b.id=r.building_id ORDER BY b.name, r.room_no""", (term_id,))]
+
+
+def selectable_buildings(con, term_id):
+    """그 학기에 교수가 희망 건물로 고를 수 있는 건물(켜진 강의실이 하나라도 있는 건물). -> [(건물 id, 이름)]"""
+    _term_phase(con, term_id)
+    return con.execute("""SELECT b.id, b.name FROM building b WHERE EXISTS (
+                              SELECT 1 FROM room r JOIN term_room tr ON tr.room_id=r.id AND tr.term_id=? WHERE r.building_id=b.id)
+                          ORDER BY b.name""", (term_id,)).fetchall()
+
+
+def set_building_pref(con, term_id, professor_id, building_id):
+    """교수가 그 학기 희망 건물을 고른다(하나). None 이면 상관없음(지움). 그 학기에 고를 수 없는 건물이면 ValueError."""
+    try:
+        _term_phase(con, term_id)
+        u = con.execute("SELECT role FROM user WHERE id=?", (professor_id,)).fetchone()
+        if u is None or u[0] != "PROF":
+            raise ValueError(f"교수가 아닙니다: 사용자 {professor_id}")
+        if building_id is not None and building_id not in {b for b, _ in selectable_buildings(con, term_id)}:
+            raise ValueError(f"이번 학기에 고를 수 없는 건물입니다: 건물 {building_id} (조교가 켠 강의실이 없음)")
+        con.execute("DELETE FROM professor_building_pref WHERE term_id=? AND professor_id=?", (term_id, professor_id))
+        if building_id is not None:
+            con.execute("INSERT INTO professor_building_pref(term_id, professor_id, building_id) VALUES (?,?,?)",
+                        (term_id, professor_id, building_id))
+        con.commit()
+    except Exception:
+        con.rollback()
+        raise
+
+
+def building_pref(con, term_id, professor_id):
+    """교수의 그 학기 희망 건물 id (없으면 None)"""
+    row = con.execute("SELECT building_id FROM professor_building_pref WHERE term_id=? AND professor_id=?",
+                      (term_id, professor_id)).fetchone()
+    return row[0] if row else None
+
+
+def stale_building_prefs(con, term_id):
+    """고른 뒤 조교가 그 건물 강의실을 모두 꺼서 쓸 수 없게 된 희망 건물. 배정 엔진은 이 희망을 무시한다. -> [(교수 id, 건물 id)]"""
+    ok = {b for b, _ in selectable_buildings(con, term_id)}
+    return [(p, b) for p, b in con.execute(
+        "SELECT professor_id, building_id FROM professor_building_pref WHERE term_id=? ORDER BY professor_id", (term_id,))
+        if b not in ok]
+
+
+# ---------------------------------------------------------------- 교수·과목·분반 지정과 희망 입력 요청 (11/27, 012)
+# 조교가 교수를 넣고, 과목마다 분반 수와 분반별 담당 교수를 정한 뒤, 분반이 있는 교수에게 희망 입력을 요청한다(round_invite).
+# 배정 엔진은 course_section 의 담당 교수를 그대로 읽고, 응답이 없는 분반은 미회신으로 다룬다(엔진 변경 없음).
+def add_professor(con, user_id, name, department_id=None, hire_year=None, email=None):
+    """교수 계정을 넣는다. -> 사용자 id. 비밀번호는 비워 두고(password_hash='') 로그인 방식은 서버가 정한다."""
+    try:
+        _ta(con, user_id, "교수를 넣을 수 있습니다")
+        name = _name(name, "교수 이름")
+        _department(con, department_id)
+        if hire_year is not None and (isinstance(hire_year, bool) or not isinstance(hire_year, int)
+                                      or not 1950 <= hire_year <= 2100):
+            raise ValueError(f"임용 연도는 1950~2100 사이 정수여야 합니다: {hire_year}")
+        pid = con.execute("""INSERT INTO user(role, name, email, department_id, password_hash, hire_year)
+                             VALUES ('PROF',?,?,?,'',?)""", (name, email, department_id, hire_year)).lastrowid
+        con.commit()
+        return pid
+    except Exception:
+        con.rollback()
+        raise
+
+
+def _section_rows(con, sections):
+    """sections: [교수 id | (교수 id, 인원) | dict(professor_id, enrollment)] -> [(교수 id, 인원)]"""
+    if not sections:
+        raise ValueError("분반을 하나 이상 넣어야 합니다")
+    out = []
+    for i, s in enumerate(sections, 1):
+        if isinstance(s, dict):
+            prof, enr = s.get("professor_id"), s.get("enrollment")
+        elif isinstance(s, (tuple, list)):
+            prof, enr = (list(s) + [None])[:2]
+        else:
+            prof, enr = s, None
+        u = con.execute("SELECT role FROM user WHERE id=?", (prof,)).fetchone()
+        if u is None or u[0] != "PROF":
+            raise ValueError(f"{i}분반 담당이 교수가 아닙니다: 사용자 {prof}")
+        if enr is not None and (isinstance(enr, bool) or not isinstance(enr, int) or enr <= 0):
+            raise ValueError(f"{i}분반 인원은 1 이상 정수여야 합니다: {enr!r}")
+        out.append((prof, enr))
+    return out
+
+
+def _collecting(con, term_id, what):
+    phase = _term_phase(con, term_id)
+    if phase != "COLLECTING":
+        raise ValueError(f"희망 수집 단계에서만 {what}: 지금 '{PHASE_LABELS.get(phase, phase)}'")
+
+
+def add_course(con, user_id, term_id, name, sections, *, department_id=None, code=None, category=None,
+               target_year=None, session_count=2, slots_per_session=1):
+    """과목과 분반을 넣는다(희망 수집 단계). sections = 분반 순서대로 [교수 id 또는 (교수 id, 인원)], 분반 번호는 1부터.
+    category 는 '전공필수'·'전공선택'·'교양필수' 같은 이수구분, target_year 는 학년('1'~'4'). -> 과목 id"""
+    try:
+        _ta(con, user_id, "과목을 넣을 수 있습니다")
+        _collecting(con, term_id, "과목을 넣을 수 있습니다")
+        name = _name(name, "과목 이름")
+        _department(con, department_id)
+        rows = _section_rows(con, sections)
+        for v, what in ((session_count, "주당 수업 횟수"), (slots_per_session, "한 번 수업 칸 수")):
+            if isinstance(v, bool) or not isinstance(v, int) or v < 1:
+                raise ValueError(f"{what}는 1 이상 정수여야 합니다: {v!r}")
+        year = None if target_year is None else _name(target_year, "학년")
+        cid = con.execute("""INSERT INTO course(term_id, department_id, code, name, professor_id, category, target_year,
+                                                session_count, slots_per_session) VALUES (?,?,?,?,?,?,?,?,?)""",
+                          (term_id, department_id, code, name, rows[0][0], category, year,
+                           session_count, slots_per_session)).lastrowid
+        con.executemany("INSERT INTO course_section(course_id, section_no, professor_id, enrollment) VALUES (?,?,?,?)",
+                        [(cid, i, p, e) for i, (p, e) in enumerate(rows, 1)])
+        con.commit()
+        return cid
+    except Exception:
+        con.rollback()
+        raise
+
+
+def set_sections(con, user_id, course_id, sections, force=False):
+    """과목의 분반 수와 분반별 담당 교수·인원을 다시 정한다(희망 수집 단계). 분반 번호는 1부터 빈틈없이.
+    없어지거나 담당이 바뀌는 분반에 이미 낸 희망 입력이 있으면 ValueError (force=True 면 바꾸고, 그 응답은 엔진이 읽지 않게 됨).
+    -> 응답이 있었는데 없어지거나 담당이 바뀐 분반 번호 목록"""
+    try:
+        _ta(con, user_id, "분반을 정할 수 있습니다")
+        row = con.execute("SELECT term_id FROM course WHERE id=?", (course_id,)).fetchone()
+        if row is None:
+            raise ValueError(f"없는 과목입니다: {course_id}")
+        _collecting(con, row[0], "분반을 바꿀 수 있습니다")
+        rows = _section_rows(con, sections)
+        old = dict(con.execute("SELECT section_no, professor_id FROM course_section WHERE course_id=?", (course_id,)).fetchall())
+        lost = sorted(sec for sec, prof in old.items()
+                      if (sec > len(rows) or rows[sec - 1][0] != prof)
+                      and con.execute("SELECT 1 FROM course_response WHERE course_id=? AND section_no=? AND professor_id=?",
+                                      (course_id, sec, prof)).fetchone())
+        if lost and not force:
+            raise ValueError(f"이미 희망을 낸 분반이 없어지거나 담당이 바뀝니다: {lost}분반 (그래도 바꾸려면 force=True)")
+        con.execute("DELETE FROM course_section WHERE course_id=?", (course_id,))
+        con.executemany("INSERT INTO course_section(course_id, section_no, professor_id, enrollment) VALUES (?,?,?,?)",
+                        [(course_id, i, p, e) for i, (p, e) in enumerate(rows, 1)])
+        con.execute("UPDATE course SET professor_id=? WHERE id=?", (rows[0][0], course_id))
+        con.commit()
+        return lost
+    except Exception:
+        con.rollback()
+        raise
+
+
+def delete_course(con, user_id, course_id):
+    """희망 수집 단계에서, 희망 입력도 시간표·안건도 없는 과목만 지운다. 아니면 ValueError."""
+    try:
+        _ta(con, user_id, "과목을 지울 수 있습니다")
+        row = con.execute("SELECT term_id FROM course WHERE id=?", (course_id,)).fetchone()
+        if row is None:
+            raise ValueError(f"없는 과목입니다: {course_id}")
+        _collecting(con, row[0], "과목을 지울 수 있습니다")
+        for table in ("course_response", "timetable_section", "proposal", "pair_request"):
+            if con.execute(f"SELECT 1 FROM {table} WHERE course_id=? LIMIT 1", (course_id,)).fetchone():
+                raise ValueError(f"희망 입력이나 시간표가 있는 과목은 지울 수 없습니다: 과목 {course_id} ({table})")
+        con.execute("DELETE FROM course_section WHERE course_id=?", (course_id,))
+        con.execute("DELETE FROM course WHERE id=?", (course_id,))
+        con.commit()
+    except Exception:
+        con.rollback()
+        raise
+
+
+def professor_sections(con, term_id, professor_id):
+    """교수 화면용: 그 학기에 이 교수가 맡은 분반. -> [(과목 id, 과목 이름, 분반, 인원, 이수구분, 학년)]"""
+    return con.execute("""SELECT c.id, c.name, s.section_no, s.enrollment, c.category, c.target_year
+                          FROM course_section s JOIN course c ON c.id=s.course_id
+                          WHERE c.term_id=? AND s.professor_id=? ORDER BY c.id, s.section_no""",
+                       (term_id, professor_id)).fetchall()
+
+
+def _round_term(con, round_id):
+    row = con.execute("SELECT term_id FROM round WHERE id=?", (round_id,)).fetchone()
+    if row is None:
+        raise ValueError(f"없는 차수입니다: {round_id}")
+    return row[0]
+
+
+def _term_owners(con, term_id):
+    return {p for (p,) in con.execute("""SELECT DISTINCT s.professor_id FROM course_section s
+                                         JOIN course c ON c.id=s.course_id WHERE c.term_id=?""", (term_id,))}
+
+
+def send_invites(con, user_id, round_id, professor_ids=None):
+    """희망 입력을 요청한다: 그 학기에 분반을 맡은 교수(professor_ids 를 주면 그중에서만)에게 round_invite PENDING·invited_at.
+    이미 요청했거나 응답한 교수는 그대로 둔다. -> 이번에 새로 요청한 교수 id 목록"""
+    try:
+        _ta(con, user_id, "희망 입력을 요청할 수 있습니다")
+        owners = _term_owners(con, _round_term(con, round_id))
+        if professor_ids is not None:
+            extra = sorted(set(professor_ids) - owners)
+            if extra:
+                raise ValueError(f"이번 학기에 맡은 분반이 없는 교수입니다: {extra}")
+            owners = set(professor_ids)
+        new = []
+        for p in sorted(owners):
+            row = con.execute("SELECT status, invited_at FROM round_invite WHERE round_id=? AND professor_id=?",
+                              (round_id, p)).fetchone()
+            if row is None:
+                con.execute("""INSERT INTO round_invite(round_id, professor_id, status, invited_at)
+                               VALUES (?,?,'PENDING',datetime('now'))""", (round_id, p))
+                new.append(p)
+            elif row[0] == "PENDING" and row[1] is None:
+                con.execute("UPDATE round_invite SET invited_at=datetime('now') WHERE round_id=? AND professor_id=?",
+                            (round_id, p))
+                new.append(p)
+        con.commit()
+        return new
+    except Exception:
+        con.rollback()
+        raise
+
+
+def remind_invites(con, user_id, round_id):
+    """요청했지만 아직 응답하지 않은 교수에게 다시 알린 시각(reminded_at)을 남긴다. -> 다시 알린 교수 id 목록"""
+    try:
+        _ta(con, user_id, "다시 알릴 수 있습니다")
+        _round_term(con, round_id)
+        ids = [p for (p,) in con.execute("""SELECT professor_id FROM round_invite WHERE round_id=? AND status='PENDING'
+                                            AND invited_at IS NOT NULL ORDER BY professor_id""", (round_id,))]
+        con.executemany("UPDATE round_invite SET reminded_at=datetime('now') WHERE round_id=? AND professor_id=?",
+                        [(round_id, p) for p in ids])
+        con.commit()
+        return ids
+    except Exception:
+        con.rollback()
+        raise
+
+
+def invite_status(con, round_id):
+    """조교 화면용: 분반을 맡은 교수마다 요청·응답 현황.
+    -> [dict(professor_id, name, status(None=아직 요청 안 함), invited_at, reminded_at, responded_at, sections, responded_sections)]"""
+    term_id = _round_term(con, round_id)
+    cols = ("professor_id", "name", "status", "invited_at", "reminded_at", "responded_at", "sections", "responded_sections")
+    return [dict(zip(cols, r)) for r in con.execute(
+        """SELECT u.id, u.name, ri.status, ri.invited_at, ri.reminded_at, ri.responded_at,
+                  (SELECT COUNT(*) FROM course_section s JOIN course c ON c.id=s.course_id
+                    WHERE c.term_id=? AND s.professor_id=u.id),
+                  (SELECT COUNT(*) FROM course_section s JOIN course c ON c.id=s.course_id
+                    WHERE c.term_id=? AND s.professor_id=u.id AND EXISTS (SELECT 1 FROM course_response cr
+                          WHERE cr.round_id=? AND cr.course_id=s.course_id AND cr.section_no=s.section_no AND cr.professor_id=u.id))
+           FROM user u LEFT JOIN round_invite ri ON ri.round_id=? AND ri.professor_id=u.id
+           WHERE u.id IN (SELECT s.professor_id FROM course_section s JOIN course c ON c.id=s.course_id WHERE c.term_id=?)
+           ORDER BY u.id""", (term_id, term_id, round_id, round_id, term_id))]

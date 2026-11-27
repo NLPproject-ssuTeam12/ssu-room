@@ -10,7 +10,10 @@ DB(schema.sql)에서 입력을 읽어 초안 시간표를 만들고 같은 DB에
   분반마다 담당 교수가 다를 수 있다. 교수 겹침·응답(불가 시간·실습실·연강)은 분반의 교수 기준.
   희망 입력은 분반마다(course_response.section_no, 11/25): 칠한 칸·실습실·주 1회 연강. 그 분반 담당 교수의 응답만 읽는다.
   수강 인원(course_section.enrollment)이 강의실 정원보다 많으면 그 강의실은 후보에서 뺀다(하드). 인원이 비어 있으면 검사하지 않는다.
-  희망 건물: 교수당 하나(professor_building_pref). 그 밖의 건물에 배정하면 벌점.
+  희망 건물: 교수가 학기마다 하나(professor_building_pref, 012). 그 밖의 건물에 배정하면 벌점.
+  강의실 범위(012): 조교가 그 학기에 켠 강의실(term_room)만 후보. 켜진 강의실이 없는 건물을 고른 희망 건물·
+    전년도 건물 기본값은 무시한다. 움직이지 않는 분반(고정·이번 풀이에서 안 푸는 분반)은 꺼진 방이어도 그대로 두고
+    check_timetable 이 '꺼진 강의실'로 경고한다. term_room 이 없는 옛 DB(011 이전)는 모든 강의실을 쓴다.
   강의실묶음 = 건물·정원·실습실 여부·전용 학과가 모두 같은 강의실들. 묶음 안의 방은 서로 구별할 필요가
               없으므로 변수를 줄이고(대칭 제거), 풀이 뒤에 실제 호실을 따로 배정한다.
   못 놓은 세션은 unplaced 변수로 큰 벌점을 주고 남긴다 → "못 맞춘 과목" 목록이 됨(2차 조율의 입력)
@@ -108,6 +111,10 @@ def load_history(con, term_id):
     return hist_bld, dict(hist_room)
 
 
+def _has_table(con, table):
+    return con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone() is not None
+
+
 def _has_column(con, table, column):
     return any(row[1] == column for row in con.execute(f"PRAGMA table_info({table})"))
 
@@ -185,10 +192,20 @@ def load_input(con, term_id, round_id):
                 block=r["block"] if r else set(), prefer=r["prefer"] if r else set(),
                 hire_year=hire.get(prof),
                 )
-    rooms = {rid: dict(id=rid, bld=b, cap=cap, lab=lab or 0, dept=rd)
+    # 강의실: 조교가 그 학기에 켠 것만 후보(on). 꺼진 방도 읽어 두는 것은 이미 그 방에 놓인 분반을 그대로 두기 위해서 (012)
+    if _has_table(con, "term_room"):
+        on_rooms = {r for (r,) in q("SELECT room_id FROM term_room WHERE term_id=?", (term_id,))}
+    else:
+        on_rooms = None                          # 012 전 DB: 모든 강의실을 쓴다
+    rooms = {rid: dict(id=rid, bld=b, cap=cap, lab=lab or 0, dept=rd, on=on_rooms is None or rid in on_rooms)
              for rid, b, cap, lab, rd in q(
                  "SELECT id, building_id, capacity, is_lab, reserved_department_id FROM room")}
-    pref = {p: b for p, b in q("SELECT professor_id, building_id FROM professor_building_pref")}   # 교수 -> 희망 건물
+    on_blds = {r["bld"] for r in rooms.values() if r["on"]}
+    if _has_column(con, "professor_building_pref", "term_id"):
+        pref_rows = q("SELECT professor_id, building_id FROM professor_building_pref WHERE term_id=?", (term_id,))
+    else:
+        pref_rows = q("SELECT professor_id, building_id FROM professor_building_pref")
+    pref = {p: b for p, b in pref_rows if b in on_blds}   # 교수 -> 희망 건물 (켜진 강의실이 없는 건물은 무시)
     chapel = defaultdict(set)                    # 학년 -> 채플 칸
     for yr, sid in q("SELECT target_year, slot_id FROM chapel_slot WHERE term_id=?", (term_id,)):
         chapel[str(yr)].add(sid)
@@ -224,13 +241,14 @@ def _any_pos(m, vs, name):
 
 
 def make_classes(rooms):
-    """건물·정원·실습실·전용학과가 같은 강의실을 한 묶음으로. -> (묶음들, 방->묶음 번호)"""
+    """건물·정원·실습실·전용학과·켜짐이 같은 강의실을 한 묶음으로. -> (묶음들, 방->묶음 번호)"""
     classes, room2class, index = [], {}, {}
     for r in sorted(rooms.values(), key=lambda r: r["id"]):
-        key = (r["bld"], r["cap"], r["lab"], r["dept"]) if GROUP_ROOMS else (r["id"],)
+        key = (r["bld"], r["cap"], r["lab"], r["dept"], r.get("on", True)) if GROUP_ROOMS else (r["id"],)
         if key not in index:
             index[key] = len(classes)
-            classes.append(dict(id=index[key], bld=r["bld"], cap=r["cap"], lab=r["lab"], dept=r["dept"], rooms=[]))
+            classes.append(dict(id=index[key], bld=r["bld"], cap=r["cap"], lab=r["lab"], dept=r["dept"],
+                                on=r.get("on", True), rooms=[]))
         classes[index[key]]["rooms"].append(r["id"])
         room2class[r["id"]] = index[key]
     return classes, room2class
@@ -325,6 +343,8 @@ def _solve_model(con, term_id, round_id, W, time_limit, workers, prev, prevk, fr
     flow_time_limit: 2단계 제한 시간(초). 없으면 min(time_limit, FLOW_TIME_LIMIT=20). 2단계가 끝나지 않아도 찾은 해를 쓴다(원래 점수는 그대로)."""
     by_day, courses, secs, rooms, pref, slot_info = load_input(con, term_id, round_id)
     hist_bld, hist_room = load_history(con, term_id)
+    on_blds = {r["bld"] for r in rooms.values() if r["on"]}
+    hist_bld = {p: b for p, b in hist_bld.items() if b in on_blds}   # 전년도 건물이 이번 학기에 꺼졌으면 기본값으로 쓰지 않음
     classes, room2class = make_classes(rooms)
 
     def is_free(cid, sec):
@@ -432,6 +452,8 @@ def _solve_model(con, term_id, round_id, W, time_limit, workers, prev, prevk, fr
                                     if not (covered[0] == fslot and cl["id"] == fclass):
                                         continue
                                 else:
+                                    if not cl["on"]:
+                                        continue            # 조교가 이번 학기에 끈 강의실 (012)
                                     if cl["cap"] is not None and sd["enroll"] and cl["cap"] < sd["enroll"]:
                                         continue            # 분반 수강 인원 > 강의실 정원: 후보에서 뺌 (하드)
                                     if sd["lab"] == "MUST" and not cl["lab"]:
@@ -960,7 +982,8 @@ def pick_best(con, term_id, round_id, timetable_id, course_id, section_no=None, 
 
 def check_timetable(con, timetable_id):
     """시간표의 하드 규칙 위반 목록 (조교 수동 배치 뒤 경고용). -> [dict(rule, course_id, section_no, detail)]
-    교수 겹침, 불가 칸, 정원, 실습실, 채플, 교필↔전필, 전필↔전필(분반 기준), 18:00 이후 시작 연강."""
+    교수 겹침, 불가 칸, 정원, 실습실, 채플, 교필↔전필, 전필↔전필(분반 기준), 18:00 이후 시작 연강,
+    꺼진 강의실(조교가 그 학기에 끈 강의실에 놓임, 012)."""
     q = lambda sql: con.execute(sql, (timetable_id,)).fetchall()
     prof_sql = "COALESCE((SELECT professor_id FROM course_section WHERE course_id=a.course_id AND section_no=a.section_no), c.professor_id)"
     resp_sql = f"""(SELECT id FROM course_response WHERE course_id=a.course_id AND section_no=a.section_no AND professor_id={prof_sql}
@@ -1012,6 +1035,12 @@ def check_timetable(con, timetable_id):
                                  JOIN time_slot ts ON ts.id=a.slot_id WHERE a.timetable_id=?
                                  GROUP BY 1,2,3 HAVING COUNT(*) >= 2 AND MIN(ts.start_time) > '16:30'"""):
         out.append(dict(rule="18:00 이후 연강", course_id=cid, section_no=sec, detail=f"{ss}회차 {st} 시작"))
+    if _has_table(con, "term_room"):
+        for cid, sec, room in q("""SELECT DISTINCT a.course_id, a.section_no, a.room_id FROM assignment a
+                                   JOIN timetable t ON t.id=a.timetable_id
+                                   WHERE a.timetable_id=? AND NOT EXISTS (SELECT 1 FROM term_room tr
+                                         WHERE tr.term_id=t.term_id AND tr.room_id=a.room_id)"""):
+            out.append(dict(rule="꺼진 강의실", course_id=cid, section_no=sec, detail=f"강의실 {room}"))
     return out
 
 

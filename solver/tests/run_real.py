@@ -112,7 +112,7 @@ def build(rows, with_responses):
                 for s in block:
                     q("INSERT INTO response_slot VALUES (?,?,'BLOCK')", (i, s))
         for p, cnt in bld_use.items():
-            q("INSERT INTO professor_building_pref VALUES (?,?)", (pid[p], bid[cnt.most_common(1)[0][0]]))
+            q("INSERT INTO professor_building_pref(term_id,professor_id,building_id) VALUES (1,?,?)", (pid[p], bid[cnt.most_common(1)[0][0]]))
     c.commit()
     return c, stats, len(rooms), sum(int(x.split()[-1] in LABS) for x in rooms)
 

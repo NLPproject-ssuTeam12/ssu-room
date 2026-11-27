@@ -38,7 +38,7 @@ def new_course(sections, prefer=None, block=None, bld=None, cat="전공선택", 
         if not c.execute("SELECT 1 FROM user WHERE id=?", (p,)).fetchone():
             c.execute("INSERT INTO user(id,role,name,department_id,password_hash) VALUES (?,?,?,?,?)", (p, "PROF", f"가상교수{p}", 2, "x"))
         if bld:
-            c.execute("INSERT OR REPLACE INTO professor_building_pref VALUES (?,?)", (p, bld))
+            c.execute("INSERT OR REPLACE INTO professor_building_pref(term_id,professor_id,building_id) VALUES (1,?,?)", (p, bld))
     c.execute("INSERT INTO course(id,term_id,department_id,name,professor_id,category,target_year,session_count,slots_per_session) VALUES (?,?,?,?,?,?,?,?,?)",
               (cid, 1, 2, f"시험과목{cid}", sections[0], cat, year, 2, 1))
     for sec, p in enumerate(sections, 1):

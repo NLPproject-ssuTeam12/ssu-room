@@ -7,8 +7,8 @@ SSU:room의 SQLite 스키마, 변경 SQL, 연결·단계 관리 함수입니다.
 
 | 파일 | 내용 |
 |---|---|
-| `schema.sql` | **최종 DB 스키마** (테이블 29개, 뷰 2개). 새 DB는 이 파일로 만든다 |
-| `db.py` | DB 연결(`connect`, **항상 이걸로** 외래키 검사를 켠다), 서버 단계(`get_phase` `set_phase`), 기타 요청 확인(`pending_other_requests` `confirm_other_request`), 조율 회신(`professor_owns` `add_reply` `save_interpretation` `decide_reply` `confirmed_conditions` `open_next_proposal` `carried_conditions`) |
+| `schema.sql` | **최종 DB 스키마** (테이블 32개, 뷰 2개, 트리거 2개). 새 DB는 이 파일로 만든다 |
+| `db.py` | DB 연결(`connect`, **항상 이걸로** 외래키 검사를 켠다), 서버 단계(`get_phase` `set_phase`), 기타 요청 확인(`pending_other_requests` `confirm_other_request`), 조율 회신(`professor_owns` `add_reply` `save_interpretation` `decide_reply` `confirmed_conditions` `open_next_proposal` `carried_conditions`), 건물·강의실과 학기 범위(`add_building` `add_room` `set_room_enabled` `set_building_enabled` `selectable_buildings` `set_building_pref` …), 교수·과목·분반 지정과 희망 입력 요청(`add_professor` `add_course` `set_sections` `send_invites` `invite_status` …) |
 | `seed_time_slot.py` | 시간 칸(75분 교시) 기본 데이터 |
 | `migrations/001_20261121_feedback.sql` | `archive/schema_v3.sql`로 만든 DB → 11/21 피드백 반영 모양 |
 | `migrations/002_20261122_phase_other_request.sql` | 001까지 적용한 DB → 단계 관리, 선호 시간 외 불가, 기타 요청 재설계 |
@@ -20,11 +20,13 @@ SSU:room의 SQLite 스키마, 변경 SQL, 연결·단계 관리 함수입니다.
 | `migrations/009_20261125_section_response.sql` | 008까지 적용한 DB → 희망 입력을 분반마다(`course_response.section_no`), 분반 연강·교차 요청 `pair_request`·`pair_request_section`(`section_pair` 칸 삭제), 안건 상태 `HOLD`·`NO_OPTION`과 조율 대상 종류 `proposal.target_kind` |
 | `migrations/010_20261125_lab_must_keep.sql` | 009까지 적용한 DB → 실습실 값 `course_response.lab_requirement` 1/0 → `MUST`/`NONE`, 답장 선택에 `KEEP`(지금 자리 그대로) |
 | `migrations/011_20261125_hire_year.sql` | 010까지 적용한 DB → 교수 임용 연도 `user.hire_year` (연차, 비어 있어도 됨) |
+| `migrations/012_20261127_term_room_invite.sql` | 011까지 적용한 DB → 학기별 강의실 켜기 `term_room`(+ 기본값 트리거 2개), 희망 건물 학기별(`professor_building_pref.term_id`), 희망 입력 요청 시각 `round_invite.invited_at`·`reminded_at` |
 | `migrations/005_20261124_reply.sql` | 004까지 적용한 DB → `message.reply_to_id`, `proposal.prev_proposal_id`, `timetable_section.status` 추가, `proposal.status` 값 6개로 고정(`WAITING`→`OPEN`) |
 | `docs/c1.png` `c2.png` `c3.png` | ER 다이어그램 (원본 `c1.mmd` `c2.mmd` `c3.mmd`) |
 | `tests/test_migration.py` | 변경 SQL 검사 |
 | `tests/test_reply.py` | 조율 회신 함수 검사 (메모리 DB, 가상 데이터) |
-| `archive/schema_v1~v13.sql` | 지난 버전 (참고용). v4 = 001까지, v5 = 002까지, v6 = 003까지, v7 = 004까지, v8 = 005까지, v9 = 006까지, v10 = 007까지, v11 = 008까지, v12 = 009까지, v13 = 010까지 적용한 모양 |
+| `tests/test_room_invite.py` | 건물·강의실 입력, 학기별 켜기, 학기별 희망 건물, 교수·과목·분반 지정, 희망 입력 요청 검사 (메모리 DB, 가상 데이터) |
+| `archive/schema_v1~v14.sql` | 지난 버전 (참고용). v4 = 001까지, v5 = 002까지, v6 = 003까지, v7 = 004까지, v8 = 005까지, v9 = 006까지, v10 = 007까지, v11 = 008까지, v12 = 009까지, v13 = 010까지, v14 = 011까지 적용한 모양 |
 
 ER 다이어그램: `c1.png` 기초 정보(학과·교수·강의실·과목·분반 교수·시간 칸·학기 단계), `c2.png` 1차 응답 수집·기타 요청, `c3.png` 시간표·대안·메시지.
 
@@ -57,7 +59,9 @@ python db/tests/test_reply.py        # 조율 회신 함수 검사 (pytest 로�
 | **희망 입력(분반 응답)** | 시간(칠한 칸)·주 1회 연강·실습실·인원은 **분반마다** 받는다(11/25). 인원은 `course_section.enrollment`. 분반 연강·교차만 과목 단위로 한 번(`pair_request`) | `course_response` 한 행 = (차수, 과목, **분반**, 교수). 솔버는 그 분반 담당 교수의 응답만 읽는다 |
 | **분반** | 오프라인 회의에서 정해진 분반. 분반 하나당 한 행: 번호(1부터 빈틈없이)·담당 교수·수강 인원. 행이 없는 과목은 `course.professor_id`의 1분반 | `course_section` (조교 입력, 인원은 교수가 정함) |
 | **분반 수강 인원** | 강의실 정원보다 많으면 그 강의실은 배정 후보에서 제외(하드). NULL = 아직 모름 | `course_section.enrollment` |
-| **희망 건물** | 교수당 하나. 그 밖의 건물은 솔버 벌점 | `professor_building_pref` |
+| **희망 건물** | 교수가 **학기마다** 하나(012). 그 학기에 켜진 건물(켜진 강의실이 있는 건물) 중에서만 고른다. 그 밖의 건물은 솔버 벌점. 고른 뒤 건물이 꺼지면 엔진이 무시한다 | `professor_building_pref` (`term_id`, `professor_id`), `db.set_building_pref` |
+| **학기 강의실(켜짐)** | 조교가 그 학기 배정에 쓰겠다고 켠 강의실. **엔진은 켜진 강의실만** 후보로 쓴다. 건물은 따로 켜지 않고, 켜진 강의실이 하나라도 있으면 그 건물을 쓸 수 있다 (11/27) | `term_room` (행 없음 = 꺼짐) |
+| **희망 입력 요청** | 조교가 분반을 정한 뒤 맡은 교수에게 보내는 요청. `PENDING` 요청함 → `RESPONDED` 응답함. 보낸 시각·다시 알린 시각을 남긴다 (11/27) | `round_invite` (`invited_at`, `reminded_at`) |
 | **연차** | 교수 임용 연도. 같은 희망 칸을 두고 점수가 같으면 가능한 시간이 적은 분반 다음으로 먼저 임용된 교수가 받는다. 비면 이 기준을 건너뛴다 (11/25) | `user.hire_year`, `db.set_hire_year` |
 | **서버 단계** | `COLLECTING` 희망 수집 → `ROUND1` 1차 조율 → `ROUND2` 2차 조율 → `ROUND3` 3차 조율 → `FINAL` 확정 | `term.phase`, `phase_log` |
 | **기타 요청** | 교수가 자연어로 쓴 글. AI 없이 조교가 읽고 "확인함"을 누른다 | `other_request` |
@@ -243,6 +247,65 @@ db.set_hire_year(con, professor_id, 2008)                            # 교수 �
   나온 행은 다음 차수 안건을 열 필요가 없는지(조교가 따로 풀었는지) 확인합니다. `tests/test_reply.py`가 같은 쿼리를 검사합니다.
 - **서버와 아직 연결되지 않았습니다.** 서버(`backend/`)는 조율 상태·답장·조교 결정을 메모리에만 두므로, 서버가 이 함수들을 부르기 전에는 화면에서 쓴 답장이 DB에 남지 않습니다.
 
+## 건물·강의실과 학기 범위 (`db.py`, 11/27)
+
+강의실은 시드로만 들어오지 않고 **조교가 넣고, 학기마다 켜고 끈다.** 엔진은 그 학기에 켜진 강의실 안에서만 배정한다.
+
+```python
+bid = db.add_building(con, ta_id, "정보과학관")                       # 건물 (이름 중복 거부)
+rid = db.add_room(con, ta_id, bid, "21304", 60, False)               # 건물·호수·정원·실습실 여부 필수, 학과 전용은 선택
+db.update_room(con, ta_id, rid, capacity=70)                          # 넘긴 칸만 고침
+db.set_room_enabled(con, ta_id, term_id, rid, False)                  # 이번 학기에 이 강의실은 안 씀
+db.set_building_enabled(con, ta_id, term_id, bid, True)               # 그 건물 강의실을 모두 켬 -> 바뀐 수
+db.term_rooms(con, term_id)                                           # 조교 화면: 모든 강의실과 켜짐 여부
+db.selectable_buildings(con, term_id)                                 # 교수가 고를 수 있는 건물 [(id, 이름)]
+db.set_building_pref(con, term_id, professor_id, bid)                 # 교수 희망 건물 (None = 상관없음)
+db.stale_building_prefs(con, term_id)                                 # 고른 뒤 꺼져서 무시되는 희망 건물
+db.delete_room(con, ta_id, rid); db.delete_building(con, ta_id, bid)  # 쓰인 적 없는 것만
+```
+
+| 함수 | 하는 일 | 막는 경우 (`ValueError`) |
+|---|---|---|
+| `add_building` · `rename_building` | 건물 넣기·이름 바꾸기 | 조교 아님, 빈 이름, 같은 이름 |
+| `add_room` | 강의실 넣기. **필수: 건물·호수·정원(1~500 정수)·실습실 여부(예/아니오)**. 실습실은 좌석·PC 수를 정원으로. 확정 전 모든 학기에 켜진 채로 들어감 | 조교 아님, 없는 건물, 빈 호수, 정원 없음·0·글자, 실습실 여부 없음·0/1 밖, 같은 건물에 같은 호수, 없는 학과 |
+| `update_room` | 호수·정원·실습실 여부·학과 전용 고치기. 이미 만든 시간표는 그대로, 생긴 위반은 엔진 `check_timetable`이 경고 | 위와 같은 값 검사, 없는 강의실 |
+| `delete_room` · `delete_building` | 한 번도 쓰이지 않은 강의실(시간표·대안에 없음) / 강의실도 희망 건물도 없는 건물만 지움. 쓰인 것은 **끈다** | 쓰인 강의실, 강의실이 있는 건물, 희망 건물로 고른 교수가 있는 건물 |
+| `set_room_enabled` · `set_building_enabled` | 그 학기에 강의실(건물이면 그 건물 강의실 전부)을 켜고 끔 | 조교 아님, 확정(`FINAL`) 학기, 없는 강의실·건물 |
+| `term_rooms` · `selectable_buildings` | 조교 화면 강의실 목록 / 교수가 고를 수 있는 건물 | 없는 학기 |
+| `set_building_pref` · `building_pref` | 교수의 그 학기 희망 건물 저장(하나, `None` = 지움)·읽기 | 교수 아님, 그 학기에 고를 수 없는 건물 |
+| `stale_building_prefs` | 고른 뒤 조교가 그 건물 강의실을 모두 꺼서 엔진이 무시하는 희망 건물 (조교 화면 안내용) | — |
+
+- **기본값 (트리거):** 강의실을 새로 넣으면 확정 전 모든 학기에 켜진다(`trg_room_on`). 학기를 새로 넣으면 바로 전 학기(연도·학기 순)에 켠 강의실을 그대로 켜고, 전 학기가 없으면 모든 강의실을 켠다(`trg_term_rooms`). 그래서 강의실·학기를 직접 `INSERT`하는 시드·테스트도 지금처럼 모든 강의실을 쓴다.
+- **끈 강의실에 이미 놓인 분반:** 엔진이 알아서 옮기지 않는다. `check_timetable`이 `꺼진 강의실`로 경고하고, 조교가 다시 풀면(이전 시간표를 출발점으로) 고정되지 않은 분반은 켜진 강의실로 옮겨 간다. 고정한 분반은 그대로 둔다.
+
+## 교수·과목·분반 지정과 희망 입력 요청 (`db.py`, 11/27)
+
+교수가 자기 과목을 이미 받은 채로 시작하지 않고, **조교가 과목마다 분반 수와 분반별 담당 교수를 정한 뒤 맡은 교수에게 희망 입력을 요청한다.** 배정 엔진은 바뀌지 않는다(`course_section`의 담당 교수를 읽고, 응답이 없는 분반은 미회신으로 다룸).
+
+```python
+pid = db.add_professor(con, ta_id, "○○○", department_id=1, hire_year=2010)   # 비밀번호는 비워 둠(서버가 정함)
+cid = db.add_course(con, ta_id, term_id, "자료구조", [(pid, 40), (pid2, 40)],   # 분반 순서대로 (담당 교수, 인원)
+                    category="전공필수", target_year="2")
+db.set_sections(con, ta_id, cid, [(pid, 45), pid2, pid3])               # 분반 다시 정하기 (3개로)
+db.professor_sections(con, term_id, pid)                                # 교수 화면: 맡은 분반
+db.send_invites(con, ta_id, round_id)                                    # 분반을 맡은 교수 전원에게 요청 -> 새로 요청한 교수
+db.remind_invites(con, ta_id, round_id)                                  # 응답 안 한 교수에게 다시 알림 -> 교수 목록
+db.invite_status(con, round_id)                                          # 조교 화면: 교수마다 요청·응답 현황
+```
+
+| 함수 | 하는 일 | 막는 경우 (`ValueError`) |
+|---|---|---|
+| `add_professor` | 교수 계정(`role='PROF'`, `password_hash=''`). 로그인 방식은 서버가 정한다 | 조교 아님, 빈 이름, 없는 학과, 임용 연도 1950~2100 밖 |
+| `add_course` | 과목과 분반(번호 1부터). `course.professor_id` = 1분반 담당. 기본 주 2회 × 1칸 | 조교 아님, **희망 수집(`COLLECTING`) 단계가 아님**, 빈 이름, 분반 없음, 담당이 교수가 아님, 인원 0 이하 |
+| `set_sections` | 분반 수·담당·인원을 다시 정함. 응답이 있던 분반이 없어지거나 담당이 바뀌면 막고, `force=True`면 바꾸고 그 분반 번호를 돌려줌(그 응답은 엔진이 읽지 않게 됨) | 위와 같음, 응답이 있는 분반을 바꿈(`force` 없이) |
+| `delete_course` | 희망 입력·시간표·안건·분반 연강 요청이 없는 과목만 지움 | 희망 수집 단계가 아님, 그런 기록이 있음 |
+| `send_invites` | 그 학기 분반을 맡은 교수(또는 `professor_ids` 중에서)에게 `round_invite` `PENDING`·`invited_at`. 이미 요청·응답한 교수는 그대로 | 조교 아님, 없는 차수, 분반을 맡지 않은 교수 |
+| `remind_invites` | 요청했고 아직 `PENDING`인 교수의 `reminded_at`을 지금으로 | 조교 아님, 없는 차수 |
+| `invite_status` | 분반을 맡은 교수마다 요청 상태(아직 요청 안 함 = `None`), 시각, 맡은 분반 수, 응답한 분반 수 | 없는 차수 |
+
+- 교수가 희망을 내면 서버가 `round_invite`를 `RESPONDED`로 바꾼다(지금처럼).
+- 실제로 알림(메일 등)을 보내는 일은 서버 몫이다. DB는 보낸 시각만 남긴다.
+
 ## 피드백 반영 현황 (DB 쪽)
 
 솔버 쪽 반영 내용은 `../solver/README.md`에 있습니다.
@@ -308,6 +371,7 @@ sqlite3 -bail ssuroom.db < db/migrations/008_20261125_timetable_reason.sql # 007
 sqlite3 -bail ssuroom.db < db/migrations/009_20261125_section_response.sql # 008까지 된 DB
 sqlite3 -bail ssuroom.db < db/migrations/010_20261125_lab_must_keep.sql      # 009까지 된 DB
 sqlite3 -bail ssuroom.db < db/migrations/011_20261125_hire_year.sql          # 010까지 된 DB
+sqlite3 -bail ssuroom.db < db/migrations/012_20261127_term_room_invite.sql   # 011까지 된 DB
 ```
 
 - **001**: 기존 응답의 `professor_id`는 그 과목의 담당 교수로, `single_day_pref`는 `NONE`으로 채웁니다(그때는 묻지 않았던 질문). `REQUIRE`는 `MUST`로, 한글 label은 영어 코드로 바꿉니다.
@@ -316,6 +380,7 @@ sqlite3 -bail ssuroom.db < db/migrations/011_20261125_hire_year.sql          # 0
 - **004**: `term` 테이블을 다시 만들어 `phase`에 `ROUND3`를 추가합니다. 학기 행과 지금 단계는 그대로 옮깁니다.
 - **005**: `message`에 `reply_to_id`(기존 행은 NULL), `timetable_section`에 `status`(기존 행은 `DONE`)를 더하고, `proposal`을 다시 만들어 `status`를 6개 값으로 고정하고 `prev_proposal_id`(기존 행은 NULL, `UNIQUE`)를 더합니다. `WAITING`(옛 기본값)과 NULL은 `OPEN`으로 옮기고, 그 밖의 값이 있으면 **멈춥니다**(조용히 바꾸지 않음). 실행 전에 확인하는 SELECT가 파일 위 주석에 있습니다. `-bail` 없이 실행하면 sqlite3가 오류 뒤에도 다음 줄을 실행해 옛 `proposal`을 지울 수 있으니 꼭 붙입니다.
 - **006**: `course_section`에 `enrollment`를 더하고 `course.expected_enrollment`의 값을 옮깁니다(분반 행이 있으면 인원 ÷ 분반 수 올림, 없으면 1분반 행을 만들어 그대로. 인원이 없으면 행을 만들지 않음). `course.expected_enrollment`, `course_response.prefer_only`·`language`는 지웁니다(`DROP COLUMN`이라 SQLite 3.35 이상). `professor_building_pref`는 교수당 한 행으로 다시 만들고 가장 높은 순위 건물 하나만 남깁니다. `course_response`는 다시 만들어 `section_pair`를 더하고(기존 `SECTION_PAIR` 요청의 가장 최근 값), 주 1회 연강 `PREFER`를 `NONE`으로 옮기며, 빈 `chapel_slot`을 만듭니다. **예전에 교수 요청(`SECTION_COUNT`)으로 분반이 여러 개였던 과목은 실행 뒤 조교가 `course_section`에 분반을 직접 넣어야 합니다** (확인 SELECT는 파일 주석).
+- **012**: `term_room`을 만들고 **모든 학기 × 모든 강의실을 켭니다**(지금까지와 같은 배정 범위). `professor_building_pref`를 `(term_id, professor_id)` 키로 다시 만들고 기존 교수당 한 행을 **모든 학기에 복사**합니다. `round_invite`에 `invited_at`·`reminded_at`(기존 행은 NULL)을 더하고, 기본값 트리거 2개를 만듭니다. **`professor_building_pref`에 학기 없이 넣던 코드는 실패합니다**(서버 `dbmode.py`의 희망 저장, `backend/tools/seed_db.py`). 칸 이름과 `term_id`를 적어 넣거나 `db.set_building_pref`를 씁니다.
 - **011**: `user`에 `hire_year`(임용 연도)를 더합니다. 기존 사용자는 NULL.
 - **010**: `course_response`를 다시 만들어 `lab_requirement`를 글자로(1 → `MUST`, 0 → `NONE`), `reply_choice`를 다시 만들어 `KEEP`을 허용합니다. 행·id는 그대로.
 - **009**: `course_response`를 분반 단위로 다시 만듭니다. 응답 하나 → 그 교수가 그 과목에서 맡은 분반마다 한 행(첫 분반은 id 그대로, 나머지는 새 id로 칠한 칸을 복사). 분반 행이 없는 과목이나 맡은 분반이 없으면 1분반. 기타 요청·`request_item`은 첫 분반 응답에 남습니다. `section_pair`가 `NONE`이 아닌 응답은 `pair_request`(붙일 분반 = 그 교수의 분반 번호 순서)로 옮기고 칸은 없앱니다. `proposal`을 다시 만들어 상태에 `HOLD`·`NO_OPTION`을, `target_kind`(기존 안건은 NULL)를 더합니다.
@@ -323,7 +388,7 @@ sqlite3 -bail ssuroom.db < db/migrations/011_20261125_hire_year.sql          # 0
 - **007**: `reply_choice` 테이블을 만들고(기존 답장은 기록 없음), `proposal`을 다시 만들어 상태에 `OFFLINE`을 더하고, `timetable_section`에 `locked`(기존 행은 0)를 더하고, `other_request`를 다시 만들어 `message_id`를 더합니다(`response_id`·`message_id` 중 정확히 하나).
 - 마지막 `PRAGMA foreign_key_check`가 아무것도 출력하지 않아야 정상입니다. 두 번 실행하면 오류가 납니다.
 - **주의**: `term` 칸이 늘어서 `INSERT INTO term VALUES (...)`처럼 칸 이름 없이 넣던 코드는 칸 이름을 적어야 합니다. `message`·`timetable_section`도 005로 칸이 하나씩 늘었습니다(`solver_core.py`, `solver/tests/run_n3.py`의 `timetable_section` INSERT는 칸 이름을 적도록 고쳤습니다). 006으로 `course_section`은 칸이 늘고 `course`·`course_response`·`professor_building_pref`는 칸이 줄었습니다. 009로 `course_response`는 `section_no`가 늘고 `section_pair`가 없어졌습니다(칸 이름을 적어 넣으면 `section_no`는 기본 1).
-- `tests/test_migration.py`가 v3→001→…→011, v4→002→…→011, v7→005→011, v8→006, v9→007, v10→008, v11→009, v12→010, v13→011 경로가 (005 뒤에는 `archive/schema_v8.sql`, 006 뒤에는 `schema_v9.sql`, 007 뒤에는) 최종 `schema.sql`과 같은 모양을 만들고, 데이터를 보존하며, 새 규칙(잘못된 단계·`NLP`·`AVOID`·`WAITING`·없는 `reply_to_id`·중복·없는 `prev_proposal_id`·잘못된 분반 `status` 거부, `NEXT` 허용)이 작동하는지, 목록 밖 `status`가 있으면 005가 멈추고 되돌릴 수 있는지 검사합니다.
+- `tests/test_migration.py`가 v3→001→…→012, v4→002→…→012, v7→005→012, v8→006, v9→007, v10→008, v11→009, v12→010, v13→011, v14→012 경로가 (005 뒤에는 `archive/schema_v8.sql`, 006 뒤에는 `schema_v9.sql`, 007 뒤에는) 최종 `schema.sql`과 같은 모양을 만들고, 데이터를 보존하며, 새 규칙(잘못된 단계·`NLP`·`AVOID`·`WAITING`·없는 `reply_to_id`·중복·없는 `prev_proposal_id`·잘못된 분반 `status` 거부, `NEXT` 허용)이 작동하는지, 목록 밖 `status`가 있으면 005가 멈추고 되돌릴 수 있는지 검사합니다.
 
 ## 알려진 한계
 

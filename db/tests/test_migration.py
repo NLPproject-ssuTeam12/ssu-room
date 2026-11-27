@@ -31,6 +31,8 @@ V12 = P("archive", "schema_v12.sql")    # 009까지 적용한 모양 (010 전)
 M10 = P("migrations", "010_20261125_lab_must_keep.sql")
 V13 = P("archive", "schema_v13.sql")    # 010까지 적용한 모양 (011 전)
 M11 = P("migrations", "011_20261125_hire_year.sql")
+V14 = P("archive", "schema_v14.sql")    # 011까지 적용한 모양 (012 전)
+M12 = P("migrations", "012_20261127_term_room_invite.sql")
 
 def compare(label, con, target=None):
     """con 이 target(기본: 최종 schema.sql)과 같은 모양인지"""
@@ -108,7 +110,9 @@ ok1 = compare("001~009 적용 후 = schema_v12", old, V12) and ok1
 run(M10, old)
 ok1 = compare("001~010 적용 후 = schema_v13", old, V13) and ok1
 run(M11, old)
-ok1 = compare("001~011 적용 후", old) and ok1
+ok1 = compare("001~011 적용 후 = schema_v14", old, V14) and ok1
+run(M12, old)
+ok1 = compare("001~012 적용 후", old) and ok1
 
 print("\n=== 경로 2: schema_v4(001까지 적용된 모양)에서 002 → 003 → 004 → 005 → 006")
 v4 = sqlite3.connect(":memory:"); v4.executescript(open(P("archive","schema_v4.sql"), encoding="utf-8").read()); seed(v4)
@@ -131,7 +135,9 @@ ok2 = compare("v4 + 002~009 = schema_v12", v4, V12) and ok2
 run(M10, v4)
 ok2 = compare("v4 + 002~010 = schema_v13", v4, V13) and ok2
 run(M11, v4)
-ok2 = compare("v4 + 002~011", v4) and ok2
+ok2 = compare("v4 + 002~011 = schema_v14", v4, V14) and ok2
+run(M12, v4)
+ok2 = compare("v4 + 002~012 적용 후", v4) and ok2
 print("\n=== 경로 3: schema_v7(004까지 적용된 모양)에서 005 → 006")
 def build_v7():
     v7 = sqlite3.connect(":memory:"); v7.executescript(open(P("archive","schema_v7.sql"), encoding="utf-8").read()); seed(v7); q = v7.execute
@@ -189,7 +195,9 @@ ok3 = compare("v7 + 005~009 = schema_v12", v7, V12) and ok3
 run(M10, v7)
 ok3 = compare("v7 + 005~010 = schema_v13", v7, V13) and ok3
 run(M11, v7)
-ok3 = compare("v7 + 005~011", v7) and ok3
+ok3 = compare("v7 + 005~011 = schema_v14", v7, V14) and ok3
+run(M12, v7)
+ok3 = compare("v7 + 005~012 적용 후", v7) and ok3
 
 print("\n=== 경로 4: 목록 밖 status 가 있으면 005 가 멈추고 데이터는 그대로")
 v7b = build_v7(); v7b.execute("UPDATE proposal SET status='DONE' WHERE id=3"); v7b.commit()
@@ -370,7 +378,7 @@ for bad in ("UPDATE course_response SET lab_requirement=1 WHERE id=100", "INSERT
 print("\n=== 경로 10: schema_v13(010까지 적용된 모양)에서 011 — 교수 임용 연도")
 n_user = v11.execute("SELECT count(*) FROM user").fetchone()[0]
 run(M11, v11)
-ok10 = compare("v13 + 011", v11)
+ok10 = compare("v13 + 011 = schema_v14", v11, V14)
 ok10 = ok10 and v11.execute("SELECT count(*) FROM user WHERE hire_year IS NULL").fetchone()[0] == n_user
 v11.execute("UPDATE user SET hire_year=2008 WHERE id=2"); print("  임용 연도 저장:", v11.execute("SELECT id, hire_year FROM user WHERE id=2").fetchone())
 try:
@@ -378,4 +386,34 @@ try:
 except sqlite3.IntegrityError:
     print("  거부 OK: 임용 연도 1800")
 
-print("\n결과:", "모두 통과" if ok1 and ok2 and ok3 and ok4 and ok5 and ok6 and ok7 and ok8 and ok9 and ok10 else "실패")
+print("\n=== 경로 11: schema_v14(011까지 적용된 모양)에서 012 — 학기별 강의실 켜기, 학기별 희망 건물, 요청 기록")
+q = v11.execute
+q("INSERT INTO term(id,year,semester,grid_id) VALUES (2,2025,'2',1)")
+q("INSERT INTO building VALUES (2,'건물2')"); q("INSERT INTO room(id,building_id,room_no,capacity,is_lab) VALUES (2,2,'201',40,1)")
+q("DELETE FROM professor_building_pref"); q("INSERT INTO professor_building_pref VALUES (2,1),(3,2)")
+q("INSERT INTO round_invite(round_id,professor_id,status) VALUES (1,2,'RESPONDED'),(1,3,'PENDING')"); v11.commit()
+n_room, n_term = q("SELECT count(*) FROM room").fetchone()[0], q("SELECT count(*) FROM term").fetchone()[0]
+inv_before = q("SELECT round_id, professor_id, status, responded_at FROM round_invite ORDER BY 1,2").fetchall()
+run(M12, v11)
+ok11 = compare("v14 + 012", v11)
+trg = lambda con: sorted((n, norm_sql(x)) for n, x in con.execute("select name, sql from sqlite_master where type='trigger'"))
+final = sqlite3.connect(":memory:"); final.executescript(open(P("schema.sql"), encoding="utf-8").read())
+ok11 = ok11 and trg(v11) == trg(final) and len(trg(final)) == 2
+print("  트리거 schema.sql 과 같음:", [n for n, _ in trg(v11)])
+tr = q("SELECT count(*) FROM term_room").fetchone()[0]
+print("  강의실 모두 켬(학기 × 강의실):", tr, "=", n_term * n_room); ok11 = ok11 and tr == n_term * n_room
+bp = q("SELECT term_id, professor_id, building_id FROM professor_building_pref ORDER BY 1,2").fetchall()
+print("  희망 건물을 모든 학기에 복사:", bp); ok11 = ok11 and bp == [(1, 2, 1), (1, 3, 2), (2, 2, 1), (2, 3, 2)]
+inv = q("SELECT round_id, professor_id, status, responded_at, invited_at, reminded_at FROM round_invite ORDER BY 1,2").fetchall()
+print("  요청 기록 보존·새 칸 NULL:", inv); ok11 = ok11 and [r[:4] for r in inv] == inv_before and all(r[4] is None and r[5] is None for r in inv)
+q("INSERT INTO room(id,building_id,room_no,capacity,is_lab) VALUES (3,2,'202',30,0)")
+ok11 = ok11 and q("SELECT count(*) FROM term_room WHERE room_id=3").fetchone()[0] == n_term
+q("INSERT INTO term(id,year,semester,grid_id) VALUES (3,2027,'1',1)")
+ok11 = ok11 and q("SELECT count(*) FROM term_room WHERE term_id=3").fetchone()[0] == n_room + 1
+print("  트리거 작동: 새 강의실은 모든 학기에, 새 학기는 전 학기 그대로")
+try:
+    q("INSERT INTO professor_building_pref(professor_id, building_id) VALUES (2,1)"); ok11 = False; print("  막아야 함: 학기 없는 희망 건물")
+except sqlite3.IntegrityError:
+    print("  거부 OK: 학기 없는 희망 건물")
+
+print("\n결과:", "모두 통과" if ok1 and ok2 and ok3 and ok4 and ok5 and ok6 and ok7 and ok8 and ok9 and ok10 and ok11 else "실패")

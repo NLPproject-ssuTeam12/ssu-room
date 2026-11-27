@@ -50,6 +50,6 @@ def build(seed=1, n_courses=70, n_prof=30):
     for yr, (d, t) in CHAPEL.items():
         c.execute("INSERT INTO chapel_slot SELECT 1, ?, id FROM time_slot WHERE day=? AND start_time=?", (yr, d, t))
     for p in range(1,n_prof+1):
-        c.execute("INSERT INTO professor_building_pref VALUES (?,?)",(p,rnd.randint(1,4)))   # 희망 건물 하나
+        c.execute("INSERT INTO professor_building_pref(term_id,professor_id,building_id) VALUES (1,?,?)",(p,rnd.randint(1,4)))   # 희망 건물 하나
     c.commit(); return c
 

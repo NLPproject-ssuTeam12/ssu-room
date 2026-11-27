@@ -38,14 +38,19 @@ CREATE TABLE phase_log (                      -- 단계가 바뀐 기록 (누가
   changed_by INTEGER REFERENCES user(id),
   changed_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
-CREATE TABLE building (id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE);
-CREATE TABLE room (
+CREATE TABLE building (id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE);   -- 조교가 넣는 건물 (db.add_building)
+CREATE TABLE room (                           -- 조교가 넣는 강의실 (db.add_room: 건물·호수·정원·실습실 여부 필수). 쓰인 적 있는 방은 지우지 않고 학기에서 끈다
   id INTEGER PRIMARY KEY,
   building_id INTEGER NOT NULL REFERENCES building(id),
   room_no TEXT NOT NULL,
   capacity INTEGER, is_lab INTEGER DEFAULT 0,
   reserved_department_id INTEGER REFERENCES department(id),
   UNIQUE (building_id, room_no)
+);
+CREATE TABLE term_room (                      -- 그 학기에 배정에 쓰는(켠) 강의실. 행 없음 = 꺼짐. 켜진 강의실이 하나라도 있는 건물이 그 학기에 고를 수 있는 건물 (012)
+  term_id INTEGER NOT NULL REFERENCES term(id),
+  room_id INTEGER NOT NULL REFERENCES room(id),
+  PRIMARY KEY (term_id, room_id)
 );
 CREATE TABLE course (                         -- 조교가 입력한 과목. 분반은 course_section
   id INTEGER PRIMARY KEY,
@@ -82,10 +87,12 @@ CREATE TABLE round (
   status TEXT DEFAULT 'OPEN',
   UNIQUE (term_id, round_no)
 );
-CREATE TABLE round_invite (
+CREATE TABLE round_invite (                  -- 조교가 교수에게 보낸 희망 입력 요청 (db.send_invites). PENDING 요청함 / RESPONDED 응답함
   round_id INTEGER REFERENCES round(id),
   professor_id INTEGER REFERENCES user(id),
   status TEXT DEFAULT 'PENDING', responded_at TEXT,
+  invited_at TEXT,                                     -- 요청을 보낸 시각 (012)
+  reminded_at TEXT,                                    -- 마지막으로 다시 알린 시각 (012)
   PRIMARY KEY (round_id, professor_id)
 );
 CREATE TABLE course_response (            -- 교수가 분반마다 낸 희망 입력 (칠한 칸·실습실·주 1회 연강). 인원은 course_section.enrollment
@@ -147,9 +154,11 @@ CREATE TABLE chapel_slot (                   -- 학년별 채플 칸 (조교 입
   slot_id INTEGER NOT NULL REFERENCES time_slot(id),
   PRIMARY KEY (term_id, target_year, slot_id)
 );
-CREATE TABLE professor_building_pref (       -- 교수가 고른 희망 건물 하나. 그 밖의 건물은 솔버 벌점
-  professor_id INTEGER PRIMARY KEY REFERENCES user(id),
-  building_id INTEGER NOT NULL REFERENCES building(id)
+CREATE TABLE professor_building_pref (       -- 교수가 그 학기에 고른 희망 건물 하나. 그 밖의 건물은 솔버 벌점. 그 학기에 켜진 건물만 고를 수 있다 (012에서 학기별로)
+  term_id INTEGER NOT NULL REFERENCES term(id),
+  professor_id INTEGER NOT NULL REFERENCES user(id),
+  building_id INTEGER NOT NULL REFERENCES building(id),
+  PRIMARY KEY (term_id, professor_id)
 );
 
 -- ===== 솔버와 시간표 버전 =====
@@ -267,3 +276,21 @@ SELECT a.timetable_id, COALESCE(cs.professor_id, c.professor_id) AS professor_id
 FROM assignment a JOIN course c ON c.id=a.course_id
 LEFT JOIN course_section cs ON cs.course_id=a.course_id AND cs.section_no=a.section_no
 GROUP BY a.timetable_id, COALESCE(cs.professor_id, c.professor_id), a.slot_id HAVING n > 1;
+
+-- ===== 기본값 트리거 (012) =====
+CREATE TRIGGER trg_room_on AFTER INSERT ON room      -- 새 강의실은 확정(FINAL) 전 모든 학기에 켠다
+BEGIN
+  INSERT OR IGNORE INTO term_room(term_id, room_id) SELECT id, NEW.id FROM term WHERE phase <> 'FINAL';
+END;
+CREATE TRIGGER trg_term_rooms AFTER INSERT ON term    -- 새 학기는 바로 전 학기(연도·학기 순)에 켠 강의실을 그대로 (전 학기가 없으면 전부)
+BEGIN
+  INSERT OR IGNORE INTO term_room(term_id, room_id)
+    SELECT NEW.id, tr.room_id FROM term_room tr
+    WHERE tr.term_id = (SELECT p.id FROM term p WHERE p.id <> NEW.id
+                          AND (p.year < NEW.year OR (p.year = NEW.year AND p.semester < NEW.semester))
+                        ORDER BY p.year DESC, p.semester DESC LIMIT 1);
+  INSERT OR IGNORE INTO term_room(term_id, room_id)
+    SELECT NEW.id, r.id FROM room r
+    WHERE NOT EXISTS (SELECT 1 FROM term p WHERE p.id <> NEW.id
+                        AND (p.year < NEW.year OR (p.year = NEW.year AND p.semester < NEW.semester)));
+END;
