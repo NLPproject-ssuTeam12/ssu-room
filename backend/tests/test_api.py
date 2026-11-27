@@ -875,3 +875,21 @@ def test_request_method_wins_over_default(client, monkeypatch):
     monkeypatch.delenv("SSUROOM_NLP")
     j = client.post("/assistant", json={"text": "지금 현황 알려줘"}).json()
     assert j["command"]["fallback"] is False                           # 기본 keyword 는 언어 모델을 부르지 않음
+
+
+def test_enrollment_same_value_passes(client):
+    """GET /wishes 로 받은 지금 값(5의 배수가 아닐 수 있음)을 그대로 되돌리면 통과, 바꿀 때만 5명 단위 검사 (11/27)."""
+    sec = next((s for s in store.list_sections() if s.shape != "MANUAL" and s.enrollment and s.enrollment % 5), None)
+    if sec is None:   # 데이터의 인원이 모두 5의 배수면 하나를 바꿔 둔다
+        sec = next(s for s in store.list_sections() if s.shape != "MANUAL")
+        store.sections[sec.id] = sec.model_copy(update={"enrollment": 28})
+        sec = store.sections[sec.id]
+    cur = sec.enrollment
+    assert client.post("/wishes", json={"section_id": sec.id, "enrollment": cur}).status_code == 200
+    assert client.post("/wishes", json={"section_id": sec.id, "enrollment": 43}).status_code == 422
+    r = client.post("/wishes", json={"section_id": sec.id, "enrollment": 45})
+    assert r.status_code == 200 and next(s for s in client.get("/sections").json() if s["id"] == sec.id)["enrollment"] == 45
+    # 인원이 비어 있는(NULL) 분반에 처음 넣는 값은 검사한다
+    store.sections[sec.id] = store.sections[sec.id].model_copy(update={"enrollment": None})
+    assert client.post("/wishes", json={"section_id": sec.id, "enrollment": 43}).status_code == 422
+    assert client.post("/wishes", json={"section_id": sec.id, "enrollment": 30}).status_code == 200
