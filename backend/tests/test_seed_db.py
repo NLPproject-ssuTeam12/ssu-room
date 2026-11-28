@@ -341,3 +341,27 @@ def test_widen_skips_demo_and_blank(tmp_path):
     for sid in blank:                                                     # 희망 비운 교수는 그대로 비어 있음
         v = mp["sections"][sid]
         assert (v["course_id"], v["section_no"]) not in cells
+
+
+# ---------- 가상 임용 연도 (재성 #37 리뷰, 팀 결정) ----------
+
+def test_hire_years_in_range_and_stable(tmp_path):
+    out1, con1, mp1, alias = _seed(tmp_path / "1", blank_prof="")
+    out2, con2, mp2, _ = _seed(tmp_path / "2", blank_prof="")
+    rows1 = dict(con1.execute("SELECT name, hire_year FROM user WHERE role='PROF'").fetchall())
+    rows2 = dict(con2.execute("SELECT name, hire_year FROM user WHERE role='PROF'").fetchall())
+    assert rows1 == rows2 and set(rows1) == set(alias.values())             # 두 번 돌려도 같다
+    assert all(1995 <= y <= 2024 for y in rows1.values())                    # 모든 교수, 범위 안
+    assert mp1["hire_years"] == rows1 == out1["hire_years"]
+    assert con1.execute("SELECT hire_year FROM user WHERE role='TA'").fetchone()[0] is None   # 조교는 비움
+    bp = out1["blank_prof"]["professor"]
+    assert rows1[bp] is not None                                              # 희망 비운 교수도 넣음
+    # 처리 순서와 상관없음: 가명만으로 정해진다
+    assert all(sd.hire_year_of(a) == y for a, y in rows1.items())
+    assert sd.hire_year_of("교수01") == sd.hire_year_of("교수01") and sd.hire_year_of("교수01") != sd.hire_year_of("교수01", seed="다른")
+
+
+def test_no_hire_year_leaves_null(tmp_path):
+    out, con, mp, _ = _seed(tmp_path, hire_year=False)
+    assert all(y is None for (y,) in con.execute("SELECT hire_year FROM user"))
+    assert mp["hire_years"] == {} and out["hire_years"] == {}
