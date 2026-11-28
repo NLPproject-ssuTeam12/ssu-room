@@ -30,6 +30,9 @@
   실제 칸만(exact) / 같은 요일 앞뒤 칸까지(adjacent) / 다른 요일 쌍의 같은 시각도(other_days) / 넓게 + 하루 불가
   (wide_block) 중 하나를 칠한다. 실제 칸은 늘 희망, 19:30·채플(그 학년 전공필수)·18:00 이후 시작 연강 칸은 칠하지 않는다.
   --demo 가 바꾼 분반과 --blank-prof 분반은 넓히지 않는다. --narrow 면 예전처럼 실제 칸만. 대응표 wish_kind.
+- 가상 임용 연도(재성 #37 리뷰, 팀 결정): 교수마다 user.hire_year 를 1995~2024 사이로 넣는다(하윤 db.set_hire_year).
+  가명과 고정 시드로 정해서 처리 순서와 상관없이 같은 엑셀이면 같은 값. 조교는 넣지 않고, --blank-prof 교수도 넣는다
+  (희망만 비움). 배정 엔진은 동점일 때 먼저 임용된 교수를 앞에 둔다. --no-hire-year 면 예전처럼 비운다. 대응표 hire_years.
 - --demo (기본 꺼짐): 시연용으로 일부 분반의 **가상 희망만** 서로 겹치게 바꾼다 (과목·분반·강의실·인원은 그대로).
   고정 난수 시드로 늘 같은 분반을 고른다. 바꾼 분반은 출력하고 대응표에 "demo_changed"(무엇을 바꿨는지)로 남긴다.
     겹침(MISMATCH → OPEN)  같은 교수의 다른 분반이 그 칸만 되게 막고, 이 분반은 그 칸만 희망 → 희망 칸을 하나도 못 받음
@@ -336,6 +339,10 @@ def create_db(con, plan: dict, year: int = 2026, semester: str = "2", deadline: 
             if d == ch["day"] and s0 < _mins(ch["end"]) and _mins(ch["start"]) < s0 + 75:
                 q("INSERT OR IGNORE INTO chapel_slot(term_id, target_year, slot_id) VALUES (?,?,?)", (term, ch["year"], sid))
     con.commit()
+    if plan.get("hire_years"):   # 가상 임용 연도 (하윤 db.set_hire_year, 조교는 넣지 않음)
+        hdb, _ = _haeyoon()
+        for p_, yr in plan["hire_years"].items():
+            hdb.set_hire_year(con, user[p_], yr)
     return dict(term_id=term, round_id=rnd, ta_id=ta, users=user, rooms=room_ids, slots=slot)
 
 
@@ -504,6 +511,18 @@ def widen_wishes(plan: dict, seed: int = WIDEN_SEED, skip: Iterable[str] = ()) -
     return kinds
 
 
+HIRE_SEED = "ssuroom-hire-20261128"
+HIRE_RANGE = (1995, 2024)
+
+
+def hire_year_of(alias: str, seed: str = HIRE_SEED) -> int:
+    """가명 → 가상 임용 연도 (HIRE_RANGE 안). 가명과 시드만으로 정해서 교수를 어떤 순서로 처리해도 같은 값."""
+    import hashlib
+    lo, hi = HIRE_RANGE
+    h = int(hashlib.sha256(f"{seed}:{alias}".encode("utf-8")).hexdigest(), 16)
+    return lo + h % (hi - lo + 1)
+
+
 def section_map(plan: dict, ids: dict, db_path: str) -> dict:
     """서버 분반 id → 분반 정보. DB에 넣은 분반은 course_id·section_no, MANUAL은 "manual": true 와 칸."""
     secs = {}
@@ -529,6 +548,7 @@ def section_map(plan: dict, ids: dict, db_path: str) -> dict:
         "note": "가명 데이터. 희망은 실제 강의 칸으로 만든 가상 값. 교양필수 고정 시간은 넣지 않음. "
                 "수강 인원은 5명 단위로 반올림(원래 값 enrollment_orig).",
         "blank_prof": plan.get("blank_prof"),    # 희망을 비워 둔 교수 {professor, sections} 또는 None
+        "hire_years": plan.get("hire_years") or {},   # 가상 임용 연도 {가명: 연도} (--no-hire-year 면 빈 값)
     }
 
 
@@ -571,7 +591,7 @@ def counts(con, plan: dict) -> List[Tuple[str, int]]:
 
 def seed(xlsx: Path, db_path: Path, map_path: Path, alias_path: Path, rooms_json: Path, fixed_json: Path,
          year: int = 2026, semester: str = "2", demo: bool = False, blank_prof: Optional[str] = None,
-         narrow: bool = False) -> dict:
+         narrow: bool = False, hire_year: bool = True) -> dict:
     """blank_prof: None = 끔, "" = 자동으로 고름, 가명 = 그 교수. --demo 다음에 적용한다.
     narrow: True 면 희망을 넓히지 않는다(실제 칸만, 예전과 같음). 넓히기는 --demo·--blank-prof 다음."""
     rows = read_excel(xlsx)
@@ -588,6 +608,7 @@ def seed(xlsx: Path, db_path: Path, map_path: Path, alias_path: Path, rooms_json
     skip = set(plan["demo_changed"]) | set((plan["blank_prof"] or {}).get("sections", []))
     plan["wish_kinds"] = ({w["section_id"]: "exact" for w in plan["wishes"] if w["section_id"] not in skip}
                           if narrow else widen_wishes(plan, skip=skip))
+    plan["hire_years"] = {p_: hire_year_of(p_) for p_ in plan["professors"]} if hire_year else {}
     if db_path.exists():
         db_path.unlink()
     con = sqlite3.connect(db_path)
@@ -605,7 +626,7 @@ def seed(xlsx: Path, db_path: Path, map_path: Path, alias_path: Path, rooms_json
     manual = Counter(s["manual_reason"] for s in plan["sections"] if s["shape"] == "MANUAL")
     return dict(counts=table, real_name_hits=hits, manual_reasons=manual, term_id=ids["term_id"],
                 demo_changed=plan["demo_changed"], blank_prof=plan["blank_prof"],
-                wish_kinds=Counter(plan["wish_kinds"].values()),
+                wish_kinds=Counter(plan["wish_kinds"].values()), hire_years=plan["hire_years"],
                 rounded=sum(1 for s in plan["sections"] if s["enrollment_orig"] is not None
                             and s["enrollment_orig"] != round5(s["enrollment_orig"])),
                 over_capacity=over_capacity(plan),
@@ -631,11 +652,12 @@ def main() -> None:
     ap.add_argument("--semester", default="2")
     ap.add_argument("--demo", action="store_true", help="시연용: 일부 분반의 가상 희망을 서로 겹치게 (기본 꺼짐)")
     ap.add_argument("--narrow", action="store_true", help="희망을 넓히지 않고 실제 수업 칸만 (예전 시드)")
+    ap.add_argument("--no-hire-year", action="store_true", help="가상 임용 연도를 넣지 않음 (예전 시드)")
     ap.add_argument("--blank-prof", nargs="?", const="", default=None, metavar="가명",
                     help="희망 수집 시연용: 교수 한 명의 희망을 비워 둠. 값 없이 주면 자동 선택 (기본 꺼짐)")
     a = ap.parse_args()
     out = seed(a.xlsx, a.db, a.map, a.alias, a.rooms, a.fixed, a.year, a.semester, demo=a.demo,
-               blank_prof=a.blank_prof, narrow=a.narrow)
+               blank_prof=a.blank_prof, narrow=a.narrow, hire_year=not a.no_hire_year)
     print(f"DB: {a.db}  (term {out['term_id']}, round {out['round_id']})")
     for k, v in out["counts"]:
         print(f"{k:<24}{v}")
@@ -647,6 +669,9 @@ def main() -> None:
     print(f"수강 인원 5명 단위 반올림으로 바뀐 분반: {out['rounded']}개 (원래 값은 대응표 enrollment_orig)")
     if out["over_capacity"]:
         print(f"  주의: 반올림한 인원이 엑셀 강의실 정원보다 많은 분반 {len(out['over_capacity'])}개: {out['over_capacity']}")
+    hy = out["hire_years"]
+    print(f"임용 연도 넣음: {len(hy)}명 (가상, {min(hy.values())}~{max(hy.values())})" if hy
+          else "임용 연도 넣음: 0명 (--no-hire-year)")
     print("희망 넓히기" + (" (--narrow: 실제 칸만)" if a.narrow else "") + ": "
           + ", ".join(f"{k} {out['wish_kinds'].get(k, 0)}" for k, _ in WIDEN_SHARE)
           + " (--demo·--blank-prof 분반은 넓히지 않음)")
