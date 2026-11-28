@@ -354,8 +354,15 @@ class Store:
         off, building = self.off_of(sid)
         if off != "time" and building:
             fields.update(off=off, wish_building=building)
+        # 메시지의 학기: COORD_TERM 이 있으면 그것, DB 모드면 하윤 DB term 표(예: "2026-2학기"),
+        # 메모리 모드는 MessageInput 기본값 그대로
         if os.environ.get("COORD_TERM"):
             fields["term"] = os.environ["COORD_TERM"]
+        else:
+            from . import dbmode   # dbmode 가 store 를 채우므로 함수 안에서 가져온다
+            db = dbmode.active()
+            if db is not None:
+                fields["term"] = db.term_text()
         return MessageInput(**fields)
 
     # ---------- 기록 ----------

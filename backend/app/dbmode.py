@@ -75,6 +75,11 @@ class DBMode:
     def phase(self) -> str:
         return self.hdb.get_phase(self.con, self.term_id)["phase"]
 
+    def term_text(self) -> str:
+        """지금 학기 → "2026-2학기" (조율 메시지 제목 줄)."""
+        year, sem = self.q("SELECT year, semester FROM term WHERE id=?", (self.term_id,)).fetchone()
+        return f"{year}-{sem}학기"
+
     def current_tt(self) -> Optional[int]:
         return self.q("SELECT MAX(id) FROM timetable WHERE term_id=?", (self.term_id,)).fetchone()[0]
 

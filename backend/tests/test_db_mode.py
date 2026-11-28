@@ -431,3 +431,19 @@ def test_requests_db_mode(client, monkeypatch):
     rep = [r for r in c.get("/requests").json() if r["source"] == "reply"]
     assert len(rep) == 1 and rep[0]["section_id"] == sid and rep[0]["body"] == "실습실 PC 점검 부탁"
     assert rep[0]["status"] == "PENDING"
+
+
+def test_message_uses_db_term(client, monkeypatch):
+    """조율 메시지의 학기는 DB term 표 (test 데이터: 2026년 2학기). COORD_TERM 이 있으면 그게 우선."""
+    c, db = client
+    monkeypatch.delenv("COORD_TERM", raising=False)
+    assert db.term_text() == "2026-2학기"
+    c.post("/draft")
+    r = c.post("/rounds/next")
+    assert r.status_code == 200 and r.json()["sent"]
+    sid = r.json()["sent"][0]
+    msg = coord(c)[sid]["message"]
+    assert "2026-2학기" in msg and "2027-1학기" not in msg
+    assert store.message_input(sid).term == "2026-2학기"
+    monkeypatch.setenv("COORD_TERM", "2027-1학기")
+    assert store.message_input(sid).term == "2027-1학기"
