@@ -1,4 +1,4 @@
-// 서버 모드 화면 (기본). 가짜 데이터 시연은 주소 뒤에 ?demo (App.tsx).
+// 화면 전체 (서버에 연결).
 // 연결된 화면: 조교 희망 확인·시간표·조율·확정·설정·AI 도우미, 교수 희망 입력·공개 시간표·조율 메시지.
 import { useEffect, useState } from 'react'
 import type { Stage } from '../api/types'
