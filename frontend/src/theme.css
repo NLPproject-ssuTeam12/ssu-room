@@ -39,10 +39,16 @@ main.solo{max-width:640px;margin:32px auto 40px}
 .login .lbl{display:block;margin-top:16px}
 .login select{min-width:200px}
 @media (max-width:620px){.login .roles{grid-template-columns:1fr}}
-select,input[type=text],textarea{background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:7px 10px}
+select,input[type=text],input[type=number],textarea{background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:7px 10px}
 select{max-width:100%}
 textarea{width:100%;resize:vertical;min-height:58px}
 input[type=text]{width:100%}
+input.enr{width:90px}
+.bad-text{color:var(--bad)}
+.reqbox{margin-top:8px}
+.reqbox input[type=text]{flex:1;min-width:120px}
+.reqrow{padding:10px 0;border-top:1px solid var(--line)}
+.reqrow:first-of-type{border-top:0}
 /* 단계 바: 희망 수집 ── 초안 ── 조율 중 ── 확정 */
 .steps{display:flex;align-items:center;list-style:none;margin:0;padding:16px 2px 8px;overflow-x:auto}
 .steps li{display:flex;align-items:center;flex:1;min-width:0}

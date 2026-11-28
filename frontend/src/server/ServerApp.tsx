@@ -3,6 +3,7 @@ import { useEffect, useState } from 'react'
 import { useVersion } from '../store'
 import { applyTheme, savedTheme } from '../ui'
 import { loadAll, useServerData } from './data'
+import { startPolling } from './poll'
 import { Frame, LoadStatus } from './layout'
 import LoginPage from './LoginPage'
 import TaApp from './TaApp'
@@ -17,6 +18,7 @@ export default function ServerApp() {
 
   useEffect(() => { applyTheme(savedTheme()); void loadAll() }, [])
   useEffect(() => { document.title = 'SSU:room' }, [])
+  useEffect(() => startPolling(), []) // 컴퓨터 2대 시연: 다른 컴퓨터에서 바꾼 것이 보이게
 
   const login = (s: Session | null) => {
     saveSession(s)

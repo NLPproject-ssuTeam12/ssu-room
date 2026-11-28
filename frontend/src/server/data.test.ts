@@ -4,9 +4,10 @@ import type { Health, Section, Wish } from '../api/types'
 
 const api = vi.hoisted(() => ({
   health: vi.fn(), sections: vi.fn(), rooms: vi.fn(), wishes: vi.fn(), timetable: vi.fn(), coord: vi.fn(),
-  saveWish: vi.fn(), draft: vi.fn(),
+  saveWish: vi.fn(), draft: vi.fn(), requests: vi.fn(), savePair: vi.fn(), confirmRequest: vi.fn(),
 }))
-vi.mock('../api/client', () => ({ api }))
+vi.mock('../api/client', async (orig) => ({ ...(await orig<typeof import('../api/client')>()), api }))
+const { ApiError } = await import('../api/client')
 
 const data = await import('./data')
 
@@ -31,6 +32,7 @@ function serverReturns(wishes: Wish[], stage: Health['stage'] = 'COLLECT') {
   api.wishes.mockResolvedValue({ wishes, professors })
   api.timetable.mockResolvedValue(null)
   api.coord.mockResolvedValue([])
+  api.requests.mockResolvedValue([])
 }
 
 const ready = () => {
@@ -123,5 +125,79 @@ describe('mutate', () => {
     api.health.mockResolvedValue(health('DRAFT'))
     await expect(data.mutate(() => Promise.reject(new Error('message failed')))).rejects.toThrow('message failed')
     expect(ready().health.stage).toBe('DRAFT')
+  })
+})
+
+describe('refresh (polling)', () => {
+  test('picks up changes made on another computer', async () => {
+    serverReturns([wish('a')])
+    await data.loadAll()
+    api.wishes.mockResolvedValue({ wishes: [wish('a', { note: '교수가 B에서 고침' })], professors })
+    await data.refresh()
+    expect(ready().wishes[0].note).toBe('교수가 B에서 고침')
+  })
+
+  test('keeps the same data object when nothing changed (no redraw)', async () => {
+    serverReturns([wish('a')])
+    await data.loadAll()
+    const before = ready()
+    await data.refresh()
+    expect(ready()).toBe(before)
+  })
+
+  test('skips while a save is running', async () => {
+    serverReturns([wish('a')])
+    await data.loadAll()
+    const save = deferred<{ saved: Wish }>()
+    api.saveWish.mockReturnValueOnce(save.promise)
+    const saving = data.saveWish(wish('a', { note: 'x' }))
+    await Promise.resolve()
+    api.health.mockClear()
+    await data.refresh()
+    expect(api.health).not.toHaveBeenCalled()
+    save.resolve({ saved: wish('a', { note: 'x' }) })
+    await saving
+  })
+
+  test('keeps the screen when the server is briefly unreachable', async () => {
+    serverReturns([wish('a')])
+    await data.loadAll()
+    api.health.mockRejectedValueOnce(new Error('down'))
+    await expect(data.refresh()).resolves.toBeUndefined()
+    expect(data.getState().status).toBe('ready')
+  })
+})
+
+describe('other requests', () => {
+  test('an older server without /requests still loads (requests = null)', async () => {
+    serverReturns([wish('a')])
+    api.requests.mockRejectedValue(new ApiError(404, 'Not Found'))
+    await data.loadAll()
+    expect(ready().requests).toBeNull()
+  })
+})
+
+describe('pairs', () => {
+  test('loads saved pairs from GET /wishes', async () => {
+    serverReturns([])
+    api.wishes.mockResolvedValue({ wishes: [], professors, pairs: [{ section_id: 'a', mode: 'CROSS', order: ['a', 'b'] }] })
+    await data.loadAll()
+    expect(ready().pairs).toEqual([{ section_id: 'a', mode: 'CROSS', order: ['a', 'b'] }])
+  })
+
+  test('applySavedPair replaces the old value and drops NONE', () => {
+    const old = [{ section_id: 'b', mode: 'CROSS' as const, order: ['b', 'a'] }, { section_id: 'x', mode: 'CROSS' as const, order: ['x', 'y'] }]
+    expect(data.applySavedPair(old, { section_id: 'a', mode: 'BACK_TO_BACK', order: ['a', 'b'] }, ['a', 'b']))
+      .toEqual([old[1], { section_id: 'a', mode: 'BACK_TO_BACK', order: ['a', 'b'] }])
+    expect(data.applySavedPair(old, { section_id: 'a', mode: 'NONE', order: [] }, ['a', 'b'])).toEqual([old[1]])
+  })
+})
+
+describe('applySavedWish enrollment', () => {
+  test('updates the section enrollment too', async () => {
+    serverReturns([wish('a')])
+    await data.loadAll()
+    const next = data.applySavedWish(ready(), wish('a', { enrollment: 45 }))
+    expect(next.sections.find((s) => s.id === 'a')?.enrollment).toBe(45)
   })
 })

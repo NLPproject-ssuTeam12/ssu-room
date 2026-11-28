@@ -6,6 +6,7 @@ import CoordActions from '../CoordActions'
 import CoordSummary from '../CoordSummary'
 import RoundButton from '../RoundButton'
 import { groupCoord } from '../coord'
+import { ReplyRequests } from '../RequestConfirm'
 
 function Group({ title, note, items, data }: { title: string; note: string; items: CoordItem[]; data: ServerData }) {
   const bySection = new Map(data.sections.map((s) => [s.id, s]))
@@ -45,6 +46,7 @@ export default function CoordView({ data }: { data: ServerData }) {
         <Chip>답장 대기 {g.waiting.length}</Chip>
         <Chip k="good">끝남 {g.done.length}</Chip>
       </div>
+      <ReplyRequests data={data} />
       {stage === 'FINAL' ? <div className="card small">시간표를 확정해서 더 이상 조율할 수 없습니다.</div> : <RoundButton data={data} />}
       <Group title="조교가 할 일" note="보내기·처리안 확인·직접 배치" items={g.todo} data={data} />
       <Group title="교수 답장 대기" note="교수님 화면에서 답장하면 처리안이 생깁니다" items={g.waiting} data={data} />
