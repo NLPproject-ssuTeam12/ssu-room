@@ -123,6 +123,12 @@ class Store:
             if dropped:
                 self.load_warnings.append(f"{w['section_id']}: 희망 칸 {len(dropped)}개 버림 {dropped}")
             self.wishes[w["section_id"]] = parse(Wish, dict(w, cells=cells))
+        # 기타 요청 (메모리 모드). DB 모드는 하윤 other_request 표를 쓴다 (dbmode.requests)
+        self.requests: List[dict] = []
+        self._request_seq = 0
+        for sid, w in self.wishes.items():
+            if (w.note or "").strip():
+                self._new_request("wish", sid, w.note.strip())
         self.professors: Dict[str, dict] = wishes_raw.get("professors", {})
         self.fixed_blocks: List[dict] = _load("fixed_blocks.json")
 
@@ -153,8 +159,54 @@ class Store:
     def get_wish(self, sid: str) -> Optional[Wish]:
         return self.wishes.get(sid)
 
+    # ---------- 기타 요청 (메모리 모드) ----------
+
+    def _new_request(self, source: str, sid: str, body: str) -> dict:
+        self._request_seq += 1
+        rec = {"id": self._request_seq, "source": source, "section_id": sid, "body": body, "status": "PENDING",
+               "ta_memo": None, "confirmed_at": None, "created_at": _now()}
+        self.requests.append(rec)
+        return rec
+
+    def _wish_request(self, sid: str) -> Optional[dict]:
+        return next((r for r in self.requests if r["source"] == "wish" and r["section_id"] == sid), None)
+
+    def list_requests(self, status: Optional[str] = None) -> List[dict]:
+        """기타 요청 (희망 기타 = wish, 답장 기타의 시간표 밖 요청 = reply). 미확인 먼저. 과목명·교수(가명)를 붙인다."""
+        out = []
+        for r in sorted(self.requests, key=lambda r: (r["status"] != "PENDING", r["id"])):
+            if status and r["status"] != status:
+                continue
+            sec = self.sections.get(r["section_id"])
+            out.append(dict(r, course=sec.name if sec else None, professor=sec.professor if sec else None))
+        return out
+
+    def confirm_request(self, rid: int, memo: Optional[str]) -> Optional[dict]:
+        """조교 [확인함]. 이미 확인한 요청은 메모만 바꾼다. 없으면 None."""
+        r = next((x for x in self.requests if x["id"] == rid), None)
+        if r is None:
+            return None
+        if r["status"] != "CONFIRMED":
+            r.update(status="CONFIRMED", confirmed_at=_now())
+        if memo is not None:
+            r["ta_memo"] = memo
+        return next(x for x in self.list_requests() if x["id"] == rid)
+
+    def note_status(self, sid: str) -> Optional[str]:
+        r = self._wish_request(sid)
+        return r["status"] if r else None
+
     def save_wish(self, wish: Wish) -> None:
-        """희망 저장. 수강 인원(enrollment)이 오면 그 분반 정보의 인원도 바꾼다 (메모리 모드)."""
+        """희망 저장. 수강 인원(enrollment)이 오면 그 분반 정보의 인원도 바꾼다 (메모리 모드).
+        기타 글: 같으면 확인 상태 그대로, 바뀌면 다시 미확인(PENDING), 비우면 요청을 지운다."""
+        body = (wish.note or "").strip()
+        cur = self._wish_request(wish.section_id)
+        if not body and cur:
+            self.requests.remove(cur)
+        elif body and cur is None:
+            self._new_request("wish", wish.section_id, body)
+        elif body and cur["body"] != body:
+            cur.update(body=body, status="PENDING", confirmed_at=None)
         sec = self.sections.get(wish.section_id)
         if wish.enrollment is not None and sec is not None:
             self.sections[wish.section_id] = sec.model_copy(update={"enrollment": wish.enrollment})
@@ -302,8 +354,15 @@ class Store:
         off, building = self.off_of(sid)
         if off != "time" and building:
             fields.update(off=off, wish_building=building)
+        # 메시지의 학기: COORD_TERM 이 있으면 그것, DB 모드면 하윤 DB term 표(예: "2026-2학기"),
+        # 메모리 모드는 MessageInput 기본값 그대로
         if os.environ.get("COORD_TERM"):
             fields["term"] = os.environ["COORD_TERM"]
+        else:
+            from . import dbmode   # dbmode 가 store 를 채우므로 함수 안에서 가져온다
+            db = dbmode.active()
+            if db is not None:
+                fields["term"] = db.term_text()
         return MessageInput(**fields)
 
     # ---------- 기록 ----------
@@ -324,6 +383,10 @@ class Store:
                "note": getattr(parsed, "note", ""),
                "unavailable": unavailable, "at": _now()}
         self.replies.append(rec)
+        # 답장 기타의 시간표 밖 요청 → 기타 요청 (DB 모드의 add_reply_request 와 같이, 기타를 고른 답장만)
+        picked = choice if isinstance(choice, list) else []
+        if rec["note"] and "ETC" in picked:
+            self._new_request("reply", sid, rec["note"])
         return rec
 
     def add_decision(self, sid: str, action: str, reason: Optional[str], applied: Optional[dict]) -> dict:

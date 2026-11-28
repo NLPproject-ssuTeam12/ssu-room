@@ -202,7 +202,30 @@ def test_room_clash_proposes_engine_room_and_applies(drafted):
         return
     p = assistant.get_proposal(out["proposal_id"])
     assert all((m.room, f"{'월화수목금'[m.day]}-{m.start}") not in used for m in p["alternative"].meetings)
+    # 답 문장: 강의실만 차 있음 → "놓을 수 없어요"와 "위반 0건"을 같이 쓰지 않는다
+    ans = out["answer"]
+    assert f"요청하신 강의실({taken})은 그 시간에 다른 수업이 쓰고 있어요" in ans
+    assert "같은 시각 다른 강의실로 놓는 안:" in ans and "(규칙 위반 0건)" in ans and "이 안으로 제안해요" in ans
+    assert "그대로는 놓을 수 없어요" not in ans and "새 규칙 위반" not in ans
+    pre = run_assistant(AssistantQuery(intent="what_if", section_id="C2-01", days=days, start=start, room=taken), store)
+    assert "같은 시각 다른 강의실로 놓는 안:" in pre["answer"] and "제안해요" not in pre["answer"]
+    assert pre["proposal_id"] is None
     before = db.current_tt()
     r = c.post("/assistant/apply", json={"proposal_id": out["proposal_id"], "reason": "테스트"})
     assert r.status_code == 200, r.text
     assert db.current_tt() != before and r.json()["violations"] == 0
+
+
+def test_real_violation_keeps_old_wording(drafted):
+    """진짜 규칙 위반이면 문장은 그대로: '그대로는 놓을 수 없어요. 새 규칙 위반 N건.'
+    (교수 불가 칸·채플은 도우미가 계산 전에 막으므로, 같은 교수(교수02)의 C3-01 자리(화·금 09:00)로 C2-01 을 옮겨
+    교수 겹침을 만든다. C3 은 그 두 칸만 되므로 초안과 상관없이 늘 그 자리다)"""
+    c, db = drafted
+    c3 = sorted(next(x for x in store.timetable.assignments if x.section_id == "C3-01").blocks,
+                key=lambda b: "월화수목금".index(b.day))
+    room = free_room([f"{b.day}-{b.start}" for b in c3], skip="C2-01")
+    out = run_assistant(AssistantQuery(intent="move", section_id="C2-01", days=[b.day for b in c3], start=c3[0].start,
+                                       room=room), store)
+    assert out["proposal_id"] is None
+    assert "그대로는 놓을 수 없어요. 새 규칙 위반" in out["answer"] and "요청하신 강의실(" not in out["answer"]
+    assert "교수 겹침" in out["answer"]

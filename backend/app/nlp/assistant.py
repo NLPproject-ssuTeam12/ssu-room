@@ -868,12 +868,26 @@ def _what_if(cmd: AssistantQuery, store, as_move: bool) -> dict:
     lines = [f"{_j(title, '을')} {_j(_place_text(blocks), '으로')} 옮기면"]
     if res["real"]:
         name = lambda s: section_title(store.get_section(s)) if store.get_section(s) else s   # noqa: E731
+        opt = res.get("option")
         if res["feasible"]:
             lines.append("규칙 위반 없이 놓을 수 있어요.")
+        elif res.get("clash") and not res["violations"] and opt and not opt["moves"]:
+            # 강의실만 그 시간에 차 있고, 엔진이 같은 시각 다른 강의실로 규칙을 지키는 안을 찾음 (다른 수업은 그대로).
+            # "놓을 수 없어요"와 "위반 0건"이 같이 나오면 헷갈려서 따로 쓴다
+            asked = ", ".join(dict.fromkeys(b.room for b in blocks if b.room)) or "요청한 강의실"
+            ms = opt["alternative"]["meetings"]
+            where = " / ".join(f"{DAYS[m['day']]} {m['start']}~{m['end']} {m['room']}" for m in ms)
+            lines = [f"{title}: 요청하신 강의실({asked})은 그 시간에 다른 수업이 쓰고 있어요.",
+                     f"같은 시각 다른 강의실로 놓는 안: {where} (규칙 위반 0건)."]
+            from ..contracts import meetings_to_blocks, Meeting
+            new_blocks, _ = meetings_to_blocks([Meeting(**m) for m in ms])
+            if as_move:   # 엔진 안으로 제안한다 (apply_option 이 받는다)
+                blocks = new_blocks
+                rows = [row(sec.id, _place_text(blocks), "옮김 (엔진이 고른 강의실)")]
+                lines.append("이 안으로 제안해요.")
         else:
             lines.append(f"그대로는 놓을 수 없어요. 새 규칙 위반 {res['violations']}건.")
             lines += _rule_lines(res, name)
-            opt = res.get("option")
             if opt:
                 ms = opt["alternative"]["meetings"]
                 where = " / ".join(f"{DAYS[m['day']]} {m['start']}~{m['end']} {m['room']}" for m in ms)
@@ -881,14 +895,7 @@ def _what_if(cmd: AssistantQuery, store, as_move: bool) -> dict:
                              (f" (같이 움직이는 수업 {len(opt['moves'])}개)" if opt["moves"] else "") + ".")
             else:
                 lines.append("규칙을 지키며 그 시각에 놓는 안도 엔진이 찾지 못했어요.")
-            if as_move and opt and not opt["moves"] and not res["violations"]:
-                # 요청한 강의실만 그 시간에 차 있고, 엔진이 같은 요일·시각에 다른 강의실로 규칙을 지키는 안을 찾음
-                # (다른 수업을 움직이지 않음) → 그 안으로 제안한다. 엔진 안은 apply_option 이 받는다
-                from ..contracts import meetings_to_blocks, Meeting
-                blocks, _ = meetings_to_blocks([Meeting(**m) for m in opt["alternative"]["meetings"]])
-                rows = [row(sec.id, _place_text(blocks), "옮김 (엔진이 고른 강의실)")]
-                lines.append("요청한 강의실 대신 이 안으로 제안해요.")
-            elif as_move:   # 새 위반이 생기거나 다른 수업까지 움직여야 하는 안은 [적용]해도 거부되므로 제안을 만들지 않는다
+            if as_move:   # 새 위반이 생기거나 다른 수업까지 움직여야 하는 안은 [적용]해도 거부되므로 제안을 만들지 않는다
                 return _result(" ".join(lines), rows)
     else:
         lines.append(f"같이 바뀌어야 하는 다른 분반 {len(others)}개, 규칙 위반 {res['violations']}건이에요. {STUB_NOTE}")

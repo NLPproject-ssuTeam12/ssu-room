@@ -26,6 +26,10 @@
   화면으로 직접 입력한다. 값 없이 주면 자동으로 고르고(같은 과목 분반 둘 이상·MANUAL 분반 없음·--demo 가 바꾼
   분반 없음, 가명 순 첫째), 가명을 주면 그 교수. 빼는 것: 분반 희망 응답·칠한 칸(실습실·주 1회 연강 포함)·희망 건물·
   분반 인원(NULL). 남기는 것: 과목·분반·담당 교수(course_section)와 그 밖의 DB. --demo 다음에 적용한다.
+- 희망 넓히기(11/27 팀 결정, 기본 켬): 가상 희망이 실제 수업 칸만이면 엔진이 고를 게 없어서, 분반마다 고정 난수로
+  실제 칸만(exact) / 같은 요일 앞뒤 칸까지(adjacent) / 다른 요일 쌍의 같은 시각도(other_days) / 넓게 + 하루 불가
+  (wide_block) 중 하나를 칠한다. 실제 칸은 늘 희망, 19:30·채플(그 학년 전공필수)·18:00 이후 시작 연강 칸은 칠하지 않는다.
+  --demo 가 바꾼 분반과 --blank-prof 분반은 넓히지 않는다. --narrow 면 예전처럼 실제 칸만. 대응표 wish_kind.
 - --demo (기본 꺼짐): 시연용으로 일부 분반의 **가상 희망만** 서로 겹치게 바꾼다 (과목·분반·강의실·인원은 그대로).
   고정 난수 시드로 늘 같은 분반을 고른다. 바꾼 분반은 출력하고 대응표에 "demo_changed"(무엇을 바꿨는지)로 남긴다.
     겹침(MISMATCH → OPEN)  같은 교수의 다른 분반이 그 칸만 되게 막고, 이 분반은 그 칸만 희망 → 희망 칸을 하나도 못 받음
@@ -41,7 +45,7 @@ import sqlite3
 import sys
 from collections import Counter, defaultdict
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PRIVATE = REPO_ROOT / "data" / "private"
@@ -430,6 +434,76 @@ def apply_blank_prof(plan: dict, prof: str) -> List[str]:
     return [s["section_id"] for s in secs]
 
 
+WIDEN_SEED = 20261127
+# 희망 넓히기 비율 (대략): 실제 칸만 30% · 앞뒤 칸 35% · 다른 요일 쌍 20% · 넓게 + 일부 불가 15%
+WIDEN_SHARE = (("exact", 0.30), ("adjacent", 0.35), ("other_days", 0.20), ("wide_block", 0.15))
+OTHER_PAIR = {("월", "수"): ("화", "목"), ("화", "목"): ("월", "수"), ("월", "목"): ("화", "금"), ("화", "금"): ("월", "목")}
+
+
+def _cell(day: str, i: int) -> Optional[str]:
+    return f"{day}-{STARTS[i]}" if 0 <= i < len(STARTS) else None
+
+
+def _no_paint(sec: dict, chapel: List[dict]) -> set:
+    """규칙상 안 되거나 피할 칸: 19:30(늦은 교시), 주 1회 연강이면 18:00 이후 시작, 그 학년 전공필수면 채플 칸."""
+    out = {f"{d}-19:30" for d in DAYS}
+    if sec["shape"] == "ONCE_LONG":
+        out |= {f"{d}-18:00" for d in DAYS}
+    if sec.get("category") == "전공필수" and sec.get("year") is not None:
+        for ch in chapel:
+            if ch["year"] == str(sec["year"]):
+                for st in STARTS:
+                    s0 = _mins(st)
+                    if s0 < _mins(ch["end"]) and _mins(ch["start"]) < s0 + 75:
+                        out.add(f"{ch['day']}-{st}")
+    return out
+
+
+def widen_wishes(plan: dict, seed: int = WIDEN_SEED, skip: Iterable[str] = ()) -> Dict[str, str]:
+    """가상 희망 넓히기. -> {분반 id: wish_kind}. skip(--demo 분반, --blank-prof 분반)은 넓히지 않는다.
+    실제 칸은 늘 희망으로 남고, 불가 칸은 실제 칸과 겹치지 않는다. 실습실·주 1회 연강·희망 건물은 그대로."""
+    import random
+    rng = random.Random(seed)
+    sec_of = {x["section_id"]: x for x in plan["sections"]}
+    skip = set(skip)
+    kinds: Dict[str, str] = {}
+    for w in sorted(plan["wishes"], key=lambda w: w["section_id"]):
+        sid = w["section_id"]
+        r = rng.random()          # 넓히지 않는 분반도 난수를 하나 써서, skip 이 바뀌어도 다른 분반 결과가 같게
+        if sid in skip:
+            continue
+        sec = sec_of[sid]
+        actual = cells_of(sec["blocks"])
+        acc, kind = 0.0, WIDEN_SHARE[-1][0]
+        for k, share in WIDEN_SHARE:
+            acc += share
+            if r < acc:
+                kind = k
+                break
+        bad = _no_paint(sec, plan.get("chapel", [])) - set(actual)
+        days = [b["day"] for b in sec["blocks"]]
+        add = set()
+        if kind in ("adjacent", "wide_block"):
+            for b in sec["blocks"]:
+                i = STARTS.index(b["start"])
+                add |= {c for c in (_cell(b["day"], i - 1), _cell(b["day"], i + b["slots"])) if c}
+        if kind == "other_days":
+            key = tuple(sorted(days, key=DAYS.index))
+            other = OTHER_PAIR.get(key) or tuple(DAYS[(DAYS.index(d) + 1) % 5] for d in key)
+            if set(other) & set(days):
+                other = tuple(DAYS[(DAYS.index(d) + 2) % 5] for d in key)
+            for b, d in zip(sorted(sec["blocks"], key=lambda b: DAYS.index(b["day"])), other):
+                i = STARTS.index(b["start"])
+                add |= {c for c in (_cell(d, i + j) for j in range(b["slots"])) if c}
+        w["prefer"] = sorted(set(actual) | (add - bad))
+        if kind == "wide_block":
+            free_days = [d for d in DAYS if d not in days]
+            off = rng.choice(free_days) if free_days else None
+            w["block"] = sorted(c for c in ALL_CELLS if off and c.startswith(off + "-") and c not in actual)
+        kinds[sid] = kind
+    return kinds
+
+
 def section_map(plan: dict, ids: dict, db_path: str) -> dict:
     """서버 분반 id → 분반 정보. DB에 넣은 분반은 course_id·section_no, MANUAL은 "manual": true 와 칸."""
     secs = {}
@@ -441,6 +515,8 @@ def section_map(plan: dict, ids: dict, db_path: str) -> dict:
         else:
             if s["section_id"] in plan.get("demo_changed", {}):
                 e["demo_changed"] = plan["demo_changed"][s["section_id"]]
+            # 희망 넓히기 종류 (exact|adjacent|other_days|wide_block). --demo·--blank-prof 분반은 넓히지 않아 null
+            e["wish_kind"] = plan.get("wish_kinds", {}).get(s["section_id"])
             e.update(manual=False, course_id=s["course_id"], section_no=s["section_no"],
                      orig_section_no=s["orig_section_no"])
         secs[s["section_id"]] = e
@@ -494,8 +570,10 @@ def counts(con, plan: dict) -> List[Tuple[str, int]]:
 
 
 def seed(xlsx: Path, db_path: Path, map_path: Path, alias_path: Path, rooms_json: Path, fixed_json: Path,
-         year: int = 2026, semester: str = "2", demo: bool = False, blank_prof: Optional[str] = None) -> dict:
-    """blank_prof: None = 끔, "" = 자동으로 고름, 가명 = 그 교수. --demo 다음에 적용한다."""
+         year: int = 2026, semester: str = "2", demo: bool = False, blank_prof: Optional[str] = None,
+         narrow: bool = False) -> dict:
+    """blank_prof: None = 끔, "" = 자동으로 고름, 가명 = 그 교수. --demo 다음에 적용한다.
+    narrow: True 면 희망을 넓히지 않는다(실제 칸만, 예전과 같음). 넓히기는 --demo·--blank-prof 다음."""
     rows = read_excel(xlsx)
     old = json.loads(alias_path.read_text(encoding="utf-8")) if alias_path.exists() else {}
     alias = make_aliases(rows, old)
@@ -507,6 +585,9 @@ def seed(xlsx: Path, db_path: Path, map_path: Path, alias_path: Path, rooms_json
     if blank_prof is not None:
         who = pick_blank_prof(plan, blank_prof or None)
         plan["blank_prof"] = dict(professor=who, sections=apply_blank_prof(plan, who))
+    skip = set(plan["demo_changed"]) | set((plan["blank_prof"] or {}).get("sections", []))
+    plan["wish_kinds"] = ({w["section_id"]: "exact" for w in plan["wishes"] if w["section_id"] not in skip}
+                          if narrow else widen_wishes(plan, skip=skip))
     if db_path.exists():
         db_path.unlink()
     con = sqlite3.connect(db_path)
@@ -524,6 +605,7 @@ def seed(xlsx: Path, db_path: Path, map_path: Path, alias_path: Path, rooms_json
     manual = Counter(s["manual_reason"] for s in plan["sections"] if s["shape"] == "MANUAL")
     return dict(counts=table, real_name_hits=hits, manual_reasons=manual, term_id=ids["term_id"],
                 demo_changed=plan["demo_changed"], blank_prof=plan["blank_prof"],
+                wish_kinds=Counter(plan["wish_kinds"].values()),
                 rounded=sum(1 for s in plan["sections"] if s["enrollment_orig"] is not None
                             and s["enrollment_orig"] != round5(s["enrollment_orig"])),
                 over_capacity=over_capacity(plan),
@@ -548,11 +630,12 @@ def main() -> None:
     ap.add_argument("--year", type=int, default=2026)
     ap.add_argument("--semester", default="2")
     ap.add_argument("--demo", action="store_true", help="시연용: 일부 분반의 가상 희망을 서로 겹치게 (기본 꺼짐)")
+    ap.add_argument("--narrow", action="store_true", help="희망을 넓히지 않고 실제 수업 칸만 (예전 시드)")
     ap.add_argument("--blank-prof", nargs="?", const="", default=None, metavar="가명",
                     help="희망 수집 시연용: 교수 한 명의 희망을 비워 둠. 값 없이 주면 자동 선택 (기본 꺼짐)")
     a = ap.parse_args()
     out = seed(a.xlsx, a.db, a.map, a.alias, a.rooms, a.fixed, a.year, a.semester, demo=a.demo,
-               blank_prof=a.blank_prof)
+               blank_prof=a.blank_prof, narrow=a.narrow)
     print(f"DB: {a.db}  (term {out['term_id']}, round {out['round_id']})")
     for k, v in out["counts"]:
         print(f"{k:<24}{v}")
@@ -564,6 +647,9 @@ def main() -> None:
     print(f"수강 인원 5명 단위 반올림으로 바뀐 분반: {out['rounded']}개 (원래 값은 대응표 enrollment_orig)")
     if out["over_capacity"]:
         print(f"  주의: 반올림한 인원이 엑셀 강의실 정원보다 많은 분반 {len(out['over_capacity'])}개: {out['over_capacity']}")
+    print("희망 넓히기" + (" (--narrow: 실제 칸만)" if a.narrow else "") + ": "
+          + ", ".join(f"{k} {out['wish_kinds'].get(k, 0)}" for k, _ in WIDEN_SHARE)
+          + " (--demo·--blank-prof 분반은 넓히지 않음)")
     if out["blank_prof"]:
         bp = out["blank_prof"]
         print(f"희망 비운 교수: {bp['professor']} ({', '.join(bp['sections'])})")
